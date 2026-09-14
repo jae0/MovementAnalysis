@@ -1,0 +1,30 @@
+name = "MovementAnalysis"
+uuid = "418fd3b6-71cc-4fb5-aa96-19c2d8994255"
+authors = ["Jae S. Choi <choi.jae.seok@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
+CoordRefSystems = "b46f11dc-f210-4604-bfba-323c1ec968cb"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
+DuckDB = "d2f5444f-75bc-4fdf-ac35-56f514c445e1"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+LibGEOS = "a90b1aa1-3769-5649-ba7e-abc5a9d163eb"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+NearestNeighbors = "b8a86587-4115-5ab1-83bc-aa920d37bbce"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
+Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
+Wavelets = "29a6e085-ba6d-5f35-a997-948ac2efa89a"
+WaveletsExt = "8f464e1e-25db-479f-b0a5-b7680379e03f"
+
+[compat]
+julia = "1.10"
