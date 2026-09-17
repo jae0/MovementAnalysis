@@ -1,4 +1,4 @@
-# Spectral Graph Wavelet Engine for BSTM
+# Spectral Graph Wavelet Engine for MovementAnalysis
 #
 # Provides multiresolution spatial decomposition, fast Chebyshev polynomial filtering,
 # frame synthesis signal reconstruction, spatial denoising, and multiscale basis

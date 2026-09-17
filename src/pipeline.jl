@@ -418,7 +418,7 @@ function load_movement_data(params)::NamedTuple
     verbose = params.verbose
 
     verbose && println("=" ^ 72)
-    verbose && println("  BSTM Movement Analysis Pipeline")
+    verbose && println("  MovementAnalysis Pipeline")
     verbose && println("=" ^ 72)
 
     # -- 1a. Load or simulate dataset ----------------------------------------
@@ -435,16 +435,12 @@ function load_movement_data(params)::NamedTuple
             end
         catch err
             @warn "Could not load snow crab data: $err -- using simulate."
-            bstm_data("movement")
+            generate_movement_data()
         end
     elseif Symbol(params.data_source) == :simulate
-        if hasproperty(params, :data_dir) && !isnothing(params.data_dir)
-            bstm_data("movement", data_dir=params.data_dir)
-        else
-            bstm_data("movement")
-        end
+        generate_movement_data()
     else
-        bstm_data("movement")
+        generate_movement_data()
     end
 
     mesh      = data.mesh
@@ -681,9 +677,36 @@ function fit_movement_models(loaded, params)::NamedTuple
     mode_str  = lowercase(string(params.model_mode))
     fit_tel   = mode_str in ("telemetry", "both")
     fit_joint = mode_str in ("telemetry_and_survey", "both")
+    fit_ssa   = mode_str in ("ssa", "ssa_telemetry", "both_ssa")
+    fit_ssa_joint = mode_str in ("ssa_and_survey", "joint_ssa", "both_ssa")
     rng       = MersenneTwister(params.seed)
     models    = Dict{Symbol, Any}()
     chains    = Dict{Symbol, Any}()
+
+    # -- Continuous-Time SSA Telemetry Model ---------------------------------
+    if fit_ssa
+        verbose && println("\n[Phase 2] Fitting Continuous-Time SSA Telemetry model...")
+        verbose && println(
+            "  recapture ~ Categorical(exp(Q_g * dt)[release, :])"
+        )
+        obs_df     = loaded.obs_df
+        releases   = Int.(obs_df.release)
+        recaptures = Int.(obs_df.recapture)
+        dts        = Float64.(obs_df.k)
+        groups     = hasproperty(obs_df, :group) ?
+                     Int.(obs_df.group) : ones(Int, length(releases))
+        G          = isempty(groups) ? 1 : maximum(groups)
+
+        m_ssa = ssa_telemetry_turing_model(
+            releases, recaptures, dts, groups,
+            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+        )
+        models[:ssa_telemetry] = m_ssa
+        verbose && println("  Sampling $(params.n_samples) draws...")
+        chn_ssa = sample(rng, m_ssa, MH(), params.n_samples; progress = false)
+        chains[:ssa_telemetry] = chn_ssa
+        verbose && println("  SSA telemetry model complete.")
+    end
 
     # -- Pure Telemetry Model ------------------------------------------------
     if fit_tel
@@ -775,9 +798,17 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
     verbose = params.verbose
     chains  = fitted.chains
 
-    active_chain = haskey(chains, :telemetry) ?
-                   chains[:telemetry] :
-                   chains[:telemetry_and_survey]
+    active_chain = if haskey(chains, :ssa_telemetry)
+        chains[:ssa_telemetry]
+    elseif haskey(chains, :ssa_and_survey)
+        chains[:ssa_and_survey]
+    elseif haskey(chains, :telemetry)
+        chains[:telemetry]
+    elseif haskey(chains, :telemetry_and_survey)
+        chains[:telemetry_and_survey]
+    else
+        first(values(chains))
+    end
 
     # Build integer-keyed group name lookup from the loaded group_map
     grp_name_lookup = Dict{Int, String}()
@@ -924,8 +955,10 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
             v_draws = vec(Array(active_chain[first(v_matches)]))
             d_draws = vec(Array(active_chain[first(d_matches)]))
             for s in 1:min(n_draws, length(v_draws), length(d_draws))
-                tot = Float64(v_draws[s]) + Float64(d_draws[s]) + 1e-6
-                alpha_samples[s, g] = clamp(Float64(v_draws[s]) / tot, 0.0, 1.0)
+                v_val = v_draws[s] isa AbstractArray ? v_draws[s][g] : v_draws[s]
+                d_val = d_draws[s] isa AbstractArray ? d_draws[s][g] : d_draws[s]
+                tot = Float64(v_val) + Float64(d_val) + 1e-6
+                alpha_samples[s, g] = clamp(Float64(v_val) / tot, 0.0, 1.0)
                 rho_samples[s, g]   = clamp(1.0 / (1.0 + tot), 0.01, 0.95)
             end
         else
@@ -1444,7 +1477,7 @@ end
 # export_movement_summary_csv) and standalone SVG/HTML dashboard exporters
 # (export_movement_posterior_dashboard, export_movement_flow_dashboard,
 # export_movement_summary_dashboard) have been consolidated into src/movement.jl
-# and are exported by the core bstm module.
+# and are exported by the core MovementAnalysis module.
 
 
 """
@@ -1874,7 +1907,7 @@ end
 """
     run_movement_analysis(params = movement_parameters_default()) -> NamedTuple
 
-Executes the complete BSTM movement analysis pipeline. All six phases
+Executes the complete MovementAnalysis movement analysis pipeline. All six phases
 are called in sequence:
 
 1. `load_movement_data`                 -- data ingestion & depth barriers
@@ -1908,6 +1941,25 @@ function run_movement_analysis(
     loaded      = load_movement_data(params)
     fitted      = fit_movement_models(loaded, params)
     kernels     = extract_transition_kernels(loaded, fitted, params)
+    
+    agent_trajectories = nothing
+    if params.model_mode == "agent"
+        if params.verbose
+            println("\n[Phase 2b] Simulating Agent-Based Movement Alternative Model...")
+        end
+        n_sim_agents = min(100, nrow(loaded.obs_df))
+        # Use observed release sites to start agents
+        start_nodes = loaded.obs_df.release_unit[1:n_sim_agents]
+        groups = [loaded.group_map[g] for g in loaded.obs_df.group[1:n_sim_agents]]
+        
+        agent_trajectories = simulate_agent_trajectories(
+            n_sim_agents, start_nodes, groups, kernels.P_kernel, 50; seed=params.seed
+        )
+        if params.verbose
+            println("  Simulated $(n_sim_agents) agents for 50 steps.")
+        end
+    end
+    
     path_res    = reconstruct_paths_and_diagnostics(loaded, kernels, params)
     diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
     priority    = execute_priority_analyses(loaded, fitted, kernels, params)
@@ -1931,6 +1983,7 @@ function run_movement_analysis(
         circuit            = diagnostics.circuit,
         wavelets           = diagnostics.wavelets,
         priority_analyses  = priority,
+        agent_trajectories = agent_trajectories,
         movement_stats     = !isnothing(dashboards) && hasproperty(dashboards, :movement_stats) ?
                              dashboards.movement_stats : nothing,
         phenology          = !isnothing(dashboards) && hasproperty(dashboards, :phenology) ?

@@ -657,6 +657,74 @@ function map_point_to_units(
     return out
 end
 
+
+"""
+    map_to_units(
+        xs::AbstractVector,
+        ys::AbstractVector,
+        centroids::AbstractVector
+    ) -> Vector{Int}
+
+Maps 2D observation coordinates `(xs, ys)` to the nearest spatial unit index among
+`centroids`.
+
+# Mathematical Formulation
+For each point \$(x_i, y_i)\$:
+```math
+u(x_i, y_i) = \\arg\\min_{s \\in \\{1, \\dots, S\\}} \\| (x_i, y_i) - \\mathbf{c}_s \\|_2
+```
+
+# Arguments
+- `xs::AbstractVector`: Vector of X or longitude coordinates.
+- `ys::AbstractVector`: Vector of Y or latitude coordinates.
+- `centroids::AbstractVector`: Vector of centroid coordinates `(c_x, c_y)`.
+
+# Returns
+- `Vector{Int}`: Indices of the nearest spatial units (1-indexed).
+"""
+function map_to_units(
+    xs::AbstractVector,
+    ys::AbstractVector,
+    centroids::AbstractVector
+)::Vector{Int}
+    isempty(xs) && return Int[]
+    isempty(centroids) && error("Cannot map coordinates to an empty centroids collection.")
+
+    if length(centroids) >= 16 && length(xs) >= 4
+        c_mat = Matrix{Float64}(undef, 2, length(centroids))
+        for (i, c) in enumerate(centroids)
+            c_mat[1, i] = Float64(c[1])
+            c_mat[2, i] = Float64(c[2])
+        end
+        tree = KDTree(c_mat)
+
+        q_mat = Matrix{Float64}(undef, 2, length(xs))
+        for (i, (x, y)) in enumerate(zip(xs, ys))
+            q_mat[1, i] = Float64(x)
+            q_mat[2, i] = Float64(y)
+        end
+        idxs, _ = knn(tree, q_mat, 1)
+        return [idx[1] for idx in idxs]
+    else
+        out = Vector{Int}(undef, length(xs))
+        for (i, (x, y)) in enumerate(zip(xs, ys))
+            xf = Float64(x)
+            yf = Float64(y)
+            best_idx = 1
+            best_dist = Inf
+            for (s, c) in enumerate(centroids)
+                d = hypot(xf - Float64(c[1]), yf - Float64(c[2]))
+                if d < best_dist
+                    best_dist = d
+                    best_idx = s
+                end
+            end
+            out[i] = best_idx
+        end
+        return out
+    end
+end
+
 # --- Bathymetry & Hydrodynamic Dataset Extraction ---
 """
     load_open_bathymetry(;
@@ -1280,6 +1348,337 @@ function extract_hydrodynamic_dataset(
     )
 end
 
+
+"""
+    get_polygon_area(poly_coords::AbstractVector) -> Float64
+
+Calculates the 2D planar surface area of a polygon using the Shoelace formula
+(Gauss's area formula). Closed coordinates (where the first point equals the last)
+are automatically handled.
+
+# Mathematical Formulation
+For ordered vertices \$(x_i, y_i), i=1,\\dots,n\$:
+```math
+A = \\frac{1}{2} \\left| \\sum_{i=1}^{n} (x_i y_{i+1} - x_{i+1} y_i) \\right|
+```
+
+# Arguments
+- `poly_coords::AbstractVector`: Sequence of `(x, y)` coordinate vertices.
+
+# Returns
+- `Float64`: Computed non-negative planar area.
+"""
+function get_polygon_area(poly_coords::AbstractVector)::Float64
+    valid_pts = Tuple{Float64, Float64}[]
+    for p in poly_coords
+        x = Float64(p[1])
+        y = Float64(p[2])
+        if !isnan(x) && !isinf(x) && !isnan(y) && !isinf(y)
+            push!(valid_pts, (x, y))
+        end
+    end
+
+    if length(valid_pts) > 1 && valid_pts[1] == valid_pts[end]
+        valid_pts = valid_pts[1:(end - 1)]
+    end
+
+    length(valid_pts) < 3 && return 0.0
+
+    n = length(valid_pts)
+    area = 0.0
+    for i in 1:n
+        j = (i == n) ? 1 : (i + 1)
+        area += valid_pts[i][1] * valid_pts[j][2] - valid_pts[j][1] * valid_pts[i][2]
+    end
+    return 0.5 * abs(area)
+end
+
+get_polygon_area(s_x::AbstractVector, s_y::AbstractVector) =
+    get_polygon_area(tuple.(s_x, s_y))
+
+
+"""
+    compute_network_transfer_matrix(
+        au_src::NamedTuple,
+        au_dest::NamedTuple;
+        method::Symbol = :area_weighted,
+        kwargs...
+    ) -> SparseMatrixCSC{Float64, Int}
+
+Computes the spatial interpolation / resharding transfer matrix
+\$\\mathbf{P} \\in \\mathbb{R}^{n_{\\text{dest}} \\times n_{\\text{src}}}\$
+between two areal unit spatial partitions `au_src` and `au_dest`.
+
+# Mathematical Formulation
+When polygons are available and `method = :area_weighted`, transfer weights
+evaluate the fractional area overlap via geometric intersection:
+```math
+P_{j, i} = \\frac{\\text{Area}(B_j \\cap A_i)}{\\text{Area}(B_j)}, \\quad \\sum_{i=1}^{n_{\\text{src}}} P_{j, i} = 1
+```
+where \$A_i\$ is source cell \$i\$ and \$B_j\$ is destination cell \$j\$.
+For destination units with no overlapping source geometry or when geometries
+are absent, weights fall back to \$k\$-nearest inverse-distance weighting (IDW):
+```math
+w_{j, i} = \\frac{d(c_j, c_i)^{-2}}{\\sum_{k} d(c_j, c_k)^{-2}}
+```
+
+# Arguments
+- `au_src::NamedTuple`: Source mesh partition containing `:centroids`
+  (or `:centroids_lonlat` / `:centroids_km`) and optional `:polygons`
+  (`:polygons_lonlat` / `:polygons_km`).
+- `au_dest::NamedTuple`: Destination mesh partition.
+- `method::Symbol`: Transfer weighting method (`:area_weighted` or `:idw`).
+
+# Returns
+- `SparseMatrixCSC{Float64, Int}`: Row-stochastic linear transfer matrix.
+"""
+function compute_network_transfer_matrix(
+    au_src::NamedTuple,
+    au_dest::NamedTuple;
+    method::Symbol = :area_weighted,
+    kwargs...
+)
+    _extract_cents(au) = if hasproperty(au, :centroids) && !isnothing(au.centroids)
+        au.centroids
+    elseif hasproperty(au, :centroids_lonlat) && !isnothing(au.centroids_lonlat)
+        au.centroids_lonlat
+    elseif hasproperty(au, :centroids_km) && !isnothing(au.centroids_km)
+        au.centroids_km
+    else
+        error("Areal unit partition has no centroids field.")
+    end
+
+    src_cents = _extract_cents(au_src)
+    dest_cents = _extract_cents(au_dest)
+    n_src = length(src_cents)
+    n_dest = length(dest_cents)
+
+    if n_src == n_dest && src_cents == dest_cents
+        return spdiagm(0 => ones(Float64, n_dest))
+    end
+
+    # Determine coordinate scale (geographic degrees vs projected planar km)
+    is_geo_coords(pts) = !isempty(pts) &&
+        all(abs(c[1]) <= 180.5 && abs(c[2]) <= 90.5 for c in pts)
+    src_is_geo = is_geo_coords(src_cents)
+
+    resolve_au_geom(au, ref_geo) = begin
+        if ref_geo && hasproperty(au, :polygons_lonlat) && !isempty(au.polygons_lonlat)
+            cents = hasproperty(au, :centroids_lonlat) ?
+                au.centroids_lonlat : _extract_cents(au)
+            return (polygons = au.polygons_lonlat, centroids = cents)
+        elseif !ref_geo && hasproperty(au, :polygons_km) && !isempty(au.polygons_km)
+            cents = hasproperty(au, :centroids_km) ?
+                au.centroids_km : _extract_cents(au)
+            return (polygons = au.polygons_km, centroids = cents)
+        elseif hasproperty(au, :polygons) && !isempty(au.polygons)
+            cents = _extract_cents(au)
+            return (polygons = au.polygons, centroids = cents)
+        else
+            return (
+                polygons = Vector{Vector{Tuple{Float64, Float64}}}(),
+                centroids = _extract_cents(au)
+            )
+        end
+    end
+
+    geom_src = resolve_au_geom(au_src, src_is_geo)
+    geom_dest = resolve_au_geom(au_dest, src_is_geo)
+
+    has_polys = !isempty(geom_src.polygons) && !isempty(geom_dest.polygons) &&
+        length(geom_src.polygons) == n_src && length(geom_dest.polygons) == n_dest
+
+    if has_polys && method != :centroid_idw && method != :idw
+        try
+            function _to_lg_valid_polygon(poly_coords)
+                if isempty(poly_coords) || length(poly_coords) < 3
+                    return nothing
+                end
+                pts = [[Float64(pt[1]), Float64(pt[2])]
+                       for pt in poly_coords if !isnan(pt[1]) && !isnan(pt[2])]
+                length(pts) < 3 && return nothing
+                if pts[1] != pts[end]
+                    push!(pts, pts[1])
+                end
+                length(pts) < 4 && return nothing
+                try
+                    lg_p = LibGEOS.Polygon([pts])
+                    if !LibGEOS.isValid(lg_p)
+                        lg_p = LibGEOS.buffer(lg_p, 0.0)
+                    end
+                    return lg_p
+                catch
+                    return nothing
+                end
+            end
+
+            src_lg_polys = [_to_lg_valid_polygon(p) for p in geom_src.polygons]
+            dest_lg_polys = [_to_lg_valid_polygon(p) for p in geom_dest.polygons]
+
+            valid_src_polys = LibGEOS.Polygon[]
+            poly_to_src_idx = IdDict{LibGEOS.Polygon, Int}()
+            for i in 1:n_src
+                p = src_lg_polys[i]
+                if !isnothing(p)
+                    push!(valid_src_polys, p)
+                    poly_to_src_idx[p] = i
+                end
+            end
+
+            tree = LibGEOS.STRtree(valid_src_polys)
+
+            src_coords_mat = hcat([[Float64(c[1]), Float64(c[2])]
+                                   for c in geom_src.centroids]...)
+            src_kd = KDTree(src_coords_mat)
+
+            I_idx = Int[]
+            J_idx = Int[]
+            V_val = Float64[]
+
+            all_valid = true
+            for j in 1:n_dest
+                dest_p = dest_lg_polys[j]
+                if dest_p === nothing
+                    all_valid = false
+                    break
+                end
+
+                dest_area = LibGEOS.area(dest_p)
+                if dest_area <= 1e-9
+                    dest_area = get_polygon_area(geom_dest.polygons[j])
+                end
+                if dest_area <= 1e-9
+                    c_j = [Float64(geom_dest.centroids[j][1]),
+                           Float64(geom_dest.centroids[j][2])]
+                    nearest_i = knn(src_kd, c_j, 1)[1][1]
+                    push!(I_idx, j)
+                    push!(J_idx, nearest_i)
+                    push!(V_val, 1.0)
+                    continue
+                end
+
+                candidates = LibGEOS.query(tree, dest_p)
+                row_matches = Tuple{Int, Float64}[]
+                total_overlap = 0.0
+
+                for src_p in candidates
+                    i = poly_to_src_idx[src_p]
+                    if LibGEOS.intersects(dest_p, src_p)
+                        inter_geom = LibGEOS.intersection(dest_p, src_p)
+                        if !LibGEOS.isEmpty(inter_geom)
+                            inter_area = LibGEOS.area(inter_geom)
+                            if inter_area > 1e-9
+                                w = inter_area / dest_area
+                                push!(row_matches, (i, w))
+                                total_overlap += w
+                            end
+                        end
+                    end
+                end
+
+                if total_overlap > 1e-6
+                    for (i, w) in row_matches
+                        push!(I_idx, j)
+                        push!(J_idx, i)
+                        push!(V_val, w / total_overlap)
+                    end
+                else
+                    c_j = [Float64(geom_dest.centroids[j][1]),
+                           Float64(geom_dest.centroids[j][2])]
+                    nearest_i = knn(src_kd, c_j, 1)[1][1]
+                    push!(I_idx, j)
+                    push!(J_idx, nearest_i)
+                    push!(V_val, 1.0)
+                end
+            end
+
+            if all_valid
+                P = sparse(I_idx, J_idx, V_val, n_dest, n_src)
+                dropzeros!(P)
+                return P
+            end
+        catch err
+            # Fall back to centroid IDW if geometric intersection fails
+        end
+    end
+
+    # 2. Centroid Inverse Distance Weighting (k-d Tree Fallback)
+    src_coords = hcat([[Float64(c[1]), Float64(c[2])]
+                       for c in geom_src.centroids]...)
+    dest_coords = hcat([[Float64(c[1]), Float64(c[2])]
+                        for c in geom_dest.centroids]...)
+
+    kdtree = KDTree(src_coords)
+    k_nn = min(4, n_src)
+    idxs, dists = knn(kdtree, dest_coords, k_nn, true)
+
+    I_idx = Int[]
+    J_idx = Int[]
+    V_val = Float64[]
+
+    for j in 1:n_dest
+        cur_idxs = idxs[j]
+        cur_dists = dists[j]
+
+        if cur_dists[1] <= 1e-6
+            push!(I_idx, j)
+            push!(J_idx, cur_idxs[1])
+            push!(V_val, 1.0)
+        else
+            weights = 1.0 ./ (cur_dists .^ 2)
+            w_sum = sum(weights)
+            for (idx, w) in zip(cur_idxs, weights)
+                push!(I_idx, j)
+                push!(J_idx, idx)
+                push!(V_val, w / w_sum)
+            end
+        end
+    end
+
+    P = sparse(I_idx, J_idx, V_val, n_dest, n_src)
+    dropzeros!(P)
+    return P
+end
+
+
+"""
+    summarize_sample_matrix(
+        samples::AbstractMatrix{<:Real};
+        alpha::Real = 0.05
+    ) -> NamedTuple
+
+Computes posterior empirical summary statistics (mean, median, std, lower/upper quantiles)
+across Monte Carlo sample columns for each spatial unit row.
+
+# Arguments
+- `samples::AbstractMatrix{<:Real}`: Matrix of shape \$(N_{\\text{units}} \\times N_{\\text{draws}})\$.
+- `alpha::Real`: Significance level for \$(1 - \\alpha)\$ credible interval (default: 0.05).
+
+# Returns
+- `NamedTuple`: Fields `:mean`, `:median`, `:std`, `:lower`, `:upper`, `:samples`.
+"""
+function summarize_sample_matrix(
+    samples::AbstractMatrix{<:Real};
+    alpha::Real = 0.05
+)::NamedTuple
+    n_units, n_samples = size(samples)
+    means = vec(Statistics.mean(samples, dims = 2))
+    stds = vec(Statistics.std(samples, dims = 2))
+    medians = [quantile(samples[i, :], 0.5) for i in 1:n_units]
+    lowers = [quantile(samples[i, :], alpha / 2.0) for i in 1:n_units]
+    uppers = [quantile(samples[i, :], 1.0 - alpha / 2.0) for i in 1:n_units]
+
+    return (
+        mean = means,
+        median = medians,
+        std = stds,
+        lower = lowers,
+        upper = uppers,
+        samples = samples
+    )
+end
+
+
 # --- Spatial Field Resharding ---
 function reshard_spatial_field(
     P::AbstractMatrix{<:Real},
@@ -1458,7 +1857,7 @@ function aggregate_telemetry_time(
         push!(spec, :is_dead => (x -> any(skipmissing(x))) => :is_dead)
 
     agg = DataFrames.combine(groupby(df, [:tagid, :time_bucket]), spec...)
-    agg[!, :time] = [_to_decimal_year(d) for d in agg.timestamp]
+    agg[!, :time] = [_date_to_decimal_year(d) for d in agg.timestamp]
     sort!(agg, [:tagid, :time])
 
     valid = Set{String}()

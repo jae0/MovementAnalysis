@@ -28,9 +28,12 @@ Data & Model:
       --simulate             Shorthand for --data-source=simulate.
       --snowcrab             Shorthand: snowcrab preset + all diagnostics.
   -m, --model-mode <mode>   'telemetry' (default), 'telemetry_and_survey',
-                             or 'both'.
+                             'ssa', 'ssa_and_survey', or 'both'.
       --telemetry            Shorthand for --model-mode=telemetry.
       --joint, --survey      Shorthand for telemetry_and_survey.
+      --ssa                  Shorthand for continuous-time SSA model.
+      --ssa-joint            Shorthand for joint survey + SSA model.
+      --agent                Shorthand for agent-based alternative model.
       --both                 Shorthand for --model-mode=both.
 
 Domain Resharding:
@@ -137,6 +140,12 @@ function parse_movement_cli_args(args = ARGS)::NamedTuple
             opts[:model_mode] = "telemetry"
         elseif key in ("--joint", "--survey")
             opts[:model_mode] = "telemetry_and_survey"
+        elseif key == "--ssa"
+            opts[:model_mode] = "ssa"
+        elseif key in ("--ssa-joint", "--joint-ssa")
+            opts[:model_mode] = "ssa_and_survey"
+        elseif key == "--agent"
+            opts[:model_mode] = "agent"
         elseif key == "--both"
             opts[:model_mode] = "both"
         elseif key in ("--reshard-hex", "--reshard", "--hex")

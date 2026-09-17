@@ -1,4 +1,4 @@
-# Circuit Theory & Resistance Distance Engine for BSTM
+# Circuit Theory & Resistance Distance Engine for MovementAnalysis
 #
 # Provides all-paths ecological connectivity, migratory current density mapping,
 # electrical circuit network modeling, and barrier-aware Gaussian Process spatial

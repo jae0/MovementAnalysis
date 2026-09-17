@@ -61,7 +61,7 @@ using DynamicPPL
     end
 
     @testset "Explicit Turing Telemetry Model" begin
-        # Test direct Turing model fitting without @bstm
+        # Test direct Turing model fitting
         W = spzeros(4, 4)
         W[1, 2] = 1.0; W[2, 1] = 1.0
         W[2, 3] = 1.0; W[3, 2] = 1.0
@@ -144,5 +144,7 @@ using DynamicPPL
         @test map_obj isa LeafletMap
         @test occursin("Test Title", map_obj.title)
     end
+
+    include("test_ssa_movement.jl")
 
 end

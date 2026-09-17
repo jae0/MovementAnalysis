@@ -36,12 +36,14 @@ using Turing
 
 # Source modules in logical dependency order
 include("spatial_utils.jl")
+include("ssa_movement.jl")
 include("turing_models.jl")
 include("movement.jl")
 include("circuit.jl")
 include("graph_wavelets.jl")
 include("dashboards.jl")
 include("pipeline.jl")
+include("agent_movement.jl")
 
 # -----------------------------------------------------------------------------
 # Public API Exports
@@ -51,14 +53,32 @@ export
     # Spatial Mesh & Partitioning Utilities
     build_hex_mesh_planar,
     map_point_to_units,
+    map_to_units,
     assign_spatial_units,
     load_open_bathymetry,
     extract_hydrodynamic_dataset,
+    compute_network_transfer_matrix,
+    get_polygon_area,
+    summarize_sample_matrix,
     reshard_spatial_field,
+
+    # Continuous-Time SSA Movement Models (Master Equation)
+    SSAMovementParams,
+    calculate_ssa_utility,
+    construct_ssa_generator,
+    calculate_ssa_transition_matrix,
+    simulate_gillespie_trajectories,
+    generate_ssa_movement_data,
 
     # Probabilistic Turing Models
     pure_telemetry_turing_model,
     joint_survey_telemetry_turing_model,
+    ssa_telemetry_turing_model,
+    joint_survey_ssa_telemetry_turing_model,
+
+    # Agent-Based Model Alternative
+    CrabAgent,
+    simulate_agent_trajectories,
 
     # Telemetry & Mark-Recapture Data Structures
     TelemetryData,

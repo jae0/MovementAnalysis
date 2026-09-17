@@ -1,16 +1,11 @@
-# BSTM Movement Analysis: Pipeline Guide & Technical Reference
+# Movement Analysis: Pipeline Guide & Technical Reference
 
-This document provides a comprehensive technical guide to the Bayesian
-Spatio-Temporal Movement (BSTM) mark-recapture analysis pipeline implemented in
-`movement_analysis.jl` and `src/movement.jl`. It consolidates the workflow
-architecture, priority post-processing analyses, advanced multi-scale routing,
-mathematical formulations, configuration parameters, and CLI usage.
-
+This document provides a comprehensive technical guide to the Movement mark-recapture analysis pipeline.
 ---
 
 ## 1. Overview & Architecture
 
-The BSTM movement pipeline reconstructs individual animal trajectories,
+The movement pipeline reconstructs individual animal trajectories,
 evaluates population-level spatial connectivity, quantifies multi-scale
 migratory corridors, and propagates Bayesian posterior parameter uncertainty.
 
@@ -22,7 +17,7 @@ The framework is organized into six cohesive phases:
    │      - Hexagonal domain resharding & depth barrier masking
    │      - Optional adaptive multiresolution domain generation
    ▼
-[Phase 2] Bayesian Model Fitting (@bstm)
+[Phase 2] Bayesian Model Fitting  
    │      - Categorical pure-telemetry Markov likelihood
    │      - Joint Negative Binomial survey density & telemetry model
    ▼
@@ -71,20 +66,24 @@ Function: `load_movement_data(params)`
 ### Phase 2: Convex Bayesian Model Fitting
 Function: `fit_movement_models(loaded, params)`
 
-Fits convex movement parameters via Turing.jl and `@bstm()`:
-- **Telemetry Likelihood**:
+Fits convex movement parameters via Turing.jl :
+- **Telemetry Likelihood (Discrete-Time)**:
   $$\log \mathcal{L}(\mathbf{y}_{1:T} \mid \theta) =
-    \sum_{t=1}^{T-1} \log P_{y_t, y_{t+1}}(\theta)$$
+    \sum_{t=1}^{T-1} \log T_{y_t, y_{t+1}}(\theta)$$
   where $\theta = (\alpha_g, \rho_g, \gamma_g)$ denote per-group advection
   weight, site fidelity (residence probability), and habitat gradient responsiveness.
+- **Continuous-Time SSA Telemetry Likelihood**:
+  Alternatively, fits physical parameters $(v_g, D_g, \gamma_g)$ governing the spatial Markov jump process. The time evolution of the state probability distribution is described by the Master Equation (Nordsieck, Lamb & Uhlenbeck, 1940), also known as the Pauli Master Equation or M-equation, which is an equivalent linear form of the Chapman-Kolmogorov equation for Markov processes. The continuous-time Stochastic Simulation Algorithm (SSA) evaluates the transition probability matrix $T$ over continuous elapsed time intervals $\Delta t$:
+  $$T(\Delta t) = \exp(Q_g \Delta t)$$
+  where $Q_g$ is the infinitesimal advection-diffusion generator.
 - **Joint Density-Movement Model**: Integrates scientific survey counts $C_s$ via
-  Negative Binomial observation likelihood coupled to habitat suitability $H_s$.
+  Negative Binomial observation likelihood coupled to habitat suitability $H_s$. Can be used with both discrete-time and SSA transition kernels.
 
 ### Phase 3: Transition Kernel Construction
 Function: `extract_transition_kernels(loaded, fitted, params)`
 
-Constructs group-specific stochastic transition matrices $P_g \in \mathbb{R}^{S \times S}$:
-$$P_g = (1 - \rho_g) \left[ (1 - \alpha_g) T_{\text{diff}} +
+Constructs group-specific stochastic transition matrices $T_g \in \mathbb{R}^{S \times S}$:
+$$T_g = (1 - \rho_g) \left[ (1 - \alpha_g) T_{\text{diff}} +
     \alpha_g A_g(\eta) \right] + \rho_g I$$
 where:
 - $T_{\text{diff}, ij} = W_{ij} / \sum_k W_{ik}$ is isotropic diffusion over adjacency $W$.
@@ -102,7 +101,7 @@ Function: `reconstruct_paths_and_diagnostics(loaded, kernels, params)`
 - **Markov Bridge Corridors**: Computes space-time transit probability fields between
   release $u$ and recapture $v$ across $k$ discrete steps:
   $$\mathbb{P}(X_\tau = j \mid X_0 = u, X_k = v) =
-    \frac{[P^\tau]_{uj} [P^{k-\tau}]_{jv}}{[P^k]_{uv}}$$
+    \frac{[T^\tau]_{uj} [T^{k-\tau}]_{jv}}{[T^k]_{uv}}$$
 - **Domain-Wide Bottleneck Index**: Quantifies geographic migration pinch-points:
   $$B(u) = \frac{C_{\text{domain}}(u)}{\max(1, \deg_{\text{marine}}(u))}$$
   where $C_{\text{domain}}(u)$ aggregates transit density across all mark-recapture
@@ -156,7 +155,7 @@ an ensemble of trajectories for each individual animal.
 #### Algorithm
 1. Extract MCMC posterior parameter samples $(\alpha^{(s)}, \rho^{(s)}, \gamma^{(s)})$.
 2. For each posterior draw $s \in \{1, \dots, S_d\}$:
-   - Reconstruct draw-specific transition kernel $P^{(s)}$.
+   - Reconstruct draw-specific transition kernel $T^{(s)}$.
    - Evaluate trajectory from release to recapture via A* routing.
    - Record path length and node visitation indicators.
 3. Compute empirical quantiles (2.5%, 50%, 97.5%) across draws.
@@ -181,7 +180,7 @@ conditioning on the posterior mean parameter point estimate.
 
 #### Mathematical Formulation
 For each draw $s$:
-$$P^{(s)} =
+$$T^{(s)} =
     \text{construct_stochastic_transition_kernel}(W, H;
     \alpha^{(s)}, \rho^{(s)}, \gamma^{(s)})$$
 $$\bar{\Pi}_i = \frac{1}{S_d} \sum_{s=1}^{S_d} \Pi_i^{(s)}$$
@@ -203,7 +202,7 @@ stochastic connectivity matrix between biologically distinct spatial regions
 
 #### Mathematical Formulation
 Given region assignments $r, s \in \{1, \dots, N_{\text{regions}}\}$:
-$$\text{Connectivity}[r, s] = \frac{1}{|r| \cdot |s|} \sum_{u \in r} \sum_{v \in s} P[u, v]$$
+$$\text{Connectivity}[r, s] = \frac{1}{|r| \cdot |s|} \sum_{u \in r} \sum_{v \in s} T[u, v]$$
 Rows are normalized to enforce row-stochastic conservation: $\sum_s \text{Connectivity}[r, s] = 1$.
 
 Posterior uncertainty is propagated across MCMC draws to derive 95% credible intervals
@@ -247,7 +246,23 @@ draws.
 
 ---
 
-## 4. Advanced Movement Enhancements
+## 4. Agent-Based Alternative Model (ABM)
+
+Function: `simulate_agent_trajectories(n_agents, start_nodes, groups, transition_kernels, n_steps)`
+
+### Purpose & Integration
+The Agent-Based Model provides a simplified, mechanistic alternative to the Eulerian (grid-based) Master Equation formulations. It simulates individual discrete animals undergoing pure advective (directed by habitat gradients) and diffusive (random walk) movement across the spatial hexagon mesh, without demographic growth processes. 
+
+The ABM serves a dual purpose in the pipeline:
+1. **Forward Generative Simulation:** It generates synthetic telemetry tracking datasets exhibiting emergent spatial behaviors from bottom-up rules. This is useful for building baseline simulated datasets (`--simulate`).
+2. **Approximate Bayesian Computation (ABC) Inference:** Because the ABM maps physical movement parameters $(\alpha_g, \rho_g, \gamma_g)$ directly to simulated trajectories, it acts as a forward model for likelihood-free inference via ABC. By comparing empirical telemetry data to ABM-simulated data using spatial summary statistics (e.g., mean displacement, residence time), we can fit the advection-diffusion parameters without evaluating the exact transition likelihoods.
+
+### Mathematical Rules
+At each discrete step, an agent located at node $i$ evaluates the transition kernel $T_{ij}$ associated with its group $g$. The agent then probabilistically jumps to a neighboring node $j$ sampled from the Categorical distribution defined by the $i$-th row of $T_g$.
+
+---
+
+## 5. Advanced Movement Enhancements
 
 ### 1. Adaptive Multiresolution Hexagonal Mesh Routing
 Functions:
@@ -272,7 +287,7 @@ Functions:
 
 Accommodates non-stationary environmental dynamics (e.g. seasonal warming, shifting
 thermoclines, dynamic chlorophyll blooms) by constructing an epoch-indexed sequence
-of transition matrices $[P^{(1)}, \dots, P^{(T)}]$ from an $S \times T$ habitat matrix.
+of transition matrices $[T^{(1)}, \dots, T^{(T)}]$ from an $S \times T$ habitat matrix.
 Forward-backward Markov bridges evaluate time-dependent corridor likelihoods
 $\Pi_i^{(t)} = \alpha_t(i) \beta_t(i)$.
 
@@ -284,14 +299,14 @@ Functions:
 
 Globally decodes the entire multi-stage capture-recapture history in log-space:
 $$\max_{z_{1:T}} \left[ \log \pi(z_1) +
-    \sum_{t=1}^{T-1} \log P^{(t)}(z_t, z_{t+1}) +
+    \sum_{t=1}^{T-1} \log T^{(t)}(z_t, z_{t+1}) +
     \sum_{t=1}^T \log f(y_t \mid z_t) \right]$$
 where $f(y_t \mid z_t) = \mathcal{N}(y_t; z_t, \sigma_y^2)$ is the continuous spatial
 emission density. Avoids segment-isolation artifacts and guarantees continuous pathing.
 
 ---
 
-## 5. Configuration Parameters
+## 6. Configuration Parameters
 
 Parameter NamedTuples are generated via `movement_parameters_default()` or
 `movement_parameters_snowcrab()`, and can be customized by merging overrides:
@@ -299,7 +314,7 @@ Parameter NamedTuples are generated via `movement_parameters_default()` or
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `data_source` | `Symbol` | `:simulate` | `:simulate` or `:snowcrab` empirical data |
-| `model_mode` | `String` | `"telemetry"` | `"telemetry"`, `"telemetry_and_survey"`, or `"both"` |
+| `model_mode` | `String` | `"telemetry"` | `"telemetry"`, `"telemetry_and_survey"`, `"agent"`, or `"both"` |
 | `reshard_hex` | `Bool` | `false` | Reshard domain to fine regular hexagons via LibGEOS |
 | `hex_radius_km` | `Float64` | `10.0` | Cell radius for resharded hexagons (km) |
 | `use_hydrodynamics` | `Bool` | `false` | Ingest 3D hydrodynamic velocity and bathymetry |
@@ -330,7 +345,7 @@ Parameter NamedTuples are generated via `movement_parameters_default()` or
 
 ---
 
-## 6. Command-Line Interface (CLI)
+## 7. Command-Line Interface (CLI)
 
 The pipeline can be executed directly from the terminal with modular flags:
 
@@ -363,6 +378,9 @@ julia --project=. docs/movement/movement_analysis.jl --snowcrab --adaptive-mesh 
 | | `--simulate` | `data_source = :simulate` |
 | | `--snowcrab` | Snow crab preset configuration |
 | `-m` | `--model-mode <mode>` | `model_mode = "telemetry"` or `"both"` |
+| | `--ssa` | Fits continuous-time SSA pure telemetry model |
+| | `--ssa-joint` | Fits continuous-time SSA joint survey+telemetry model |
+| | `--agent` | Runs the Agent-Based Alternative Model |
 | | `--reshard-hex`, `--hex` | `reshard_hex = true` |
 | | `--hex-radius <km>` | `hex_radius_km = Float64(km)` |
 | | `--depth-range <min,max>`| `depth_range = (min, max)` |
@@ -387,13 +405,13 @@ julia --project=. docs/movement/movement_analysis.jl --snowcrab --adaptive-mesh 
 
 ---
 
-## 7. Scripting Examples & Workflows
+## 8. Scripting Examples & Workflows
 
 ### Example 1: Basic Analysis with Default Settings
 
 ```julia
-using bstm
-include("docs/movement/movement_analysis.jl")
+
+include("src/MovementAnalysis.jl")
 
 # Run default simulated analysis pipeline
 results = run_movement_analysis()
@@ -406,8 +424,7 @@ println("Fitted residence rho:  ", results.parameters.residence)
 ### Example 2: Snow Crab with Depth Barriers & Priority Uncertainty
 
 ```julia
-using bstm
-include("docs/movement/movement_analysis.jl")
+include("src/MovementAnalysis.jl")
 
 # Configure snow crab analysis with physiological depth boundaries
 params = merge(movement_parameters_snowcrab(), (
@@ -432,8 +449,7 @@ println("Stock connectivity matrix size: ", size(pa.connectivity_matrix.connecti
 ### Example 3: Adaptive Mesh Routing & Dynamic Corridors
 
 ```julia
-using bstm
-include("docs/movement/movement_analysis.jl")
+include("src/MovementAnalysis.jl")
 
 # Configure high-resolution coastal refinement
 params = merge(movement_parameters_default(), (
@@ -450,7 +466,7 @@ results = run_movement_analysis(params)
 
 ---
 
-## 8. Output Directory Structure
+## 9. Output Directory Structure
 
 Executing the pipeline populates `output_dir` with standardized deliverables:
 
@@ -477,9 +493,9 @@ output/
 
 ---
 
-## 9. Scientific References
+## 10. Scientific References
 
-1. **BSTM Framework**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for Marine Ecology*.
+1. **MovementAnalysis**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for Marine Ecology*.
 2. **Circuit Theory in Ecology**: McRae, B. H., Dickson, B. G., Keitt, T. H., & Shah, V. B.
    (2008). Using circuit theory to model connectivity in ecology, evolution, and
    conservation. *Ecology*, 89(10), 2712–2724.

@@ -2,7 +2,7 @@
     movement.jl
 
 Advection-Diffusion-Reaction (ADR) spatiotemporal movement, spatial telemetry,
-and particle trajectory simulation engine for Bayesian Spatio-Temporal Models (BSTM).
+and particle trajectory simulation engine for the MovementAnalysis package.
 
 Version: v1.0.0
 """
@@ -241,7 +241,7 @@ function generate_ADR_simulation_bundle(
     area_method::Symbol = :cvt,
     rng::Random.AbstractRNG = Random.GLOBAL_RNG
 )
-    # 1. Generate spatial partitioning using BSTM's partitioning engine
+    # 1. Generate spatial partitioning using MovementAnalysis's partitioning engine
     s_x_init = rand(rng, 1000) .* domain_size
     s_y_init = rand(rng, 1000) .* domain_size
     
@@ -869,7 +869,7 @@ end
 """
     validate_telemetry(df::DataFrame) -> nothing
 
-Validates that a telemetry / mark-recapture DataFrame conforms to BSTM movement
+Validates that a telemetry / mark-recapture DataFrame conforms to MovementAnalysis movement
 schema requirements and logical consistency constraints.
 
 # Validation Checks
@@ -3772,7 +3772,7 @@ end
 """
     predict_path(res::NamedTuple, release::Int, recapture::Int, k=nothing; kwargs...) -> Vector{Int}
 
-Extracts the group transition matrix and domain mesh from a fitted BSTM result
+Extracts the group transition matrix and domain mesh from a fitted MovementAnalysis result
 NamedTuple and predicts the most probable movement trajectory between release and
 recapture nodes using goal-directed search (`:astar`) or dynamic programming (`:viterbi`).
 
@@ -3823,7 +3823,7 @@ end
 """
     predict_corridor(res::NamedTuple, release::Int, recapture::Int, k::Int; kwargs...) -> Matrix{Float64}
 
-Extracts the group transition matrix from a fitted BSTM result NamedTuple and
+Extracts the group transition matrix from a fitted MovementAnalysis result NamedTuple and
 computes the space-time Markov bridge corridor matrix over ``k`` steps.
 
 # Arguments
@@ -5033,7 +5033,7 @@ function prepare_movement_data(
             monthly_hsi = zeros(Float64, mesh.n_units, n_mo)
             for m in 1:n_mo
                 raw_m = reshard_hsi_field(
-                    h.monthly_hsi[:, m], src_coords_km, mesh.centroids_km
+                    h.monthly_hsi[:, m], (centroids=mesh.centroids_km,); hsi_coords=src_coords_km
                 )
                 monthly_hsi[:, m] = infill_spatial_hsi(
                     raw_m, mesh.W, known_mask;
@@ -6704,7 +6704,7 @@ function export_movement_posterior_dashboard(
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>BSTM Movement Posterior Uncertainty Dashboard</title>
+  <title>MovementAnalysis Movement Posterior Uncertainty Dashboard</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?\
 family=Outfit:wght@300;400;600;700&\
@@ -6886,7 +6886,7 @@ function export_movement_flow_dashboard(
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>BSTM Stock Connectivity & Network Flow Diagram</title>
+  <title>MovementAnalysis Stock Connectivity & Network Flow Diagram</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?\
 family=Outfit:wght@300;400;600;700&\
@@ -8510,6 +8510,17 @@ function generate_movement_data(;
     seed          :: Int     = 42
 )::NamedTuple
     
+    # Internal categorical draw — avoids importing Distributions in this file
+    function _sample_categorical(p::AbstractVector{Float64}, rng::AbstractRNG)::Int
+        u    = rand(rng)
+        csum = 0.0
+        for (i, pi) in enumerate(p)
+            csum += pi
+            csum >= u && return i
+        end
+        return length(p)
+    end
+
     rng  = MersenneTwister(seed)
     half = Float64(domain_km) / 2.0
 
@@ -8600,7 +8611,7 @@ function generate_movement_data(;
             lat       = lat_r,
             tag       = 0,
             timestamp = DateTime(t0_dt),
-            time      = _to_decimal_year(t0_dt),
+            time      = _date_to_decimal_year(t0_dt),
             sex       = sexes[i],
             mat       = mats[i],
             is_dead   = false,
@@ -8620,7 +8631,7 @@ function generate_movement_data(;
                 lat       = lat_r,
                 tag       = step,
                 timestamp = DateTime(t_dt),
-                time      = _to_decimal_year(t_dt),
+                time      = _date_to_decimal_year(t_dt),
                 sex       = sexes[i],
                 mat       = mats[i],
                 is_dead   = false,

@@ -1,7 +1,7 @@
 """
     leaflet.jl
 
-Interactive Leaflet-based HTML visualization engine for Bayesian Spatio-Temporal Models (BSTM).
+Interactive Leaflet-based HTML visualization engine for MovementAnalysis.
 Provides standalone, portable, publication-grade interactive HTML visualizations for:
 - Geographic tessellations, areal unit graphs, and boundary hulls
 - Scalar field choropleths (HSI, diffusion, residence distribution π, random effects, SVCs)
@@ -41,7 +41,7 @@ function LeafletMap(html::String, title::String, width::String, height::String, 
     return LeafletMap(html, title, width, height, Dict{Symbol, Any}(Symbol(k) => v for (k, v) in pairs(metadata)))
 end
 
-function LeafletMap(html::String; title::String="BSTM Leaflet Map", width::String="100%",
+function LeafletMap(html::String; title::String="MovementAnalysis Leaflet Map", width::String="100%",
            height::String="650px", metadata=Dict{Symbol, Any}())
     meta_dict = if metadata isa AbstractDict
         Dict{Symbol, Any}(Symbol(k) => v for (k, v) in pairs(metadata))
@@ -621,7 +621,7 @@ function _generate_leaflet_html_document(;
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>$(title) - BSTM Interactive Visualization</title>
+  <title>$(title) - MovementAnalysis Interactive Visualization</title>
   
   <!-- Modern Typography -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -663,7 +663,7 @@ function _generate_leaflet_html_document(;
       overflow-x: hidden;
     }
 
-    .bstm-container {
+    .ma-container {
       max-width: 1440px;
       margin: 0 auto;
       display: flex;
@@ -671,7 +671,7 @@ function _generate_leaflet_html_document(;
       gap: 16px;
     }
 
-    .bstm-header {
+    .ma-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -684,7 +684,7 @@ function _generate_leaflet_html_document(;
       box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
     }
 
-    .bstm-title-area h1 {
+    .ma-title-area h1 {
       font-size: 1.25rem;
       font-weight: 600;
       letter-spacing: -0.02em;
@@ -694,7 +694,7 @@ function _generate_leaflet_html_document(;
       gap: 8px;
     }
 
-    .bstm-badge {
+    .ma-badge {
       font-size: 0.72rem;
       font-weight: 600;
       padding: 3px 8px;
@@ -706,13 +706,13 @@ function _generate_leaflet_html_document(;
       letter-spacing: 0.05em;
     }
 
-    .bstm-subtitle {
+    .ma-subtitle {
       font-size: 0.84rem;
       color: var(--text-muted);
       margin-top: 2px;
     }
 
-    .bstm-map-wrapper {
+    .ma-map-wrapper {
       position: relative;
       width: $(width);
       height: $(height);
@@ -729,7 +729,7 @@ function _generate_leaflet_html_document(;
     }
 
     /* Planar Grid Background (1:1 length scales for non-geographic coordinates) */
-    .bstm-planar-bg {
+    .ma-planar-bg {
       background-color: $(dark_mode ? "#090d16" : "#f8fafc") !important;
       background-image: 
         linear-gradient($(dark_mode ? "rgba(255, 255, 255, 0.05)" : "rgba(0, 0, 0, 0.06)") 1px, transparent 1px),
@@ -739,7 +739,7 @@ function _generate_leaflet_html_document(;
       background-size: 50px 50px, 50px 50px, 10px 10px, 10px 10px !important;
     }
 
-    .bstm-coord-indicator {
+    .ma-coord-indicator {
       background: var(--panel-bg);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
@@ -773,7 +773,7 @@ function _generate_leaflet_html_document(;
       cursor: pointer;
     }
 
-    .bstm-legend {
+    .ma-legend {
       background: var(--panel-bg);
       backdrop-filter: blur(12px);
       border: 1px solid var(--border-main);
@@ -786,21 +786,21 @@ function _generate_leaflet_html_document(;
       max-width: 260px;
     }
 
-    .bstm-legend-title {
+    .ma-legend-title {
       font-weight: 600;
       margin-bottom: 6px;
       font-size: 0.85rem;
       color: var(--text-main);
     }
 
-    .bstm-colorbar {
+    .ma-colorbar {
       height: 12px;
       border-radius: 4px;
       margin: 6px 0 4px 0;
       border: 1px solid rgba(255, 255, 255, 0.15);
     }
 
-    .bstm-colorbar-labels {
+    .ma-colorbar-labels {
       display: flex;
       justify-content: space-between;
       font-size: 0.75rem;
@@ -808,14 +808,14 @@ function _generate_leaflet_html_document(;
       color: var(--text-muted);
     }
 
-    .bstm-popup {
+    .ma-popup {
       font-family: var(--font-main);
       font-size: 0.84rem;
       line-height: 1.4;
       color: #0f172a;
     }
 
-    .bstm-popup-title {
+    .ma-popup-title {
       font-weight: 700;
       font-size: 0.92rem;
       margin-bottom: 4px;
@@ -824,32 +824,32 @@ function _generate_leaflet_html_document(;
       padding-bottom: 2px;
     }
 
-    .bstm-popup-row {
+    .ma-popup-row {
       display: flex;
       justify-content: space-between;
       gap: 12px;
       margin: 2px 0;
     }
 
-    .bstm-popup-label {
+    .ma-popup-label {
       color: #64748b;
       font-weight: 500;
     }
 
-    .bstm-popup-val {
+    .ma-popup-val {
       font-family: var(--font-mono);
       font-weight: 600;
       color: #0f172a;
     }
 
-    .bstm-controls-bar {
+    .ma-controls-bar {
       display: flex;
       gap: 10px;
       align-items: center;
       flex-wrap: wrap;
     }
 
-    .bstm-btn {
+    .ma-btn {
       background: var(--panel-bg);
       color: var(--text-main);
       border: 1px solid var(--border-main);
@@ -865,18 +865,18 @@ function _generate_leaflet_html_document(;
       transition: all 0.2s ease;
     }
 
-    .bstm-btn:hover {
+    .ma-btn:hover {
       background: rgba(56, 189, 248, 0.2);
       border-color: var(--accent);
       color: #fff;
     }
 
-    .bstm-arrow-icon-container {
+    .ma-arrow-icon-container {
       background: transparent !important;
       border: none !important;
     }
 
-    .bstm-arrow-head {
+    .ma-arrow-head {
       transition: transform 0.15s ease-out;
       filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6));
     }
@@ -886,21 +886,21 @@ function _generate_leaflet_html_document(;
 </head>
 <body>
 
-  <div class="bstm-container">
-    <header class="bstm-header">
-      <div class="bstm-title-area">
+  <div class="ma-container">
+    <header class="ma-header">
+      <div class="ma-title-area">
         <h1>
           <span>$(title)</span>
-          <span class="bstm-badge">BSTM Interactive</span>
+          <span class="ma-badge">MovementAnalysis Interactive</span>
         </h1>
-        <div class="bstm-subtitle">Bayesian Spatio-Temporal Modeling & Movement Engine</div>
+        <div class="ma-subtitle">MovementAnalysis Movement Engine</div>
       </div>
-      <div class="bstm-controls-bar">
-        <button class="bstm-btn" onclick="resetMapView()">⟲ Reset View</button>
+      <div class="ma-controls-bar">
+        <button class="ma-btn" onclick="resetMapView()">⟲ Reset View</button>
       </div>
     </header>
 
-    <div class="bstm-map-wrapper">
+    <div class="ma-map-wrapper">
       <div id="$(map_id)"></div>
     </div>
 
@@ -1094,13 +1094,13 @@ function leaflet_choropleth(
     max_lng = !isempty(all_lngs) ? maximum(all_lngs) : 1.0
 
     gradient_css = "linear-gradient(to right, " * join(palette, ", ") * ")"
-    map_id = "bstm_map_" * string(abs(hash(title * string(rand()))), base=16)
+    map_id = "ma_map_" * string(abs(hash(title * string(rand()))), base=16)
 
     vmin_lbl = @sprintf("%.2f", vmin)
     vmid_lbl = @sprintf("%.2f", (vmin + vmax) / 2.0)
     vmax_lbl = @sprintf("%.2f", vmax)
 
-    orig_row_js = !tf.is_geo ? " + '<div class=\"bstm-popup-row\"><span class=\"bstm-popup-label\">Orig Centroid:</span><span class=\"bstm-popup-val\">(' + props.orig_x + ', ' + props.orig_y + ')</span></div>'" : ""
+    orig_row_js = !tf.is_geo ? " + '<div class=\"ma-popup-row\"><span class=\"ma-popup-label\">Orig Centroid:</span><span class=\"ma-popup-val\">(' + props.orig_x + ', ' + props.orig_y + ')</span></div>'" : ""
 
     map_setup_js = """
     var isGeo = $(tf.is_geo ? "true" : "false");
@@ -1109,13 +1109,13 @@ function leaflet_choropleth(
     if (!isGeo) {
       var coordControl = L.control({ position: 'bottomleft' });
       coordControl.onAdd = function() {
-        var div = L.DomUtil.create('div', 'bstm-coord-indicator');
+        var div = L.DomUtil.create('div', 'ma-coord-indicator');
         div.innerHTML = 'Planar Projection (Equatorial Pacific 1:1)';
         return div;
       };
       coordControl.addTo(map);
       map.on('mousemove', function(e) {
-        var el = document.querySelector('.bstm-coord-indicator');
+        var el = document.querySelector('.ma-coord-indicator');
         if (el) {
           var origX = (e.latlng.lng - ($(tf.lon_center))) / ($(tf.scale)) + ($(tf.x_mean));
           var origY = (e.latlng.lat - ($(tf.lat_center))) / ($(tf.scale)) + ($(tf.y_mean));
@@ -1183,9 +1183,9 @@ function leaflet_choropleth(
           mouseout: resetHighlight
         });
         var props = feature.properties;
-        var popupContent = '<div class="bstm-popup">' +
-          '<div class="bstm-popup-title">$(tooltip_prefix) #' + props.unit_id + '</div>' +
-          '<div class="bstm-popup-row"><span class="bstm-popup-label">$(colorbar_label):</span><span class="bstm-popup-val">' + props.value_str + '</span></div>'$(orig_row_js) +
+        var popupContent = '<div class="ma-popup">' +
+          '<div class="ma-popup-title">$(tooltip_prefix) #' + props.unit_id + '</div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">$(colorbar_label):</span><span class="ma-popup-val">' + props.value_str + '</span></div>'$(orig_row_js) +
           '</div>';
         layer.bindPopup(popupContent);
       }
@@ -1202,10 +1202,10 @@ function leaflet_choropleth(
     // Legend Control
     var legend = L.control({ position: 'bottomright' });
     legend.onAdd = function(map) {
-      var div = L.DomUtil.create('div', 'bstm-legend');
-      div.innerHTML = '<div class="bstm-legend-title">$(colorbar_label)</div>' +
-        '<div class="bstm-colorbar" style="background: $(gradient_css);"></div>' +
-        '<div class="bstm-colorbar-labels">' +
+      var div = L.DomUtil.create('div', 'ma-legend');
+      div.innerHTML = '<div class="ma-legend-title">$(colorbar_label)</div>' +
+        '<div class="ma-colorbar" style="background: $(gradient_css);"></div>' +
+        '<div class="ma-colorbar-labels">' +
         '<span>$(vmin_lbl)</span>' +
         '<span>$(vmid_lbl)</span>' +
         '<span>$(vmax_lbl)</span>' +
@@ -1399,7 +1399,7 @@ function leaflet_spatial_graph(
     min_lng = !isempty(all_lngs) ? minimum(all_lngs) : -1.0
     max_lng = !isempty(all_lngs) ? maximum(all_lngs) : 1.0
 
-    map_id = "bstm_graph_map_" * string(abs(hash(title * string(rand()))), base=16)
+    map_id = "ma_graph_map_" * string(abs(hash(title * string(rand()))), base=16)
 
     hull_js_block = if !isempty(hull_json)
         """
@@ -1419,7 +1419,7 @@ function leaflet_spatial_graph(
     end
 
     base_layer_add = dark_mode ? "cartoDark.addTo(map);" : "cartoLight.addTo(map);"
-    orig_node_row_js = !tf.is_geo ? " + '<div class=\"bstm-popup-row\"><span class=\"bstm-popup-label\">Orig Coords:</span><span class=\"bstm-popup-val\">(' + p.orig_x + ', ' + p.orig_y + ')</span></div>'" : ""
+    orig_node_row_js = !tf.is_geo ? " + '<div class=\"ma-popup-row\"><span class=\"ma-popup-label\">Orig Coords:</span><span class=\"ma-popup-val\">(' + p.orig_x + ', ' + p.orig_y + ')</span></div>'" : ""
 
     map_setup_js = """
     var isGeo = $(tf.is_geo ? "true" : "false");
@@ -1428,13 +1428,13 @@ function leaflet_spatial_graph(
     if (!isGeo) {
       var coordControl = L.control({ position: 'bottomleft' });
       coordControl.onAdd = function() {
-        var div = L.DomUtil.create('div', 'bstm-coord-indicator');
+        var div = L.DomUtil.create('div', 'ma-coord-indicator');
         div.innerHTML = 'Planar Projection (Equatorial Pacific 1:1)';
         return div;
       };
       coordControl.addTo(map);
       map.on('mousemove', function(e) {
-        var el = document.querySelector('.bstm-coord-indicator');
+        var el = document.querySelector('.ma-coord-indicator');
         if (el) {
           var origX = (e.latlng.lng - ($(tf.lon_center))) / ($(tf.scale)) + ($(tf.x_mean));
           var origY = (e.latlng.lat - ($(tf.lat_center))) / ($(tf.scale)) + ($(tf.y_mean));
@@ -1474,7 +1474,7 @@ function leaflet_spatial_graph(
           weight: 1.0
         },
         onEachFeature: function(feature, layer) {
-          layer.bindPopup('<div class="bstm-popup"><div class="bstm-popup-title">Areal Unit #' + feature.properties.unit_id + '</div></div>');
+          layer.bindPopup('<div class="ma-popup"><div class="ma-popup-title">Areal Unit #' + feature.properties.unit_id + '</div></div>');
         }
       }).addTo(map);
       overlayLayers["Tessellation Polygons"] = polyLayer;
@@ -1511,7 +1511,7 @@ function leaflet_spatial_graph(
       },
       onEachFeature: function(feature, layer) {
         var p = feature.properties;
-        layer.bindPopup('<div class="bstm-popup"><div class="bstm-popup-title">Centroid Unit #' + p.unit_id + '</div><div class="bstm-popup-row"><span class="bstm-popup-label">Degree (Neighbors):</span><span class="bstm-popup-val">' + p.degree + '</span></div>'$(orig_node_row_js) + '</div>');
+        layer.bindPopup('<div class="ma-popup"><div class="ma-popup-title">Centroid Unit #' + p.unit_id + '</div><div class="ma-popup-row"><span class="ma-popup-label">Degree (Neighbors):</span><span class="ma-popup-val">' + p.degree + '</span></div>'$(orig_node_row_js) + '</div>');
       }
     }).addTo(map);
     overlayLayers["Centroids"] = nodeLayer;
@@ -1856,10 +1856,10 @@ function leaflet_advection_arrows(
       },
       onEachFeature: function(feature, layer) {
         var p = feature.properties;
-        layer.bindPopup('<div class="bstm-popup">' +
-          '<div class="bstm-popup-title">Advective Drift (Unit #' + p.unit_id + ')</div>' +
-          '<div class="bstm-popup-row"><span class="bstm-popup-label">Drift Speed:</span><span class="bstm-popup-val">' + p.speed_str + '</span></div>' +
-          '<div class="bstm-popup-row"><span class="bstm-popup-label">Heading:</span><span class="bstm-popup-val">' + p.angle_deg + '°</span></div>' +
+        layer.bindPopup('<div class="ma-popup">' +
+          '<div class="ma-popup-title">Advective Drift (Unit #' + p.unit_id + ')</div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Drift Speed:</span><span class="ma-popup-val">' + p.speed_str + '</span></div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Heading:</span><span class="ma-popup-val">' + p.angle_deg + '°</span></div>' +
           '</div>');
       }
     }).addTo(map);
@@ -1867,13 +1867,13 @@ function leaflet_advection_arrows(
     var headIconLayer = L.geoJSON(headsData, {
       pointToLayer: function(feature, latlng) {
         var p = feature.properties;
-        var iconHtml = '<div class="bstm-arrow-head" style="transform: rotate(' + p.rot_deg + 'deg); width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; pointer-events: auto;">' +
+        var iconHtml = '<div class="ma-arrow-head" style="transform: rotate(' + p.rot_deg + 'deg); width: 14px; height: 14px; display: flex; align-items: center; justify-content: center; pointer-events: auto;">' +
           '<svg width="13" height="13" viewBox="0 0 13 13" style="overflow: visible;">' +
           '<polygon points="6.5,0 12,12 6.5,9 1,12" fill="$(arrow_color)" stroke="#0f172a" stroke-width="0.75" stroke-linejoin="round"/>' +
           '</svg>' +
           '</div>';
         var arrowIcon = L.divIcon({
-          className: 'bstm-arrow-icon-container',
+          className: 'ma-arrow-icon-container',
           html: iconHtml,
           iconSize: [14, 14],
           iconAnchor: [7, 7]
@@ -1882,10 +1882,10 @@ function leaflet_advection_arrows(
       },
       onEachFeature: function(feature, layer) {
         var p = feature.properties;
-        layer.bindPopup('<div class="bstm-popup">' +
-          '<div class="bstm-popup-title">Advective Drift (Unit #' + p.unit_id + ')</div>' +
-          '<div class="bstm-popup-row"><span class="bstm-popup-label">Drift Speed:</span><span class="bstm-popup-val">' + p.speed_str + '</span></div>' +
-          '<div class="bstm-popup-row"><span class="bstm-popup-label">Heading:</span><span class="bstm-popup-val">' + p.angle_deg + '°</span></div>' +
+        layer.bindPopup('<div class="ma-popup">' +
+          '<div class="ma-popup-title">Advective Drift (Unit #' + p.unit_id + ')</div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Drift Speed:</span><span class="ma-popup-val">' + p.speed_str + '</span></div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Heading:</span><span class="ma-popup-val">' + p.angle_deg + '°</span></div>' +
           '</div>');
       }
     }).addTo(map);
@@ -2222,7 +2222,7 @@ function leaflet_tracks_map(
         max_lng = mid_lng + 0.05
     end
 
-    map_id = "bstm_tracks_map_" * string(abs(hash(title * string(rand()))), base=16)
+    map_id = "ma_tracks_map_" * string(abs(hash(title * string(rand()))), base=16)
 
     map_setup_js = """
     var isGeo = $(tf.is_geo ? "true" : "false");
@@ -2231,13 +2231,13 @@ function leaflet_tracks_map(
     if (!isGeo) {
       var coordControl = L.control({ position: 'bottomleft' });
       coordControl.onAdd = function() {
-        var div = L.DomUtil.create('div', 'bstm-coord-indicator');
+        var div = L.DomUtil.create('div', 'ma-coord-indicator');
         div.innerHTML = 'Planar Projection (Equatorial Pacific 1:1)';
         return div;
       };
       coordControl.addTo(map);
       map.on('mousemove', function(e) {
-        var el = document.querySelector('.bstm-coord-indicator');
+        var el = document.querySelector('.ma-coord-indicator');
         if (el) {
           var origX = (e.latlng.lng - ($(tf.lon_center))) / ($(tf.scale)) + ($(tf.x_mean));
           var origY = (e.latlng.lat - ($(tf.lat_center))) / ($(tf.scale)) + ($(tf.y_mean));
@@ -2293,9 +2293,9 @@ function leaflet_tracks_map(
           layer.on('mouseout', function() {
             polyLayer.resetStyle(layer);
           });
-          layer.bindPopup('<div class="bstm-popup">' +
-            '<div class="bstm-popup-title">Areal Unit #' + p.unit_id + '</div>' +
-            (hasHsi ? '<div class="bstm-popup-row"><span class="bstm-popup-label">Habitat Suitability (HSI):</span><span class="bstm-popup-val">' + p.hsi + '</span></div>' : '') +
+          layer.bindPopup('<div class="ma-popup">' +
+            '<div class="ma-popup-title">Areal Unit #' + p.unit_id + '</div>' +
+            (hasHsi ? '<div class="ma-popup-row"><span class="ma-popup-label">Habitat Suitability (HSI):</span><span class="ma-popup-val">' + p.hsi + '</span></div>' : '') +
             '</div>');
         }
       }).addTo(map);
@@ -2319,9 +2319,9 @@ function leaflet_tracks_map(
           layer.on('mouseout', function() {
             empTrackLayer.resetStyle(layer);
           });
-          layer.bindPopup('<div class="bstm-popup">' +
-            '<div class="bstm-popup-title" style="color:#0284c7">Direct Tag Vector #' + p.tag_id + '</div>' +
-            '<div class="bstm-popup-row"><span class="bstm-popup-label">Observations:</span><span class="bstm-popup-val">' + p.n_obs + '</span></div>' +
+          layer.bindPopup('<div class="ma-popup">' +
+            '<div class="ma-popup-title" style="color:#0284c7">Direct Tag Vector #' + p.tag_id + '</div>' +
+            '<div class="ma-popup-row"><span class="ma-popup-label">Observations:</span><span class="ma-popup-val">' + p.n_obs + '</span></div>' +
             '</div>');
         }
       }).addTo(map);
@@ -2351,46 +2351,46 @@ function leaflet_tracks_map(
                         p.tag_id.startsWith('Method') ||
                         p.tag_id.startsWith('Path')) ?
                         p.tag_id : 'Snow Crab Tag #' + p.tag_id;
-          var popupHtml = '<div class="bstm-popup">' +
-            '<div class="bstm-popup-title" style="color: ' + p.color + '">' +
+          var popupHtml = '<div class="ma-popup">' +
+            '<div class="ma-popup-title" style="color: ' + p.color + '">' +
             tTitle + '</div>' +
-            '<div class="bstm-popup-row">' +
-            '<span class="bstm-popup-label">State-Space Steps:</span>' +
-            '<span class="bstm-popup-val">' + p.n_steps + '</span></div>';
+            '<div class="ma-popup-row">' +
+            '<span class="ma-popup-label">State-Space Steps:</span>' +
+            '<span class="ma-popup-val">' + p.n_steps + '</span></div>';
           if (p.duration_days > 0) {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Duration:</span>' +
-              '<span class="bstm-popup-val">' + p.duration_days + ' days</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Duration:</span>' +
+              '<span class="ma-popup-val">' + p.duration_days + ' days</span></div>';
           }
           if (p.total_dist && p.total_dist != '') {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Estimated Path Length:</span>' +
-              '<span class="bstm-popup-val">' + p.total_dist + ' km</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Estimated Path Length:</span>' +
+              '<span class="ma-popup-val">' + p.total_dist + ' km</span></div>';
           }
           if (p.displacement && p.displacement != '') {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Net Displacement:</span>' +
-              '<span class="bstm-popup-val">' + p.displacement + ' km</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Net Displacement:</span>' +
+              '<span class="ma-popup-val">' + p.displacement + ' km</span></div>';
           }
           if (p.tortuosity && p.tortuosity != '') {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Tortuosity Index:</span>' +
-              '<span class="bstm-popup-val">' + p.tortuosity + '</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Tortuosity Index:</span>' +
+              '<span class="ma-popup-val">' + p.tortuosity + '</span></div>';
           }
           if (p.mean_hsi && p.mean_hsi != '') {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Mean Habitat HSI:</span>' +
-              '<span class="bstm-popup-val">' + p.mean_hsi + '</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Mean Habitat HSI:</span>' +
+              '<span class="ma-popup-val">' + p.mean_hsi + '</span></div>';
           }
           if (p.start_date && p.start_date != '') {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Release:</span>' +
-              '<span class="bstm-popup-val">' + p.start_date + '</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Release:</span>' +
+              '<span class="ma-popup-val">' + p.start_date + '</span></div>';
           }
           if (p.end_date && p.end_date != '') {
-            popupHtml += '<div class="bstm-popup-row">' +
-              '<span class="bstm-popup-label">Recapture:</span>' +
-              '<span class="bstm-popup-val">' + p.end_date + '</span></div>';
+            popupHtml += '<div class="ma-popup-row">' +
+              '<span class="ma-popup-label">Recapture:</span>' +
+              '<span class="ma-popup-val">' + p.end_date + '</span></div>';
           }
           popupHtml += '</div>';
           layer.bindPopup(popupHtml);
@@ -2414,8 +2414,8 @@ function leaflet_tracks_map(
         },
         onEachFeature: function(feature, layer) {
           var p = feature.properties;
-          layer.bindPopup('<div class="bstm-popup"><div class="bstm-popup-title" style="color:#10b981;">Release (Tag #' + p.tag_id + ')</div>' +
-            (p.date ? '<div class="bstm-popup-row"><span class="bstm-popup-label">Date:</span><span class="bstm-popup-val">' + p.date + '</span></div>' : '') +
+          layer.bindPopup('<div class="ma-popup"><div class="ma-popup-title" style="color:#10b981;">Release (Tag #' + p.tag_id + ')</div>' +
+            (p.date ? '<div class="ma-popup-row"><span class="ma-popup-label">Date:</span><span class="ma-popup-val">' + p.date + '</span></div>' : '') +
             '</div>');
         }
       }).addTo(map);
@@ -2437,8 +2437,8 @@ function leaflet_tracks_map(
         },
         onEachFeature: function(feature, layer) {
           var p = feature.properties;
-          layer.bindPopup('<div class="bstm-popup"><div class="bstm-popup-title" style="color:#ef4444;">Recapture (Tag #' + p.tag_id + ')</div>' +
-            (p.date ? '<div class="bstm-popup-row"><span class="bstm-popup-label">Date:</span><span class="bstm-popup-val">' + p.date + '</span></div>' : '') +
+          layer.bindPopup('<div class="ma-popup"><div class="ma-popup-title" style="color:#ef4444;">Recapture (Tag #' + p.tag_id + ')</div>' +
+            (p.date ? '<div class="ma-popup-row"><span class="ma-popup-label">Date:</span><span class="ma-popup-val">' + p.date + '</span></div>' : '') +
             '</div>');
         }
       }).addTo(map);
@@ -2453,7 +2453,7 @@ function leaflet_tracks_map(
     if (hasHsi) {
       var legend = L.control({ position: 'bottomright' });
       legend.onAdd = function() {
-        var div = L.DomUtil.create('div', 'bstm-legend');
+        var div = L.DomUtil.create('div', 'ma-legend');
         div.style.backgroundColor = 'rgba(15, 23, 42, 0.88)';
         div.style.padding = '8px 12px';
         div.style.borderRadius = '6px';
@@ -2484,7 +2484,7 @@ function leaflet_tracks_map(
         // Trajectory Playback Animation Controller
         var animControl = L.control({ position: 'bottomleft' });
         animControl.onAdd = function() {
-          var c = L.DomUtil.create('div', 'bstm-playback-panel');
+          var c = L.DomUtil.create('div', 'ma-playback-panel');
           c.style.backgroundColor = 'rgba(15, 23, 42, 0.92)';
           c.style.border = '1px solid #334155';
           c.style.borderRadius = '8px';
@@ -2498,18 +2498,18 @@ function leaflet_tracks_map(
           c.innerHTML =
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">' +
               '<span style="font-weight:600;color:#38bdf8;">▶ Trajectory Playback</span>' +
-              '<span id="bstm-anim-percent" style="font-family:monospace;color:#94a3b8;">0%</span>' +
+              '<span id="ma-anim-percent" style="font-family:monospace;color:#94a3b8;">0%</span>' +
             '</div>' +
             '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">' +
-              '<button id="bstm-anim-play" style="background:#0284c7;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-weight:600;">Play</button>' +
-              '<button id="bstm-anim-reset" style="background:#334155;color:#f8fafc;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;">Reset</button>' +
-              '<select id="bstm-anim-speed" style="background:#1e293b;color:#f8fafc;border:1px solid #475569;border-radius:4px;padding:3px 6px;">' +
+              '<button id="ma-anim-play" style="background:#0284c7;color:#fff;border:none;border-radius:4px;padding:4px 10px;cursor:pointer;font-weight:600;">Play</button>' +
+              '<button id="ma-anim-reset" style="background:#334155;color:#f8fafc;border:none;border-radius:4px;padding:4px 8px;cursor:pointer;">Reset</button>' +
+              '<select id="ma-anim-speed" style="background:#1e293b;color:#f8fafc;border:1px solid #475569;border-radius:4px;padding:3px 6px;">' +
                 '<option value="1">1x</option>' +
                 '<option value="2">2x</option>' +
                 '<option value="5">5x</option>' +
               '</select>' +
             '</div>' +
-            '<input id="bstm-anim-slider" type="range" min="0" max="100" value="0" style="width:100%;cursor:pointer;">';
+            '<input id="ma-anim-slider" type="range" min="0" max="100" value="0" style="width:100%;cursor:pointer;">';
           L.DomEvent.disableClickPropagation(c);
           L.DomEvent.disableScrollPropagation(c);
           return c;
@@ -2560,8 +2560,8 @@ function leaflet_tracks_map(
         function updateAnimation(progress) {
           animProgress = Math.max(0.0, Math.min(1.0, progress));
           var pct = Math.round(animProgress * 100);
-          var pctEl = document.getElementById('bstm-anim-percent');
-          var sliderEl = document.getElementById('bstm-anim-slider');
+          var pctEl = document.getElementById('ma-anim-percent');
+          var sliderEl = document.getElementById('ma-anim-slider');
           if (pctEl) pctEl.innerText = pct + '%';
           if (sliderEl) sliderEl.value = pct;
 
@@ -2591,13 +2591,13 @@ function leaflet_tracks_map(
 
         function animLoop() {
           if (!isPlaying) return;
-          var speedEl = document.getElementById('bstm-anim-speed');
+          var speedEl = document.getElementById('ma-anim-speed');
           var speedMultiplier = speedEl ? (parseFloat(speedEl.value) || 1.0) : 1.0;
           animProgress += animSpeed * speedMultiplier;
           if (animProgress >= 1.0) {
             animProgress = 1.0;
             isPlaying = false;
-            var btn = document.getElementById('bstm-anim-play');
+            var btn = document.getElementById('ma-anim-play');
             if (btn) btn.innerText = 'Play';
           }
           updateAnimation(animProgress);
@@ -2607,9 +2607,9 @@ function leaflet_tracks_map(
         }
 
         setTimeout(function() {
-          var playBtn = document.getElementById('bstm-anim-play');
-          var resetBtn = document.getElementById('bstm-anim-reset');
-          var slider = document.getElementById('bstm-anim-slider');
+          var playBtn = document.getElementById('ma-anim-play');
+          var resetBtn = document.getElementById('ma-anim-reset');
+          var slider = document.getElementById('ma-anim-slider');
 
           if (playBtn) {
             playBtn.addEventListener('click', function() {
@@ -2769,10 +2769,10 @@ function leaflet_spacetime_map(
     max_lng = !isempty(all_lngs) ? maximum(all_lngs) : 1.0
 
     gradient_css = "linear-gradient(to right, " * join(palette, ", ") * ")"
-    map_id = "bstm_spacetime_map_" * string(abs(hash(title * string(rand()))), base=16)
+    map_id = "ma_spacetime_map_" * string(abs(hash(title * string(rand()))), base=16)
 
     extra_css = """
-    .bstm-timeline-panel {
+    .ma-timeline-panel {
       display: flex;
       align-items: center;
       gap: 16px;
@@ -2783,12 +2783,12 @@ function leaflet_spacetime_map(
       border-radius: 12px;
       box-shadow: 0 4px 20px rgba(0,0,0,0.15);
     }
-    .bstm-slider {
+    .ma-slider {
       flex: 1;
       accent-color: var(--accent);
       cursor: pointer;
     }
-    .bstm-time-display {
+    .ma-time-display {
       font-family: var(--font-mono);
       font-weight: 600;
       font-size: 1.05rem;
@@ -2801,10 +2801,10 @@ function leaflet_spacetime_map(
     n_t_steps = length(unique_t) - 1
 
     extra_html = """
-    <div class="bstm-timeline-panel">
-      <button id="playBtn" class="bstm-btn" onclick="togglePlay()">▶ Play</button>
-      <span id="timeDisplay" class="bstm-time-display">T = $(first_t_str)</span>
-      <input type="range" id="timeSlider" class="bstm-slider" min="0" max="$(n_t_steps)" value="0" step="1" oninput="onTimeChange(this.value)">
+    <div class="ma-timeline-panel">
+      <button id="playBtn" class="ma-btn" onclick="togglePlay()">▶ Play</button>
+      <span id="timeDisplay" class="ma-time-display">T = $(first_t_str)</span>
+      <input type="range" id="timeSlider" class="ma-slider" min="0" max="$(n_t_steps)" value="0" step="1" oninput="onTimeChange(this.value)">
     </div>
     """
 
@@ -2819,13 +2819,13 @@ function leaflet_spacetime_map(
     if (!isGeo) {
       var coordControl = L.control({ position: 'bottomleft' });
       coordControl.onAdd = function() {
-        var div = L.DomUtil.create('div', 'bstm-coord-indicator');
+        var div = L.DomUtil.create('div', 'ma-coord-indicator');
         div.innerHTML = 'Planar Projection (Equatorial Pacific 1:1)';
         return div;
       };
       coordControl.addTo(map);
       map.on('mousemove', function(e) {
-        var el = document.querySelector('.bstm-coord-indicator');
+        var el = document.querySelector('.ma-coord-indicator');
         if (el) {
           var origX = (e.latlng.lng - ($(tf.lon_center))) / ($(tf.scale)) + ($(tf.x_mean));
           var origY = (e.latlng.lat - ($(tf.lat_center))) / ($(tf.scale)) + ($(tf.y_mean));
@@ -2876,7 +2876,7 @@ function leaflet_spacetime_map(
       },
       onEachFeature: function(feature, layer) {
         layerMap[feature.id] = layer;
-        layer.bindPopup('<div class="bstm-popup"><div class="bstm-popup-title">Unit #' + feature.id + '</div><div id="popupVal_' + feature.id + '"></div></div>');
+        layer.bindPopup('<div class="ma-popup"><div class="ma-popup-title">Unit #' + feature.id + '</div><div id="popupVal_' + feature.id + '"></div></div>');
       }
     }).addTo(map);
 
@@ -2925,10 +2925,10 @@ function leaflet_spacetime_map(
 
     var legend = L.control({ position: 'bottomright' });
     legend.onAdd = function(map) {
-      var div = L.DomUtil.create('div', 'bstm-legend');
-      div.innerHTML = '<div class="bstm-legend-title">$(colorbar_label)</div>' +
-        '<div class="bstm-colorbar" style="background: $(gradient_css);"></div>' +
-        '<div class="bstm-colorbar-labels">' +
+      var div = L.DomUtil.create('div', 'ma-legend');
+      div.innerHTML = '<div class="ma-legend-title">$(colorbar_label)</div>' +
+        '<div class="ma-colorbar" style="background: $(gradient_css);"></div>' +
+        '<div class="ma-colorbar-labels">' +
         '<span>$(vmin_str)</span>' +
         '<span>$(vmid_str)</span>' +
         '<span>$(vmax_str)</span>' +
@@ -2964,7 +2964,7 @@ end
 """
     leaflet_movement_dashboard(result, paths;
                                hsi=nothing, strata=nothing,
-                               title="BSTM Movement Diagnostics Dashboard",
+                               title="MovementAnalysis Diagnostics Dashboard",
                                dark_mode=true, width="100%", kwargs...)
 
 Creates a unified, publication-grade interactive HTML web dashboard integrating:
@@ -2987,7 +2987,7 @@ function leaflet_movement_dashboard(
     paths::Union{AbstractMatrix, AbstractVector};
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
     strata::Union{Nothing, AbstractVector} = nothing,
-    title::String = "BSTM Movement Diagnostics Dashboard",
+    title::String = "MovementAnalysis Diagnostics Dashboard",
     wkt::Union{Nothing, AbstractString} = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
     dark_mode::Bool = true,
@@ -3128,17 +3128,17 @@ function leaflet_movement_dashboard(
 
     # Extra Layout HTML for Dashboard
     dashboard_css = """
-    .bstm-dashboard-grid {
+    .ma-dashboard-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 16px;
     }
     @media (max-width: 1024px) {
-      .bstm-dashboard-grid {
+      .ma-dashboard-grid {
         grid-template-columns: 1fr;
       }
     }
-    .bstm-card {
+    .ma-card {
       background: var(--panel-bg);
       backdrop-filter: blur(12px);
       border: 1px solid var(--border-main);
@@ -3146,7 +3146,7 @@ function leaflet_movement_dashboard(
       padding: 16px;
       box-shadow: 0 4px 20px rgba(0,0,0,0.15);
     }
-    .bstm-card-title {
+    .ma-card-title {
       font-size: 0.95rem;
       font-weight: 600;
       color: var(--text-main);
@@ -3155,38 +3155,38 @@ function leaflet_movement_dashboard(
       justify-content: space-between;
       align-items: center;
     }
-    .bstm-kpi-grid {
+    .ma-kpi-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 12px;
       margin-bottom: 16px;
     }
     @media (max-width: 768px) {
-      .bstm-kpi-grid {
+      .ma-kpi-grid {
         grid-template-columns: repeat(2, 1fr);
       }
     }
-    .bstm-kpi-card {
+    .ma-kpi-card {
       background: rgba(15, 23, 42, 0.6);
       border: 1px solid var(--border-main);
       border-radius: 10px;
       padding: 12px 14px;
       text-align: left;
     }
-    .bstm-kpi-label {
+    .ma-kpi-label {
       font-size: 0.75rem;
       color: var(--text-muted);
       text-transform: uppercase;
       letter-spacing: 0.05em;
     }
-    .bstm-kpi-val {
+    .ma-kpi-val {
       font-size: 1.35rem;
       font-weight: 700;
       color: var(--accent);
       font-family: var(--font-mono);
       margin-top: 2px;
     }
-    .bstm-chart-wrapper {
+    .ma-chart-wrapper {
       position: relative;
       width: 100%;
       height: 240px;
@@ -3202,67 +3202,67 @@ function leaflet_movement_dashboard(
 
     dashboard_html = """
     <!-- KPI Summary Row -->
-    <div class="bstm-kpi-grid">
-      <div class="bstm-kpi-card">
-        <div class="bstm-kpi-label">Drift Velocity (v)</div>
-        <div class="bstm-kpi-val">$(v_val_str)</div>
+    <div class="ma-kpi-grid">
+      <div class="ma-kpi-card">
+        <div class="ma-kpi-label">Drift Velocity (v)</div>
+        <div class="ma-kpi-val">$(v_val_str)</div>
       </div>
-      <div class="bstm-kpi-card">
-        <div class="bstm-kpi-label">Diffusion Rate (D)</div>
-        <div class="bstm-kpi-val">$(d_val_str)</div>
+      <div class="ma-kpi-card">
+        <div class="ma-kpi-label">Diffusion Rate (D)</div>
+        <div class="ma-kpi-val">$(d_val_str)</div>
       </div>
-      <div class="bstm-kpi-card">
-        <div class="bstm-kpi-label">Mean Step Length</div>
-        <div class="bstm-kpi-val">$(mean_step_str)</div>
+      <div class="ma-kpi-card">
+        <div class="ma-kpi-label">Mean Step Length</div>
+        <div class="ma-kpi-val">$(mean_step_str)</div>
       </div>
-      <div class="bstm-kpi-card">
-        <div class="bstm-kpi-label">Active Individuals</div>
-        <div class="bstm-kpi-val">$(n_indiv)</div>
+      <div class="ma-kpi-card">
+        <div class="ma-kpi-label">Active Individuals</div>
+        <div class="ma-kpi-val">$(n_indiv)</div>
       </div>
     </div>
 
     <!-- Analytics Charts Grid -->
-    <div class="bstm-dashboard-grid">
+    <div class="ma-dashboard-grid">
       <!-- Chart 1: Dispersal Distance Decay -->
-      <div class="bstm-card">
-        <div class="bstm-card-title">
+      <div class="ma-card">
+        <div class="ma-card-title">
           <span>(A) Dispersal Kernel Distance Decay</span>
-          <span class="bstm-badge">Decay Curve</span>
+          <span class="ma-badge">Decay Curve</span>
         </div>
-        <div class="bstm-chart-wrapper">
+        <div class="ma-chart-wrapper">
           <canvas id="decayChart"></canvas>
         </div>
       </div>
 
       <!-- Chart 2: Step Diagnostics -->
-      <div class="bstm-card">
-        <div class="bstm-card-title">
+      <div class="ma-card">
+        <div class="ma-card-title">
           <span>(B) Empirical Step Length Distribution</span>
-          <span class="bstm-badge">Displacements</span>
+          <span class="ma-badge">Displacements</span>
         </div>
-        <div class="bstm-chart-wrapper">
+        <div class="ma-chart-wrapper">
           <canvas id="stepChart"></canvas>
         </div>
       </div>
 
       <!-- Chart 3: Regional Connectivity Matrix -->
-      <div class="bstm-card">
-        <div class="bstm-card-title">
+      <div class="ma-card">
+        <div class="ma-card-title">
           <span>(C) Macro-Regional Connectivity Matrix</span>
-          <span class="bstm-badge">Transfer Probabilities</span>
+          <span class="ma-badge">Transfer Probabilities</span>
         </div>
-        <div class="bstm-chart-wrapper">
+        <div class="ma-chart-wrapper">
           <canvas id="connChart"></canvas>
         </div>
       </div>
 
       <!-- Chart 4: Advection-to-Diffusion Ratio -->
-      <div class="bstm-card">
-        <div class="bstm-card-title">
+      <div class="ma-card">
+        <div class="ma-card-title">
           <span>(D) Advection-to-Diffusion (Péclet) Distribution</span>
-          <span class="bstm-badge">v / D</span>
+          <span class="ma-badge">v / D</span>
         </div>
-        <div class="bstm-chart-wrapper">
+        <div class="ma-chart-wrapper">
           <canvas id="adRatioChart"></canvas>
         </div>
       </div>
@@ -4018,7 +4018,7 @@ function leaflet_hydrodynamic_dashboard(
     end
 
     # 6. HTML Template with Controls and Palette Interpolator
-    map_id = "bstm_hydro_" * string(abs(hash(title * string(rand()))), base=16)
+    map_id = "ma_hydro_" * string(abs(hash(title * string(rand()))), base=16)
     depth_labels_js = "[" * join(["\"$(abs(round(d, digits=1)))m\"" for d in depth_levels], ", ") * "]"
 
     html_content = """<!DOCTYPE html>
@@ -4494,7 +4494,7 @@ function leaflet_interactive_corridor_dashboard(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>$title - BSTM Interactive Dynamic Corridor Explorer</title>
+  <title>$title - MovementAnalysis Interactive Dynamic Corridor Explorer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -4522,7 +4522,7 @@ function leaflet_interactive_corridor_dashboard(
       flex-direction: column;
       overflow: hidden;
     }
-    .bstm-header {
+    .ma-header {
       background: var(--panel-bg);
       border-bottom: 1px solid var(--border-main);
       padding: 10px 20px;
@@ -4531,7 +4531,7 @@ function leaflet_interactive_corridor_dashboard(
       align-items: center;
       z-index: 1000;
     }
-    .bstm-title {
+    .ma-title {
       font-size: 1.15rem;
       font-weight: 700;
       letter-spacing: -0.01em;
@@ -4539,7 +4539,7 @@ function leaflet_interactive_corridor_dashboard(
       align-items: center;
       gap: 10px;
     }
-    .bstm-badge {
+    .ma-badge {
       font-size: 0.70rem;
       text-transform: uppercase;
       background: rgba(56, 189, 248, 0.2);
@@ -4548,7 +4548,7 @@ function leaflet_interactive_corridor_dashboard(
       border-radius: 6px;
       font-weight: 600;
     }
-    .bstm-map-container {
+    .ma-map-container {
       position: relative;
       flex: 1;
       width: 100%;
@@ -4558,7 +4558,7 @@ function leaflet_interactive_corridor_dashboard(
       height: 100%;
       background: #090e1f;
     }
-    .bstm-floating-panel {
+    .ma-floating-panel {
       position: absolute;
       top: 16px;
       right: 16px;
@@ -4574,7 +4574,7 @@ function leaflet_interactive_corridor_dashboard(
       flex-direction: column;
       gap: 12px;
     }
-    .bstm-panel-title {
+    .ma-panel-title {
       font-size: 0.95rem;
       font-weight: 600;
       color: var(--text-main);
@@ -4582,7 +4582,7 @@ function leaflet_interactive_corridor_dashboard(
       justify-content: space-between;
       align-items: center;
     }
-    .bstm-status-box {
+    .ma-status-box {
       font-size: 0.82rem;
       background: rgba(11, 19, 41, 0.7);
       border: 1px solid var(--border-main);
@@ -4591,12 +4591,12 @@ function leaflet_interactive_corridor_dashboard(
       color: var(--text-muted);
       line-height: 1.4;
     }
-    .bstm-endpoints-grid {
+    .ma-endpoints-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
     }
-    .bstm-endpoint-card {
+    .ma-endpoint-card {
       background: rgba(11, 19, 41, 0.7);
       border: 1px solid var(--border-main);
       border-radius: 8px;
@@ -4604,34 +4604,34 @@ function leaflet_interactive_corridor_dashboard(
       display: flex;
       flex-direction: column;
     }
-    .bstm-ep-label {
+    .ma-ep-label {
       font-size: 0.70rem;
       text-transform: uppercase;
       font-weight: 600;
     }
-    .bstm-ep-val {
+    .ma-ep-val {
       font-size: 1.05rem;
       font-weight: 700;
       font-family: var(--font-mono);
       margin-top: 2px;
     }
-    .bstm-control-group {
+    .ma-control-group {
       display: flex;
       flex-direction: column;
       gap: 4px;
     }
-    .bstm-control-label {
+    .ma-control-label {
       font-size: 0.78rem;
       color: var(--text-muted);
       display: flex;
       justify-content: space-between;
     }
-    .bstm-slider {
+    .ma-slider {
       width: 100%;
       accent-color: var(--accent);
       cursor: pointer;
     }
-    .bstm-select {
+    .ma-select {
       background: rgba(11, 19, 41, 0.8);
       border: 1px solid var(--border-main);
       color: var(--text-main);
@@ -4640,12 +4640,12 @@ function leaflet_interactive_corridor_dashboard(
       font-family: var(--font-main);
       font-size: 0.85rem;
     }
-    .bstm-btn-group {
+    .ma-btn-group {
       display: flex;
       gap: 8px;
       margin-top: 4px;
     }
-    .bstm-btn {
+    .ma-btn {
       flex: 1;
       background: rgba(56, 189, 248, 0.15);
       border: 1px solid rgba(56, 189, 248, 0.35);
@@ -4657,20 +4657,20 @@ function leaflet_interactive_corridor_dashboard(
       cursor: pointer;
       transition: all 0.18s ease;
     }
-    .bstm-btn:hover {
+    .ma-btn:hover {
       background: rgba(56, 189, 248, 0.30);
       color: #fff;
     }
-    .bstm-btn-secondary {
+    .ma-btn-secondary {
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-main);
       color: var(--text-muted);
     }
-    .bstm-btn-secondary:hover {
+    .ma-btn-secondary:hover {
       background: rgba(255, 255, 255, 0.12);
       color: var(--text-main);
     }
-    .bstm-pulse-icon {
+    .ma-pulse-icon {
       border-radius: 50%;
       box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
       animation: pulse 1.6s infinite;
@@ -4683,68 +4683,68 @@ function leaflet_interactive_corridor_dashboard(
   </style>
 </head>
 <body>
-  <header class="bstm-header">
-    <div class="bstm-title">
+  <header class="ma-header">
+    <div class="ma-title">
       <span>$title</span>
-      <span class="bstm-badge">Two-Click Dynamic Markov Path Explorer</span>
+      <span class="ma-badge">Two-Click Dynamic Markov Path Explorer</span>
     </div>
     <div style="font-size: 0.82rem; color: var(--text-muted);">
       Click any polygon for <b>Release</b>, then a second polygon for <b>Recapture</b>
     </div>
   </header>
 
-  <div class="bstm-map-container">
+  <div class="ma-map-container">
     <div id="corridor_map"></div>
 
-    <div class="bstm-floating-panel">
-      <div class="bstm-panel-title">
+    <div class="ma-floating-panel">
+      <div class="ma-panel-title">
         <span>Path Ensemble Controls</span>
-        <span id="paths_count_badge" class="bstm-badge" style="display:none;">0 paths</span>
+        <span id="paths_count_badge" class="ma-badge" style="display:none;">0 paths</span>
       </div>
 
-      <div class="bstm-endpoints-grid">
-        <div class="bstm-endpoint-card" style="border-left: 3px solid var(--start-color);">
-          <span class="bstm-ep-label" style="color: var(--start-color);">Release (Start)</span>
-          <span class="bstm-ep-val" id="ep_start">None</span>
+      <div class="ma-endpoints-grid">
+        <div class="ma-endpoint-card" style="border-left: 3px solid var(--start-color);">
+          <span class="ma-ep-label" style="color: var(--start-color);">Release (Start)</span>
+          <span class="ma-ep-val" id="ep_start">None</span>
         </div>
-        <div class="bstm-endpoint-card" style="border-left: 3px solid var(--end-color);">
-          <span class="bstm-ep-label" style="color: var(--end-color);">Recapture (End)</span>
-          <span class="bstm-ep-val" id="ep_end">None</span>
+        <div class="ma-endpoint-card" style="border-left: 3px solid var(--end-color);">
+          <span class="ma-ep-label" style="color: var(--end-color);">Recapture (End)</span>
+          <span class="ma-ep-val" id="ep_end">None</span>
         </div>
       </div>
 
-      <div class="bstm-status-box" id="status_text">
+      <div class="ma-status-box" id="status_text">
         Click a polygon on the map to select the <b>Release (Start)</b> unit.
       </div>
 
-      <div class="bstm-control-group">
-        <div class="bstm-control-label">
+      <div class="ma-control-group">
+        <div class="ma-control-label">
           <span>Migration Elapsed Steps (k)</span>
           <b id="k_val_label" style="color: var(--accent); font-family: var(--font-mono);">$k_default</b>
         </div>
-        <input type="range" class="bstm-slider" id="k_slider" min="1" max="20" value="$k_default">
+        <input type="range" class="ma-slider" id="k_slider" min="1" max="20" value="$k_default">
       </div>
 
-      <div class="bstm-control-group">
-        <div class="bstm-control-label">
+      <div class="ma-control-group">
+        <div class="ma-control-label">
           <span>Max Paths to Draw</span>
           <b id="paths_limit_label" style="color: var(--accent); font-family: var(--font-mono);">$max_paths_render</b>
         </div>
-        <input type="range" class="bstm-slider" id="paths_slider" min="5" max="50" value="$max_paths_render">
+        <input type="range" class="ma-slider" id="paths_slider" min="5" max="50" value="$max_paths_render">
       </div>
 
       $(length(group_names) > 1 ? """
-      <div class="bstm-control-group">
-        <div class="bstm-control-label">Biological Group</div>
-        <select class="bstm-select" id="group_select">
+      <div class="ma-control-group">
+        <div class="ma-control-label">Biological Group</div>
+        <select class="ma-select" id="group_select">
           $(join(["<option value=\"$g\">$g</option>" for g in group_names], "\n"))
         </select>
       </div>
       """ : "")
 
-      <div class="bstm-btn-group">
-        <button class="bstm-btn bstm-btn-secondary" onclick="clearSelection()">⟲ Clear</button>
-        <button class="bstm-btn" onclick="resetMapView()">🗺 Reset Map</button>
+      <div class="ma-btn-group">
+        <button class="ma-btn ma-btn-secondary" onclick="clearSelection()">⟲ Clear</button>
+        <button class="ma-btn" onclick="resetMapView()">🗺 Reset Map</button>
       </div>
     </div>
   </div>
@@ -4845,7 +4845,7 @@ function leaflet_interactive_corridor_dashboard(
       state.startUnit = uid;
       document.getElementById('ep_start').innerText = "#" + uid;
       var icon = L.divIcon({
-        className: 'bstm-pulse-icon',
+        className: 'ma-pulse-icon',
         html: '<div style="width:14px;height:14px;background:#10b981;border:2px solid #fff;border-radius:50%;"></div>',
         iconSize: [14, 14]
       });
@@ -4857,7 +4857,7 @@ function leaflet_interactive_corridor_dashboard(
       state.endUnit = uid;
       document.getElementById('ep_end').innerText = "#" + uid;
       var icon = L.divIcon({
-        className: 'bstm-pulse-icon',
+        className: 'ma-pulse-icon',
         html: '<div style="width:14px;height:14px;background:#f43f5e;border:2px solid #fff;border-radius:50%;"></div>',
         iconSize: [14, 14]
       });
@@ -5028,7 +5028,7 @@ end
         pinch_score::Union{Nothing, AbstractVector{<:Real}} = nothing,
         centroids::Union{Nothing, AbstractVector} = nothing,
         output_html::Union{Nothing, AbstractString} = nothing,
-        title::String = "BSTM Migratory Current Density & Ecological Pinch-Points",
+        title::String = "MovementAnalysis Migratory Current Density & Ecological Pinch-Points",
         colormap::Symbol = :inferno,
         dark_mode::Bool = true,
         width::String = "100%",
@@ -5052,7 +5052,7 @@ migratory current density field and critical ecological pinch-points across the 
         mesh::NamedTuple,
         res::PosteriorCircuitResult;
         prob_threshold::Real = 0.80,
-        title::String = "BSTM Posterior Migratory Current Density & Pinch-Points",
+        title::String = "MovementAnalysis Posterior Migratory Current Density & Pinch-Points",
         legend_title::String = "Posterior Mean Flux (J)",
         kwargs...
     ) -> LeafletMap
@@ -5065,7 +5065,7 @@ function leaflet_current_density_map(
     mesh::NamedTuple,
     res::PosteriorCircuitResult;
     prob_threshold::Real = 0.80,
-    title::String = "BSTM Posterior Migratory Current Density & Pinch-Points",
+    title::String = "MovementAnalysis Posterior Migratory Current Density & Pinch-Points",
     legend_title::String = "Posterior Mean Flux (J)",
     kwargs...
 )
@@ -5090,7 +5090,7 @@ function leaflet_current_density_map(
     pinch_score::Union{Nothing, AbstractVector{<:Real}} = nothing,
     centroids::Union{Nothing, AbstractVector} = nothing,
     output_html::Union{Nothing, AbstractString} = nothing,
-    title::String = "BSTM Migratory Current Density & Ecological Pinch-Points",
+    title::String = "MovementAnalysis Migratory Current Density & Ecological Pinch-Points",
     colormap::Symbol = :inferno,
     dark_mode::Bool = true,
     width::String = "100%",
@@ -5219,7 +5219,7 @@ function leaflet_current_density_map(
       flex-direction: column;
       overflow: hidden;
     }
-    .bstm-header {
+    .ma-header {
       background: var(--panel-bg);
       border-bottom: 1px solid var(--border-main);
       padding: 10px 20px;
@@ -5228,7 +5228,7 @@ function leaflet_current_density_map(
       align-items: center;
       z-index: 1000;
     }
-    .bstm-title {
+    .ma-title {
       font-size: 1.15rem;
       font-weight: 700;
       letter-spacing: -0.01em;
@@ -5236,7 +5236,7 @@ function leaflet_current_density_map(
       align-items: center;
       gap: 10px;
     }
-    .bstm-badge {
+    .ma-badge {
       font-size: 0.70rem;
       text-transform: uppercase;
       background: rgba(56, 189, 248, 0.2);
@@ -5245,7 +5245,7 @@ function leaflet_current_density_map(
       border-radius: 6px;
       font-weight: 600;
     }
-    .bstm-map-container {
+    .ma-map-container {
       position: relative;
       flex: 1;
       width: 100%;
@@ -5255,7 +5255,7 @@ function leaflet_current_density_map(
       height: 100%;
       background: #0b1120;
     }
-    .bstm-floating-panel {
+    .ma-floating-panel {
       position: absolute;
       top: 15px;
       right: 15px;
@@ -5268,7 +5268,7 @@ function leaflet_current_density_map(
       z-index: 1000;
       box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
     }
-    .bstm-stat-row {
+    .ma-stat-row {
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -5276,12 +5276,12 @@ function leaflet_current_density_map(
       font-size: 0.85rem;
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
-    .bstm-stat-val {
+    .ma-stat-val {
       font-family: var(--font-mono);
       font-weight: 600;
       color: var(--accent);
     }
-    .bstm-legend {
+    .ma-legend {
       position: absolute;
       bottom: 25px;
       left: 20px;
@@ -5293,20 +5293,20 @@ function leaflet_current_density_map(
       z-index: 1000;
       width: 280px;
     }
-    .bstm-legend-bar {
+    .ma-legend-bar {
       height: 12px;
       border-radius: 6px;
       margin: 8px 0 4px 0;
       background: $grad_css;
     }
-    .bstm-legend-labels {
+    .ma-legend-labels {
       display: flex;
       justify-content: space-between;
       font-size: 0.75rem;
       font-family: var(--font-mono);
       color: var(--text-muted);
     }
-    .bstm-toggle-btn {
+    .ma-toggle-btn {
       width: 100%;
       margin-top: 12px;
       padding: 8px;
@@ -5319,51 +5319,51 @@ function leaflet_current_density_map(
       cursor: pointer;
       transition: all 0.15s ease;
     }
-    .bstm-toggle-btn:hover {
+    .ma-toggle-btn:hover {
       background: rgba(56, 189, 248, 0.30);
       color: #fff;
     }
   </style>
 </head>
 <body>
-  <header class="bstm-header">
-    <div class="bstm-title">
+  <header class="ma-header">
+    <div class="ma-title">
       <span>$title</span>
-      <span class="bstm-badge">Circuit Theory / Ohm's Law</span>
+      <span class="ma-badge">Circuit Theory / Ohm's Law</span>
     </div>
     <div style="font-size: 0.82rem; color: var(--text-muted);">
       Population Migratory Flux & Bottleneck Corridors
     </div>
   </header>
 
-  <div class="bstm-map-container">
+  <div class="ma-map-container">
     <div id="density_map"></div>
 
-    <div class="bstm-floating-panel">
+    <div class="ma-floating-panel">
       <div style="font-weight: 700; font-size: 0.95rem; margin-bottom: 10px;">
         Connectivity Statistics
       </div>
-      <div class="bstm-stat-row">
+      <div class="ma-stat-row">
         <span style="color: var(--text-muted);">Active Spatial Units:</span>
-        <span class="bstm-stat-val">$S</span>
+        <span class="ma-stat-val">$S</span>
       </div>
-      <div class="bstm-stat-row">
+      <div class="ma-stat-row">
         <span style="color: var(--text-muted);">Max Current Density:</span>
-        <span class="bstm-stat-val">$max_str</span>
+        <span class="ma-stat-val">$max_str</span>
       </div>
-      <div class="bstm-stat-row">
+      <div class="ma-stat-row">
         <span style="color: var(--text-muted);">Critical Pinch-Points:</span>
-        <span class="bstm-stat-val" style="color: #38bdf8;">$n_pinch</span>
+        <span class="ma-stat-val" style="color: #38bdf8;">$n_pinch</span>
       </div>
-      <button id="toggle_pinch_btn" class="bstm-toggle-btn">
+      <button id="toggle_pinch_btn" class="ma-toggle-btn">
         Toggle Pinch-Point Highlight
       </button>
     </div>
 
-    <div class="bstm-legend">
+    <div class="ma-legend">
       <div style="font-size: 0.82rem; font-weight: 600;">$legend_title</div>
-      <div class="bstm-legend-bar"></div>
-      <div class="bstm-legend-labels">
+      <div class="ma-legend-bar"></div>
+      <div class="ma-legend-labels">
         <span>$min_str</span>
         <span>$max_str</span>
       </div>
@@ -5469,7 +5469,7 @@ end
         reconstruction::Union{Nothing, AbstractVector{<:Real}} = nothing,
         centroids::Union{Nothing, AbstractVector} = nothing,
         output_html::Union{Nothing, AbstractString} = nothing,
-        title::String = "BSTM Spectral Graph Wavelet Multi-Scale Dashboard",
+        title::String = "MovementAnalysis Spectral Graph Wavelet Multi-Scale Dashboard",
         signal_name::String = "Spatial Field",
         width::String = "100%",
         height::String = "750px"
@@ -5511,7 +5511,7 @@ function leaflet_graph_wavelet_dashboard(
     reconstruction::Union{Nothing, AbstractVector{<:Real}} = nothing,
     centroids::Union{Nothing, AbstractVector} = nothing,
     output_html::Union{Nothing, AbstractString} = nothing,
-    title::String = "BSTM Spectral Graph Wavelet Multi-Scale Dashboard",
+    title::String = "MovementAnalysis Spectral Graph Wavelet Multi-Scale Dashboard",
     signal_name::String = "Spatial Field",
     width::String = "100%",
     height::String = "750px"
@@ -5599,13 +5599,13 @@ function leaflet_graph_wavelet_dashboard(
     # Macro Approx bar
     p0 = sgwt_result.relative_energies[1] * 100.0
     push!(energy_bars_html, """
-      <div class="bstm-energy-row">
-        <div class="bstm-energy-label">
+      <div class="ma-energy-row">
+        <div class="ma-energy-label">
           <span>Macro Baseline</span>
           <span>$(round(p0, digits=1))%</span>
         </div>
-        <div class="bstm-bar-track">
-          <div class="bstm-bar-fill fill-approx" style="width: $(clamp(p0, 1.0, 100.0))%;"></div>
+        <div class="ma-bar-track">
+          <div class="ma-bar-fill fill-approx" style="width: $(clamp(p0, 1.0, 100.0))%;"></div>
         </div>
       </div>
     """)
@@ -5613,13 +5613,13 @@ function leaflet_graph_wavelet_dashboard(
         pj = sgwt_result.relative_energies[j + 1] * 100.0
         sj = sgwt_result.scales[j]
         push!(energy_bars_html, """
-          <div class="bstm-energy-row">
-            <div class="bstm-energy-label">
+          <div class="ma-energy-row">
+            <div class="ma-energy-label">
               <span>Scale $j (s=$(round(sj, digits=2)))</span>
               <span>$(round(pj, digits=1))%</span>
             </div>
-            <div class="bstm-bar-track">
-              <div class="bstm-bar-fill fill-scale-$j"
+            <div class="ma-bar-track">
+              <div class="ma-bar-fill fill-scale-$j"
                    style="width: $(clamp(pj, 1.0, 100.0))%;"></div>
             </div>
           </div>
@@ -5629,17 +5629,17 @@ function leaflet_graph_wavelet_dashboard(
 
     # Layer buttons HTML
     layer_btns_html = [
-        """<button class="bstm-layer-btn active" data-layer="orig">Original Field</button>""",
-        """<button class="bstm-layer-btn" data-layer="approx">Macro Baseline</button>"""
+        """<button class="ma-layer-btn active" data-layer="orig">Original Field</button>""",
+        """<button class="ma-layer-btn" data-layer="approx">Macro Baseline</button>"""
     ]
     for j in 1:J
         sj = round(sgwt_result.scales[j], digits=2)
         push!(layer_btns_html,
-            """<button class="bstm-layer-btn" data-layer="detail_$j">Scale $j (s=$sj)</button>""")
+            """<button class="ma-layer-btn" data-layer="detail_$j">Scale $j (s=$sj)</button>""")
     end
     if has_recon
         push!(layer_btns_html,
-            """<button class="bstm-layer-btn" data-layer="recon">Denoised / Recon</button>""")
+            """<button class="ma-layer-btn" data-layer="recon">Denoised / Recon</button>""")
     end
     buttons_html = join(layer_btns_html, "\n")
 
@@ -5674,7 +5674,7 @@ function leaflet_graph_wavelet_dashboard(
       flex-direction: column;
       overflow: hidden;
     }
-    .bstm-header {
+    .ma-header {
       background: var(--panel-bg);
       border-bottom: 1px solid var(--border-main);
       padding: 10px 20px;
@@ -5683,7 +5683,7 @@ function leaflet_graph_wavelet_dashboard(
       align-items: center;
       z-index: 1000;
     }
-    .bstm-title {
+    .ma-title {
       font-size: 1.15rem;
       font-weight: 700;
       letter-spacing: -0.01em;
@@ -5691,7 +5691,7 @@ function leaflet_graph_wavelet_dashboard(
       align-items: center;
       gap: 10px;
     }
-    .bstm-badge {
+    .ma-badge {
       font-size: 0.70rem;
       text-transform: uppercase;
       background: rgba(56, 189, 248, 0.2);
@@ -5700,7 +5700,7 @@ function leaflet_graph_wavelet_dashboard(
       border-radius: 6px;
       font-weight: 600;
     }
-    .bstm-map-container {
+    .ma-map-container {
       position: relative;
       flex: 1;
       width: 100%;
@@ -5710,7 +5710,7 @@ function leaflet_graph_wavelet_dashboard(
       height: 100%;
       background: #0b1120;
     }
-    .bstm-floating-panel {
+    .ma-floating-panel {
       position: absolute;
       top: 15px;
       right: 15px;
@@ -5724,7 +5724,7 @@ function leaflet_graph_wavelet_dashboard(
       max-height: calc(100vh - 120px);
       overflow-y: auto;
     }
-    .bstm-panel-title {
+    .ma-panel-title {
       font-size: 0.95rem;
       font-weight: 700;
       margin-bottom: 12px;
@@ -5732,13 +5732,13 @@ function leaflet_graph_wavelet_dashboard(
       padding-bottom: 6px;
       color: var(--text-main);
     }
-    .bstm-layer-grid {
+    .ma-layer-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 6px;
       margin-bottom: 16px;
     }
-    .bstm-layer-btn {
+    .ma-layer-btn {
       padding: 6px 10px;
       background: rgba(255, 255, 255, 0.05);
       border: 1px solid var(--border-main);
@@ -5750,32 +5750,32 @@ function leaflet_graph_wavelet_dashboard(
       transition: all 0.15s ease;
       text-align: center;
     }
-    .bstm-layer-btn:hover {
+    .ma-layer-btn:hover {
       background: rgba(56, 189, 248, 0.15);
       color: #fff;
     }
-    .bstm-layer-btn.active {
+    .ma-layer-btn.active {
       background: var(--accent);
       border-color: var(--accent);
       color: #0b1120;
       font-weight: 700;
     }
-    .bstm-stat-row {
+    .ma-stat-row {
       display: flex;
       justify-content: space-between;
       padding: 5px 0;
       font-size: 0.82rem;
       border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     }
-    .bstm-stat-val {
+    .ma-stat-val {
       font-family: var(--font-mono);
       font-weight: 600;
       color: var(--accent);
     }
-    .bstm-energy-row {
+    .ma-energy-row {
       margin-bottom: 8px;
     }
-    .bstm-energy-label {
+    .ma-energy-label {
       display: flex;
       justify-content: space-between;
       font-size: 0.76rem;
@@ -5783,13 +5783,13 @@ function leaflet_graph_wavelet_dashboard(
       color: var(--text-muted);
       margin-bottom: 2px;
     }
-    .bstm-bar-track {
+    .ma-bar-track {
       height: 6px;
       background: rgba(255, 255, 255, 0.1);
       border-radius: 3px;
       overflow: hidden;
     }
-    .bstm-bar-fill {
+    .ma-bar-fill {
       height: 100%;
       border-radius: 3px;
     }
@@ -5798,7 +5798,7 @@ function leaflet_graph_wavelet_dashboard(
     .fill-scale-2 { background: #f59e0b; }
     .fill-scale-3 { background: #10b981; }
     .fill-scale-4 { background: #8b5cf6; }
-    .bstm-legend {
+    .ma-legend {
       position: absolute;
       bottom: 25px;
       left: 20px;
@@ -5810,12 +5810,12 @@ function leaflet_graph_wavelet_dashboard(
       z-index: 1000;
       width: 280px;
     }
-    .bstm-legend-bar {
+    .ma-legend-bar {
       height: 12px;
       border-radius: 6px;
       margin: 8px 0 4px 0;
     }
-    .bstm-legend-labels {
+    .ma-legend-labels {
       display: flex;
       justify-content: space-between;
       font-size: 0.75rem;
@@ -5825,56 +5825,56 @@ function leaflet_graph_wavelet_dashboard(
   </style>
 </head>
 <body>
-  <header class="bstm-header">
-    <div class="bstm-title">
+  <header class="ma-header">
+    <div class="ma-title">
       <span>$title</span>
-      <span class="bstm-badge">Spectral Graph Wavelets</span>
+      <span class="ma-badge">Spectral Graph Wavelets</span>
     </div>
     <div style="font-size: 0.82rem; color: var(--text-muted);">
       Irregular Mesh Multiresolution Decomposition
     </div>
   </header>
 
-  <div class="bstm-map-container">
+  <div class="ma-map-container">
     <div id="wavelet_map"></div>
 
-    <div class="bstm-floating-panel">
-      <div class="bstm-panel-title">Spatial Resolution Layer</div>
-      <div class="bstm-layer-grid" id="layer_button_container">
+    <div class="ma-floating-panel">
+      <div class="ma-panel-title">Spatial Resolution Layer</div>
+      <div class="ma-layer-grid" id="layer_button_container">
         $buttons_html
       </div>
 
-      <div class="bstm-panel-title" style="margin-top: 10px;">Spatial Energy Distribution</div>
+      <div class="ma-panel-title" style="margin-top: 10px;">Spatial Energy Distribution</div>
       <div style="margin-bottom: 12px;">
         $energy_section_html
       </div>
 
-      <div class="bstm-panel-title">Spectral Metrics</div>
-      <div class="bstm-stat-row">
+      <div class="ma-panel-title">Spectral Metrics</div>
+      <div class="ma-stat-row">
         <span>Mesh Units (S):</span>
-        <span class="bstm-stat-val">$S</span>
+        <span class="ma-stat-val">$S</span>
       </div>
-      <div class="bstm-stat-row">
+      <div class="ma-stat-row">
         <span>Chebyshev Degree (M):</span>
-        <span class="bstm-stat-val">$(sgwt_result.order)</span>
+        <span class="ma-stat-val">$(sgwt_result.order)</span>
       </div>
-      <div class="bstm-stat-row">
+      <div class="ma-stat-row">
         <span>Laplacian Bound (λ_max):</span>
-        <span class="bstm-stat-val">$(round(sgwt_result.lambda_max, digits=4))</span>
+        <span class="ma-stat-val">$(round(sgwt_result.lambda_max, digits=4))</span>
       </div>
-      <div class="bstm-stat-row">
+      <div class="ma-stat-row">
         <span>Total Energy:</span>
-        <span class="bstm-stat-val">$(@sprintf("%.4e", sgwt_result.total_energy))</span>
+        <span class="ma-stat-val">$(@sprintf("%.4e", sgwt_result.total_energy))</span>
       </div>
     </div>
 
-    <div class="bstm-legend">
+    <div class="ma-legend">
       <div id="legend_title"
            style="font-size: 0.82rem; font-weight: 700; color: var(--text-main);">
         $signal_name (Original)
       </div>
-      <div class="bstm-legend-bar" id="legend_gradient"></div>
-      <div class="bstm-legend-labels">
+      <div class="ma-legend-bar" id="legend_gradient"></div>
+      <div class="ma-legend-labels">
         <span id="legend_min"></span>
         <span id="legend_max"></span>
       </div>
@@ -6048,7 +6048,7 @@ function leaflet_graph_wavelet_dashboard(
     }
     updateLegend();
 
-    var buttons = document.querySelectorAll('.bstm-layer-btn');
+    var buttons = document.querySelectorAll('.ma-layer-btn');
     buttons.forEach(function(btn) {
       btn.onclick = function() {
         buttons.forEach(function(b) { b.classList.remove('active'); });
