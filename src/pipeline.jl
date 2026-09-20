@@ -955,8 +955,12 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
             v_draws = vec(Array(active_chain[first(v_matches)]))
             d_draws = vec(Array(active_chain[first(d_matches)]))
             for s in 1:min(n_draws, length(v_draws), length(d_draws))
-                v_val = v_draws[s] isa AbstractArray ? v_draws[s][g] : v_draws[s]
-                d_val = d_draws[s] isa AbstractArray ? d_draws[s][g] : d_draws[s]
+                v_raw = v_draws[s]
+                v_val = v_raw isa AbstractArray ?
+                        (length(v_raw) >= g ? v_raw[g] : v_raw[1]) : v_raw
+                d_raw = d_draws[s]
+                d_val = d_raw isa AbstractArray ?
+                        (length(d_raw) >= g ? d_raw[g] : d_raw[1]) : d_raw
                 tot = Float64(v_val) + Float64(d_val) + 1e-6
                 alpha_samples[s, g] = clamp(Float64(v_val) / tot, 0.0, 1.0)
                 rho_samples[s, g]   = clamp(1.0 / (1.0 + tot), 0.01, 0.95)
@@ -974,7 +978,10 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
         if !isempty(g_matches)
             g_draws = vec(Array(active_chain[first(g_matches)]))
             for s in 1:min(n_draws, length(g_draws))
-                gamma_samples[s, g] = Float64(g_draws[s])
+                g_raw = g_draws[s]
+                g_val = g_raw isa AbstractArray ?
+                        (length(g_raw) >= g ? g_raw[g] : g_raw[1]) : g_raw
+                gamma_samples[s, g] = Float64(g_val)
             end
         else
             rng_g = MersenneTwister(params.seed + g * 23)

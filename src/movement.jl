@@ -3707,7 +3707,6 @@ function predict_corridor(
         error("Release unit ($release) and recapture unit ($recapture) must be within 1:$S.")
     end
 
-    P_mat = Matrix{Float64}(P)
     corridor = zeros(Float64, S, k + 1)
 
     if k <= 0
@@ -3715,15 +3714,24 @@ function predict_corridor(
         return corridor
     end
 
-    # Precompute powers P^tau for tau = 0 to k
-    P_powers = Vector{Matrix{Float64}}(undef, k + 1)
-    P_powers[1] = Matrix{Float64}(I, S, S)
+    # Iterative sparse-vector multiplication instead of dense matrix powers
+    # Forward probabilities: v_fwd[j, tau+1] = P(X_tau = j | X_0 = release)
+    v_fwd = zeros(Float64, S, k + 1)
+    v_fwd[release, 1] = 1.0
+    P_t = P' # Transpose once for efficiency
     for tau in 1:k
-        P_powers[tau + 1] = P_powers[tau] * P_mat
+        v_fwd[:, tau + 1] = P_t * v_fwd[:, tau]
+    end
+
+    # Backward probabilities: v_bwd[j, m+1] = P(X_k = recapture | X_{k-m} = j)
+    v_bwd = zeros(Float64, S, k + 1)
+    v_bwd[recapture, 1] = 1.0
+    for m in 1:k
+        v_bwd[:, m + 1] = P * v_bwd[:, m]
     end
 
     # Total likelihood of transitioning from release to recapture in k steps
-    P_total = P_powers[k + 1][release, recapture]
+    P_total = v_fwd[recapture, k + 1]
 
     if P_total <= 1e-15
         @warn "Recapture unit $recapture has near-zero reachability from release $release in $k steps."
@@ -3746,8 +3754,8 @@ function predict_corridor(
         tau_idx = tau + 1
         rem_idx = (k - tau) + 1
         for j in 1:S
-            prob_fwd = P_powers[tau_idx][release, j]
-            prob_bwd = P_powers[rem_idx][j, recapture]
+            prob_fwd = v_fwd[j, tau_idx]
+            prob_bwd = v_bwd[j, rem_idx]
             corridor[j, tau_idx] = (prob_fwd * prob_bwd) / P_total
         end
         # Enforce land barrier: strictly zero probability on land
@@ -5518,7 +5526,7 @@ function model_trait_movement_associations(
         se_beta1 = ss_xx > 1e-10 ? s_err / sqrt(ss_xx) : 1.0
         t_stat = se_beta1 > 1e-10 ? beta_1 / se_beta1 : 0.0
 
-        p_val = 2.0 * (1.0 - 0.5 * (1.0 + erf(abs(t_stat) / sqrt(2.0))))
+        p_val = 2.0 * ccdf(TDist(df_deg), abs(t_stat))
         p_val = clamp(p_val, 0.0, 1.0)
 
         results[t_name] = (

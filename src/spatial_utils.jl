@@ -754,7 +754,7 @@ Topographic slope is evaluated as:
   - `:synthetic` (default): Realistic regional shelf synthesis featuring coastal
     shallows (0–40 m), offshore banks (30–70 m), basins (150–250 m), submarine
     canyons (e.g. The Gully), shelf break (200 m), and continental slope (up to 2500 m).
-  - `filepath::AbstractString`: Path to a local `.nc`, `.tif`, `.csv`, `.duckdb`, or `.jld2` file.
+  - `filepath::AbstractString`: Path to a local `.nc`, `.tif`, `.csv`, or `.jld2` file.
 - `bbox::Tuple{Real, Real, Real, Real}`: Geographic bounding box `(min_lon, max_lon, min_lat, max_lat)`.
 - `grid_resolution::Tuple{Int, Int}`: Regular grid dimensions `(nx, ny)`. Default: `(60, 50)`.
 - `seed::Int`: Random seed for synthetic bathymetric perturbations.

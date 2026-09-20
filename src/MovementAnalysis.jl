@@ -31,7 +31,6 @@ using Wavelets
 using WaveletsExt
 
 using JLD2
-using DuckDB
 using Turing
 
 # Source modules in logical dependency order
@@ -93,6 +92,7 @@ export
     tag_to_study_id,
 
     # Kernel Construction & Transition Probabilities
+    build_sparse_transition_kernel,
     construct_stochastic_transition_kernel,
     construct_dynamic_transition_kernels,
     calculate_multistep_transition,

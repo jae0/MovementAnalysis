@@ -1143,11 +1143,11 @@ function leaflet_choropleth(
       maxZoom: 13
     });
 
-    $(dark_mode ? "cartoDark.addTo(map);" : "cartoLight.addTo(map);")
+    esriOcean.addTo(map);
+    baseLayers["Esri Ocean (Bathymetry)"] = esriOcean;
     baseLayers["CartoDB Dark"] = cartoDark;
     baseLayers["CartoDB Positron"] = cartoLight;
     baseLayers["OpenStreetMap"] = osm;
-    baseLayers["Esri Ocean"] = esriOcean;
 
     var geojsonData = $(geojson_collection);
 
@@ -1455,11 +1455,11 @@ function leaflet_spatial_graph(
     var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
     var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 13 });
 
-    $(base_layer_add)
+    esriOcean.addTo(map);
+    baseLayers["Esri Ocean (Bathymetry)"] = esriOcean;
     baseLayers["CartoDB Dark"] = cartoDark;
     baseLayers["CartoDB Positron"] = cartoLight;
     baseLayers["OpenStreetMap"] = osm;
-    baseLayers["Esri Ocean"] = esriOcean;
 
     var overlayLayers = {};
 
@@ -2264,11 +2264,11 @@ function leaflet_tracks_map(
       maxZoom: 13
     });
 
-    $(dark_mode ? "cartoDark.addTo(map);" : "cartoLight.addTo(map);")
+    esriOcean.addTo(map);
+    baseLayers["Esri Ocean (Bathymetry)"] = esriOcean;
     baseLayers["CartoDB Dark"] = cartoDark;
     baseLayers["CartoDB Positron"] = cartoLight;
     baseLayers["OpenStreetMap"] = osm;
-    baseLayers["Esri Ocean"] = esriOcean;
 
     var overlayLayers = {};
 
@@ -2852,11 +2852,11 @@ function leaflet_spacetime_map(
       maxZoom: 13
     });
 
-    $(dark_mode ? "cartoDark.addTo(map);" : "cartoLight.addTo(map);")
+    esriOcean.addTo(map);
+    baseLayers["Esri Ocean (Bathymetry)"] = esriOcean;
     baseLayers["CartoDB Dark"] = cartoDark;
     baseLayers["CartoDB Positron"] = cartoLight;
     baseLayers["OpenStreetMap"] = osm;
-    baseLayers["Esri Ocean"] = esriOcean;
 
     var timeSteps = [$(join(["\"$t\"" for t in unique_t], ", "))];
     var timeData = $(time_series_json);
@@ -4389,11 +4389,45 @@ function leaflet_interactive_corridor_dashboard(
                 (hasproperty(au, :polygons) ? au.polygons : Vector{Vector{Tuple{Float64, Float64}}}())
     S = length(cents_raw)
 
+    # Collect coordinates to configure coordinate transformer
+    wkt_str = _extract_wkt(au)
+    all_raw_pts = Tuple{Float64, Float64}[]
+    for c in cents_raw
+        if length(c) >= 2 && !isnan(c[1]) && !isnan(c[2])
+            push!(all_raw_pts, (float(c[1]), float(c[2])))
+        end
+    end
+    if !isempty(polys_raw)
+        for poly in polys_raw, pt in poly
+            if length(pt) >= 2 && !isnan(pt[1]) && !isnan(pt[2])
+                push!(all_raw_pts, (float(pt[1]), float(pt[2])))
+            end
+        end
+    end
+    if !isnothing(empirical_paths) && isa(empirical_paths, AbstractVector)
+        for tr in empirical_paths
+            if isa(tr, AbstractVector)
+                for pt in tr
+                    if length(pt) >= 2 && !isnan(pt[1]) && !isnan(pt[2])
+                        push!(all_raw_pts, (float(pt[1]), float(pt[2])))
+                    end
+                end
+            end
+        end
+    end
+
+    tf = _build_coordinate_transformer(
+        all_raw_pts;
+        wkt = wkt_str,
+        lon_center = -60.0,
+        lat_center = 45.0
+    )
+
     # Normalize kernel input into group dictionary
     kernels_dict = Dict{String, Matrix{Float64}}()
     if P isa AbstractVector
         for (idx, mat) in enumerate(P)
-            g_lbl = idx <= length(group_labels) ? group_labels[idx] : "Group \$idx"
+            g_lbl = idx <= length(group_labels) ? group_labels[idx] : "Group $idx"
             kernels_dict[g_lbl] = Matrix{Float64}(mat)
         end
     else
@@ -4431,9 +4465,10 @@ function leaflet_interactive_corridor_dashboard(
     end
     all_kernels_json = "{" * join(groups_json_parts, ",\n") * "}"
 
-    # Centroids JSON: lookup of [lon, lat] per unit ID
+    # Centroids JSON: lookup of [lon, lat] per unit ID transformed to display CRS
+    cents_trans = [_transform_point(tf, c) for c in cents_raw]
     cents_json_parts = String[]
-    for (i, c) in enumerate(cents_raw)
+    for (i, c) in enumerate(cents_trans)
         push!(cents_json_parts,
             string("\"" , i, "\": [",
                    round(Float64(c[1]), digits=6), ", ",
@@ -4448,8 +4483,12 @@ function leaflet_interactive_corridor_dashboard(
 
     polys_json = String[]
     for (i, poly) in enumerate(polys_raw)
-        if length(poly) >= 3
-            c_str = ["[$(round(Float64(pt[1]), digits=6)), $(round(Float64(pt[2]), digits=6))]" for pt in poly]
+        poly_trans = _transform_polygon(tf, poly)
+        if length(poly_trans) >= 3
+            c_str = [
+                "[$(round(Float64(pt[1]), digits=6)), $(round(Float64(pt[2]), digits=6))]"
+                for pt in poly_trans
+            ]
             if c_str[1] != c_str[end]
                 push!(c_str, c_str[1])
             end
@@ -4470,8 +4509,12 @@ function leaflet_interactive_corridor_dashboard(
     emp_json = String[]
     if !isnothing(empirical_paths)
         for (idx, tr) in enumerate(empirical_paths)
-            if length(tr) >= 2
-                c_str = join(["[$(round(Float64(pt[1]), digits=6)), $(round(Float64(pt[2]), digits=6))]" for pt in tr], ", ")
+            tr_trans = [_transform_point(tf, pt) for pt in tr]
+            if length(tr_trans) >= 2
+                c_str = join([
+                    "[$(round(Float64(pt[1]), digits=6)), $(round(Float64(pt[2]), digits=6))]"
+                    for pt in tr_trans
+                ], ", ")
                 push!(emp_json, """{
                   "type": "Feature",
                   "id": $idx,
@@ -4484,8 +4527,8 @@ function leaflet_interactive_corridor_dashboard(
     emp_collection = "{\"type\": \"FeatureCollection\", \"features\": [$(join(emp_json, ",\n"))]}"
 
     # Compute bounding box center
-    all_lons = [Float64(c[1]) for c in cents_raw if !isnan(c[1])]
-    all_lats = [Float64(c[2]) for c in cents_raw if !isnan(c[2])]
+    all_lons = [Float64(c[1]) for c in cents_trans if !isnan(c[1])]
+    all_lats = [Float64(c[2]) for c in cents_trans if !isnan(c[2])]
     mid_lon = !isempty(all_lons) ? (minimum(all_lons) + maximum(all_lons)) / 2.0 : -60.0
     mid_lat = !isempty(all_lats) ? (minimum(all_lats) + maximum(all_lats)) / 2.0 : 45.0
 
@@ -4761,10 +4804,13 @@ function leaflet_interactive_corridor_dashboard(
     // 2. Map Initialization
     var map = L.map('corridor_map', { attributionControl: false }).setView([$mid_lat, $mid_lon], 7);
 
-    var cartoDark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 }).addTo(map);
-    var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 13 });
+    var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '&copy; Esri &copy; GEBCO, NOAA',
+      maxZoom: 13
+    }).addTo(map);
+    var cartoDark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', { maxZoom: 19 });
 
-    var baseLayers = { "CartoDB Dark": cartoDark, "Esri Ocean": esriOcean };
+    var baseLayers = { "Esri Ocean (Bathymetry)": esriOcean, "CartoDB Dark": cartoDark };
     var overlayLayers = {};
 
     // Base Polygons Layer
@@ -4797,8 +4843,14 @@ function leaflet_interactive_corridor_dashboard(
     }).addTo(map);
     overlayLayers["Spatial Mesh (HSI)"] = polyLayer;
 
-    if (polyLayer && polyLayer.getBounds().isValid()) {
-      map.fitBounds(polyLayer.getBounds(), { padding: [25, 25] });
+    try {
+      if (polyLayer && polyLayer.getBounds().isValid()) {
+        map.fitBounds(polyLayer.getBounds(), { padding: [25, 25] });
+      } else {
+        map.setView([$mid_lat, $mid_lon], 7);
+      }
+    } catch(e) {
+      map.setView([$mid_lat, $mid_lon], 7);
     }
 
     // Optional Empirical Tracks Layer
@@ -4878,7 +4930,15 @@ function leaflet_interactive_corridor_dashboard(
     }
 
     function resetMapView() {
-      map.setView([$mid_lat, $mid_lon], 7);
+      try {
+        if (polyLayer && polyLayer.getBounds().isValid()) {
+          map.fitBounds(polyLayer.getBounds(), { padding: [25, 25] });
+        } else {
+          map.setView([$mid_lat, $mid_lon], 7);
+        }
+      } catch(e) {
+        map.setView([$mid_lat, $mid_lon], 7);
+      }
     }
 
     // 4. Client-Side Dynamic Path Ensemble Search
@@ -5378,9 +5438,9 @@ function leaflet_current_density_map(
       preferCanvas: true
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap, &copy; CARTO',
-      maxZoom: 19
+    var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '&copy; Esri &copy; GEBCO, NOAA',
+      maxZoom: 13
     }).addTo(map);
 
     var rawGeojson = $geojson_str;
@@ -5889,9 +5949,9 @@ function leaflet_graph_wavelet_dashboard(
       preferCanvas: true
     });
 
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap, &copy; CARTO',
-      maxZoom: 19
+    var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '&copy; Esri &copy; GEBCO, NOAA',
+      maxZoom: 13
     }).addTo(map);
 
     var rawGeojson = $geojson_str;

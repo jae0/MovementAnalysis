@@ -3,6 +3,7 @@ using MovementAnalysis
 using SparseArrays
 using Random
 using DataFrames
+using Statistics: mean
 
 @testset "Agent-Based Movement" begin
     # 1. Simple small graph

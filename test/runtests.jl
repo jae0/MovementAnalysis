@@ -8,6 +8,7 @@ using LinearAlgebra
 using SparseArrays
 using Random
 using DataFrames
+using Statistics
 using Turing
 using DynamicPPL
 
@@ -58,6 +59,15 @@ using DynamicPPL
         for i in 1:5
             @test isapprox(sum(P[i, :]), 1.0; atol = 1e-6)
         end
+
+        # Verify sparse kernel row-stochasticity across parameter regimes
+        for gamma in [0.0, 1.0, 10.0, -10.0], rho in [0.1, 0.5, 0.9], alpha in [0.0, 0.5, 1.0]
+            P_sp = build_sparse_transition_kernel(W, hsi, gamma, rho, alpha, nothing)
+            @test all(P_sp .>= 0.0)
+            for i in 1:5
+                @test isapprox(sum(P_sp[i, :]), 1.0; atol = 1e-6)
+            end
+        end
     end
 
     @testset "Explicit Turing Telemetry Model" begin
@@ -79,11 +89,14 @@ using DynamicPPL
         @test m_tel isa DynamicPPL.Model
 
         rng = MersenneTwister(42)
-        chn = sample(rng, m_tel, MH(), 30; progress = false)
-        @test size(chn, 1) == 30
+        chn = sample(rng, m_tel, MH(), 100; progress = false)
+        @test size(chn, 1) == 100
         @test chn[:velocity] !== nothing
         @test chn[:diffusion] !== nothing
         @test chn[:gamma] !== nothing
+        @test all(v -> all(!isnan, v), chn[:velocity])
+        @test all(v -> all(!isnan, v), chn[:diffusion])
+        @test all(v -> all(!isnan, v), chn[:gamma])
     end
 
     @testset "A* Least-Cost Routing" begin
@@ -140,11 +153,117 @@ using DynamicPPL
     end
 
     @testset "Leaflet HTML Map Structure" begin
-        map_obj = LeafletMap("<div>Map Content</div>"; title = "Test Title", width = "100%", height = "600px")
+        map_obj = LeafletMap(
+            "<div>Map Content</div>";
+            title = "Test Title",
+            width = "100%",
+            height = "600px"
+        )
         @test map_obj isa LeafletMap
         @test occursin("Test Title", map_obj.title)
     end
 
+    @testset "Interactive Corridor Dashboard & Open Bathymetry" begin
+        # 3-node graph and stochastic transition matrix
+        P = [
+            0.2 0.8 0.0;
+            0.3 0.4 0.3;
+            0.0 0.5 0.5
+        ]
+
+        # Test with geographic coordinates (Lon/Lat)
+        au_geo = (
+            centroids = [(-63.5, 44.5), (-63.0, 44.8), (-62.5, 45.0)],
+            polygons = [
+                [(-63.6, 44.4), (-63.4, 44.4), (-63.4, 44.6), (-63.6, 44.6)],
+                [(-63.1, 44.7), (-62.9, 44.7), (-62.9, 44.9), (-63.1, 44.9)],
+                [(-62.6, 44.9), (-62.4, 44.9), (-62.4, 45.1), (-62.6, 45.1)]
+            ]
+        )
+
+        map_geo = leaflet_interactive_corridor_dashboard(
+            P, au_geo;
+            title = "Test Corridor Map",
+            group_labels = ["All"]
+        )
+        @test map_geo isa LeafletMap
+        @test occursin("esriOcean", map_geo.html)
+        @test occursin("server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base", map_geo.html)
+        @test occursin("Test Corridor Map", map_geo.html)
+        @test !occursin("api_key", lowercase(map_geo.html))
+
+        # Test with planar Cartesian coordinates (testing coordinate transformer)
+        au_planar = (
+            centroids = [
+                (10000.0, 20000.0),
+                (15000.0, 25000.0),
+                (20000.0, 30000.0)
+            ],
+            polygons = [
+                [
+                    (9000.0, 19000.0), (11000.0, 19000.0),
+                    (11000.0, 21000.0), (9000.0, 21000.0)
+                ],
+                [
+                    (14000.0, 24000.0), (16000.0, 24000.0),
+                    (16000.0, 26000.0), (14000.0, 26000.0)
+                ],
+                [
+                    (19000.0, 29000.0), (21000.0, 29000.0),
+                    (21000.0, 31000.0), (19000.0, 31000.0)
+                ]
+            ]
+        )
+        map_planar = leaflet_interactive_corridor_dashboard(
+            [P, P], au_planar;
+            title = "Planar Test Map",
+            group_labels = ["Group 1", "Group 2"]
+        )
+        @test map_planar isa LeafletMap
+        @test occursin("esriOcean", map_planar.html)
+        @test occursin("Group 1", map_planar.html)
+        @test occursin("Group 2", map_planar.html)
+    end
+
+    @testset "Trait-Movement Associations OLS" begin
+        obs_df = DataFrame(
+            tag_id = 1:10,
+            carapace_width = [
+                95.0, 102.0, 108.0, 115.0, 120.0,
+                125.0, 130.0, 135.0, 140.0, 145.0
+            ]
+        )
+        mov_stats = (
+            net_displacement_km = [
+                10.0, 12.0, 15.0, 18.0, 20.0,
+                24.0, 28.0, 30.0, 33.0, 36.0
+            ],
+            path_efficiency     = [
+                0.50, 0.52, 0.55, 0.58, 0.60,
+                0.62, 0.65, 0.68, 0.70, 0.72
+            ],
+            tortuosity          = [
+                2.0, 1.9, 1.8, 1.7, 1.6,
+                1.5, 1.4, 1.3, 1.2, 1.1
+            ]
+        )
+        loaded = (au = nothing,)
+
+        assoc = model_trait_movement_associations(obs_df, mov_stats, loaded)
+        @test haskey(assoc, :trait_name)
+        @test assoc.trait_name == "carapace_width"
+        @test haskey(assoc.models, "displacement")
+        @test haskey(assoc.models, "efficiency")
+        @test haskey(assoc.models, "tortuosity")
+
+        disp_model = assoc.models["displacement"]
+        @test disp_model.beta_1 > 0.0
+        @test disp_model.r2 > 0.9
+        @test disp_model.p_val < 0.01
+        @test 0.0 <= disp_model.p_val <= 1.0
+    end
+
     include("test_ssa_movement.jl")
+    include("test_agent_movement.jl")
 
 end

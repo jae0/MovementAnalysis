@@ -36,57 +36,85 @@ where ``T^{\\text{diff}}`` is the unbiased random walk matrix.
 - `SparseMatrixCSC`: Row-stochastic transition probability matrix.
 """
 function build_sparse_transition_kernel(
-    W::SparseMatrixCSC{Float64, Int},
-    hsi::Vector{Float64},
+    W::SparseMatrixCSC{<:Real, <:Integer},
+    hsi::AbstractVector{<:Real},
     gamma, residence, advection, land_mask
 )
     S = size(W, 1)
-    w_row_sums = sum(W, dims=2)
-    inv_deg = [w > 0.0 ? 1.0 / w : 0.0 for w in w_row_sums]
-    
-    T = promote_type(eltype(W), typeof(gamma), typeof(residence), typeof(advection))
-    I_idx = Int[]; J_idx = Int[]; V_val = T[]
-    sizehint!(I_idx, nnz(W) + S); sizehint!(J_idx, nnz(W) + S); sizehint!(V_val, nnz(W) + S)
-    
+    T = promote_type(Float64, eltype(W), typeof(gamma), typeof(residence), typeof(advection))
+    I_idx = Int[]
+    J_idx = Int[]
+    V_val = T[]
+    sizehint!(I_idx, nnz(W) + S)
+    sizehint!(J_idx, nnz(W) + S)
+    sizehint!(V_val, nnz(W) + S)
+
     rows = rowvals(W)
     vals = nonzeros(W)
-    
-    rho = clamp(residence, 0.01, 0.95)
-    alpha = clamp(advection, 0.0, 1.0)
+
+    rho = clamp(Float64(residence), 0.0, 0.999)
+    alpha = clamp(Float64(advection), 0.0, 1.0)
     w_move = 1.0 - rho
     w_adv = w_move * alpha
     w_diff = w_move * (1.0 - alpha)
-    
+    gam = Float64(gamma)
+
     for i in 1:S
         if !isnothing(land_mask) && land_mask[i]
-            push!(I_idx, i); push!(J_idx, i); push!(V_val, 1.0)
+            push!(I_idx, i)
+            push!(J_idx, i)
+            push!(V_val, 1.0)
             continue
         end
-        
-        sum_taxis = 0.0
+
+        h_i = Float64(hsi[i])
+
+        # 1. Identify eligible marine neighbors (excluding self-loops)
+        nbrs = Int[]
+        nbr_w = Float64[]
         for idx in nzrange(W, i)
             j = rows[idx]
-            if isnothing(land_mask) || !land_mask[j]
-                sum_taxis += exp(gamma * (hsi[j] - hsi[i]))
+            if j != i && (isnothing(land_mask) || !land_mask[j])
+                push!(nbrs, j)
+                push!(nbr_w, Float64(vals[idx]))
             end
         end
-        
+
+        if isempty(nbrs)
+            push!(I_idx, i)
+            push!(J_idx, i)
+            push!(V_val, 1.0)
+            continue
+        end
+
+        # 2. Diffusive weights: normalized by total marine degree
+        sum_deg = sum(nbr_w)
+        diff_weights = sum_deg > 0.0 ? nbr_w ./ sum_deg : fill(1.0 / length(nbrs), length(nbrs))
+
+        # 3. Directed taxis weights: log-sum-exp numerically stable softmax
+        dh = [clamp(gam * (Float64(hsi[j]) - h_i), -25.0, 25.0) for j in nbrs]
+        max_dh = maximum(dh)
+        exp_dh = [w * exp(d - max_dh) for (w, d) in zip(nbr_w, dh)]
+        sum_exp = sum(exp_dh)
+        tax_weights = sum_exp > 0.0 ? exp_dh ./ sum_exp : diff_weights
+
+        # 4. Assemble off-diagonal transition probabilities
         row_sum = 0.0
-        for idx in nzrange(W, i)
-            j = rows[idx]
-            if isnothing(land_mask) || !land_mask[j]
-                diff_w = vals[idx] * inv_deg[i]
-                tax_w = sum_taxis > 0.0 ? exp(gamma * (hsi[j] - hsi[i])) / sum_taxis : 0.0
-                
-                val = w_adv * tax_w + w_diff * diff_w
-                if val > 1e-12
-                    push!(I_idx, i); push!(J_idx, j); push!(V_val, val)
-                    row_sum += val
-                end
+        for (k_idx, j) in enumerate(nbrs)
+            val = w_adv * tax_weights[k_idx] + w_diff * diff_weights[k_idx]
+            if val > 1e-12
+                push!(I_idx, i)
+                push!(J_idx, j)
+                push!(V_val, val)
+                row_sum += val
             end
         end
-        
-        push!(I_idx, i); push!(J_idx, i); push!(V_val, rho + (1.0 - row_sum))
+
+        # 5. Diagonal residence probability guarantees exact row-stochasticity (sum = 1.0)
+        diag_val = max(0.0, 1.0 - row_sum)
+        push!(I_idx, i)
+        push!(J_idx, i)
+        push!(V_val, diag_val)
     end
     return sparse(I_idx, J_idx, V_val, S, S)
 end
@@ -208,8 +236,13 @@ responsiveness (gamma) parameters driving stochastic transition probability kern
         v = zeros(eltype(P_kernels[g]), size(W, 1))
         v[rel] = 1.0
         P_g_T = sparse(P_kernels[g]')
-        for _ in 1:k_n
+        k_steps = max(0, k_n)
+        for _ in 1:k_steps
             v = P_g_T * v
+            s_v = sum(v)
+            if s_v > 1e-12
+                v ./= s_v
+            end
         end
         P_row_cache[(rel, k_n, g)] = v
     end
@@ -219,7 +252,9 @@ responsiveness (gamma) parameters driving stochastic transition probability kern
         rel = releases[n]; rec = recaptures[n]; k_n = ks[n]; g = groups[n]
         p_row = P_row_cache[(rel, k_n, g)]
         p_sum = sum(p_row)
-        prob = p_sum > 1e-12 ? max(p_row[rec] / p_sum, 1e-12) : (1.0 / length(p_row))
+        rec_prob = (p_sum > 1e-12 && !isnan(p_sum)) ?
+                   (p_row[rec] / p_sum) : (1.0 / length(p_row))
+        prob = (isnan(rec_prob) || rec_prob < 1e-12) ? 1e-12 : min(rec_prob, 1.0)
         Turing.@addlogprob! log(prob)
     end
 end
@@ -251,7 +286,7 @@ with mark-recapture telemetry transition probabilities.
     diffusion ~ filldist(truncated(Normal(0.1, 0.2), 0.0, Inf), G)
     gamma     ~ filldist(Normal(1.0, 1.0), G)
 
-    mu = exp.(beta0 .+ beta_depth .* depths)
+    mu = exp.(clamp.(beta0 .+ beta_depth .* (depths ./ 100.0), -20.0, 20.0))
     prob_nb = r_nb ./ (r_nb .+ mu)
     for i in 1:length(counts)
         counts[i] ~ NegativeBinomial(r_nb, prob_nb[i])
@@ -263,7 +298,9 @@ with mark-recapture telemetry transition probabilities.
 
     P_kernels = Vector{SparseMatrixCSC}(undef, G)
     for g in 1:G
-        P_kernels[g] = build_sparse_transition_kernel(W, hsi, gamma[g], rho[g], alpha[g], land_mask)
+        P_kernels[g] = build_sparse_transition_kernel(
+            W, hsi, gamma[g], rho[g], alpha[g], land_mask
+        )
     end
 
     unique_rel_k = unique(zip(releases, ks, groups))
@@ -272,8 +309,13 @@ with mark-recapture telemetry transition probabilities.
         v = zeros(eltype(P_kernels[g]), size(W, 1))
         v[rel] = 1.0
         P_g_T = sparse(P_kernels[g]')
-        for _ in 1:k_n
+        k_steps = max(0, k_n)
+        for _ in 1:k_steps
             v = P_g_T * v
+            s_v = sum(v)
+            if s_v > 1e-12
+                v ./= s_v
+            end
         end
         P_row_cache[(rel, k_n, g)] = v
     end
@@ -283,7 +325,9 @@ with mark-recapture telemetry transition probabilities.
         rel = releases[n]; rec = recaptures[n]; k_n = ks[n]; g = groups[n]
         p_row = P_row_cache[(rel, k_n, g)]
         p_sum = sum(p_row)
-        prob = p_sum > 1e-12 ? max(p_row[rec] / p_sum, 1e-12) : (1.0 / length(p_row))
+        rec_prob = (p_sum > 1e-12 && !isnan(p_sum)) ?
+                   (p_row[rec] / p_sum) : (1.0 / length(p_row))
+        prob = (isnan(rec_prob) || rec_prob < 1e-12) ? 1e-12 : min(rec_prob, 1.0)
         Turing.@addlogprob! log(prob)
     end
 end
@@ -358,8 +402,9 @@ The finite-time transition probability for observation \$n\$ across continuous i
     for n in 1:N
         rel = releases[n]; rec = recaptures[n]; g = groups[n]; dt = dts[n]
         p_row = P_row_cache[(rel, dt, g)]
-        p_sum = sum(p_row)
-        prob = p_sum > 1e-12 ? max(p_row[rec] / p_sum, 1e-12) : (1.0 / length(p_row))
+        rec_prob = (p_sum > 1e-12 && !isnan(p_sum)) ?
+                   (p_row[rec] / p_sum) : (1.0 / length(p_row))
+        prob = (isnan(rec_prob) || rec_prob < 1e-12) ? 1e-12 : min(rec_prob, 1.0)
         Turing.@addlogprob! log(prob)
     end
 end
@@ -393,7 +438,7 @@ continuous-time SSA advection-diffusion mark-recapture telemetry transition kern
     diffusion ~ filldist(truncated(Normal(0.1, 0.2), 0.0, Inf), G)
     gamma     ~ filldist(Normal(1.0, 1.0), G)
 
-    mu = exp.(beta0 .+ beta_depth .* depths)
+    mu = exp.(clamp.(beta0 .+ beta_depth .* (depths ./ 100.0), -20.0, 20.0))
     prob_nb = r_nb ./ (r_nb .+ mu)
     for i in 1:length(counts)
         counts[i] ~ NegativeBinomial(r_nb, prob_nb[i])
@@ -422,7 +467,9 @@ continuous-time SSA advection-diffusion mark-recapture telemetry transition kern
         rel = releases[n]; rec = recaptures[n]; g = groups[n]; dt = dts[n]
         p_row = P_row_cache[(rel, dt, g)]
         p_sum = sum(p_row)
-        prob = p_sum > 1e-12 ? max(p_row[rec] / p_sum, 1e-12) : (1.0 / length(p_row))
+        rec_prob = (p_sum > 1e-12 && !isnan(p_sum)) ?
+                   (p_row[rec] / p_sum) : (1.0 / length(p_row))
+        prob = (isnan(rec_prob) || rec_prob < 1e-12) ? 1e-12 : min(rec_prob, 1.0)
         Turing.@addlogprob! log(prob)
     end
 end
