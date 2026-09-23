@@ -325,6 +325,120 @@ function _extract_domain_depths(mesh, data, resharded_depths)::Vector{Float64}
         return fill(150.0, n)
     end
 end
+"""
+    _resolve_hsi_for_time(loaded, t_decimal) -> Vector{Float64}
+
+Returns the spatial HSI vector appropriate for decimal year `t_decimal`.
+
+If `loaded.monthly_hsi` is non-empty and `loaded.month_lookup` contains an
+entry for the (year, month) inferred from `t_decimal`, the corresponding
+column of `monthly_hsi` is returned.  Otherwise the climatological mean
+`loaded.hsi_vec` is returned as a fallback.
+
+Decimal year `t_decimal` is decomposed as:
+```
+year  = floor(Int, t_decimal)
+month = clamp(ceil(Int, (t_decimal - year) * 12), 1, 12)
+```
+
+# Arguments
+- `loaded`: NamedTuple from `load_movement_data` (must contain `hsi_vec`,
+  `monthly_hsi`, `month_lookup`).
+- `t_decimal`: Release time in decimal years (e.g. 2018.583 ≈ August 2018).
+
+# Returns
+`Vector{Float64}` of length `n_spatial`.
+"""
+function _resolve_hsi_for_time(loaded, t_decimal::Real)::Vector{Float64}
+    mhsi = loaded.monthly_hsi
+    mlup = loaded.month_lookup
+    if !isempty(mhsi) && !isempty(mlup)
+        yr  = floor(Int, t_decimal)
+        mo  = clamp(ceil(Int, (t_decimal - yr) * 12), 1, 12)
+        col = get(mlup, (yr, mo), nothing)
+        if col !== nothing && 1 <= col <= size(mhsi, 2)
+            return mhsi[:, col]
+        end
+    end
+    return loaded.hsi_vec
+end
+
+"""
+    _bridge_depth_disconnected_basins(
+        W_depth    :: SparseMatrixCSC,
+        W_marine   :: SparseMatrixCSC,
+        land_mask  :: BitVector,
+        depth_mask :: BitVector
+    ) -> SparseMatrixCSC
+
+Augments the depth-constrained adjacency `W_depth` with minimal local bridge
+edges that allow movement between depth-valid basins separated only by
+out-of-depth marine transit zones.
+
+## Algorithm
+
+For each out-of-depth marine node `t` (i.e. `!land_mask[t] && depth_mask[t]`),
+collect the set of its in-depth marine neighbours `N_t` in `W_marine`. Add a
+symmetric bridge edge between every pair `(u, v) ∈ N_t × N_t` that is not
+already adjacent in `W_depth`. Bridge weight equals the minimum non-zero entry
+along column `t` of `W_marine`, preserving the adjacency scale.
+
+This local one-hop strategy adds at most `deg(t)*(deg(t)-1)/2` edges per
+transit node and is O(nnz(W_marine)) overall — no global BFS needed, no
+O(n²) component-pair enumeration.
+"""
+function _bridge_depth_disconnected_basins(
+    W_depth   ::SparseMatrixCSC{Float64, Int},
+    W_marine  ::SparseMatrixCSC{Float64, Int},
+    land_mask ::BitVector,
+    depth_mask::BitVector
+)::SparseMatrixCSC{Float64, Int}
+    S           = size(W_depth, 1)
+    depth_valid = BitVector(.!land_mask .& .!depth_mask)   # in-depth marine
+    transit     = BitVector(.!land_mask .&  depth_mask)     # out-of-depth marine
+
+    extra_I = Int[]
+    extra_J = Int[]
+    extra_V = Float64[]
+
+    # Iterate over each transit node t; find its in-depth marine neighbours
+    for t in findall(transit)
+        # Collect in-depth neighbours of t in W_marine
+        indepth_nbrs = Int[]
+        w_min = Inf
+        for ptr in W_marine.colptr[t]:(W_marine.colptr[t+1]-1)
+            v = W_marine.rowval[ptr]
+            if depth_valid[v]
+                push!(indepth_nbrs, v)
+            end
+            w = W_marine.nzval[ptr]
+            w > 0.0 && (w_min = min(w_min, w))
+        end
+        length(indepth_nbrs) < 2 && continue   # no bridge needed
+        bridge_w = isinf(w_min) ? 1.0 : w_min
+
+        # Add bridge between every pair of in-depth neighbours not yet adjacent
+        for ii in 1:length(indepth_nbrs)
+            u = indepth_nbrs[ii]
+            for jj in (ii+1):length(indepth_nbrs)
+                v = indepth_nbrs[jj]
+                # Check whether u-v already adjacent in W_depth
+                already = false
+                for ptr in W_depth.colptr[u]:(W_depth.colptr[u+1]-1)
+                    W_depth.rowval[ptr] == v && (already = true; break)
+                end
+                already && continue
+                push!(extra_I, u); push!(extra_J, v); push!(extra_V, bridge_w)
+                push!(extra_I, v); push!(extra_J, u); push!(extra_V, bridge_w)
+            end
+        end
+    end
+
+    isempty(extra_I) && return W_depth
+    W_aug = W_depth + sparse(extra_I, extra_J, extra_V, S, S)
+    dropzeros!(W_aug)
+    return W_aug
+end
 
 """
     _is_graph_reachable(W, start_node, end_node, max_k) -> Bool
@@ -589,7 +703,7 @@ function load_movement_data(params)::NamedTuple
     if parsed_depth_range !== nothing
         min_d, max_d = parsed_depth_range
         verbose && println(
-            "\n[Phase 1c] Enforcing depth barrier: [$min_d, $max_d] m..."
+            "\n[Phase 1c] Enforcing depth range: [$min_d, $max_d] m..."
         )
         depths_vec   = _extract_domain_depths(mesh, data, resharded_depths)
         out_of_depth = BitVector([d < min_d || d > max_d for d in depths_vec])
@@ -601,41 +715,189 @@ function load_movement_data(params)::NamedTuple
             )
         end
 
-        combined_barrier = land_mask !== nothing ?
-                           BitVector(land_mask .| out_of_depth) :
-                           out_of_depth
-        W, hsi_vec = apply_land_barrier(W, hsi_vec, combined_barrier)
-        land_mask  = combined_barrier
+        # depth_barrier_mode controls how out-of-depth marine nodes are treated:
+        #
+        #   :hsi_only (default)
+        #       W uses land-only barrier (full marine connectivity preserved).
+        #       Out-of-depth nodes have HSI clamped to a small floor value so
+        #       the habitat-gradient term strongly discourages transit through
+        #       them without creating structural disconnections.
+        #
+        #   :hard
+        #       W uses depth+land combined barrier (hard structural constraint).
+        #       Observations spanning disconnected depth-corridor basins are
+        #       dropped. Use when depth imposes a true physical barrier.
+        #
+        #   :bridge
+        #       W uses depth+land combined barrier, then adds sparse bridge
+        #       edges wherever two in-depth basins share a marine transit
+        #       corridor (shallow/deep). Avoids drops but can generate many
+        #       extra edges when basins are numerous.
+        depth_mode = Symbol(get(params, :depth_barrier_mode, :hsi_only))
 
+        # Land-only W: always needed for reachability checks and :hsi_only mode
+        land_only_bv = land_mask !== nothing ?
+            BitVector(land_mask) : falses(n_spatial)
+        W_marine_only, _ = apply_land_barrier(W, hsi_vec, land_only_bv)
+
+        if depth_mode == :hsi_only
+            # Structural W: land barrier only
+            W, hsi_vec = apply_land_barrier(W, hsi_vec, land_only_bv)
+            # Encode depth preference via HSI floor for out-of-depth nodes
+            hsi_floor  = Float64(get(params, :hsi_ood_floor, 0.01))
+            hsi_vec[out_of_depth .& .!land_only_bv] .= min.(
+                hsi_vec[out_of_depth .& .!land_only_bv], hsi_floor
+            )
+            land_mask = land_only_bv   # structural mask = land only
+            verbose && println(
+                "  Mode :hsi_only -- depth preference via HSI floor ($hsi_floor);"*
+                " W connectivity uses land-only barrier."
+            )
+        else
+            combined_barrier = land_mask !== nothing ?
+                               BitVector(land_mask .| out_of_depth) :
+                               out_of_depth
+            W, hsi_vec = apply_land_barrier(W, hsi_vec, combined_barrier)
+            land_mask  = combined_barrier
+
+            if depth_mode == :bridge
+                W_pre = W
+                land_only_snap = land_only_bv
+                W = _bridge_depth_disconnected_basins(
+                    W, W_marine_only, land_only_snap, out_of_depth
+                )
+                n_bridge_edges = div(nnz(W) - nnz(W_pre), 2)
+                verbose && n_bridge_edges > 0 && println(
+                    "  Added $n_bridge_edges bridge edges through out-of-depth " *
+                    "marine transit zones."
+                )
+            end
+        end
+
+        # Identify in-depth (or in-mode) valid units for endpoint remapping
+        # In :hsi_only mode valid = marine (land_mask = land-only)
+        # In :hard/:bridge mode valid = in-depth marine
+        valid_units = if depth_mode == :hsi_only
+            findall(.!out_of_depth .& .!land_only_bv)   # prefer in-depth
+        else
+            findall(.!land_mask)
+        end
         n_obs_orig = nrow(obs_df)
-        valid_mask = [
-            !combined_barrier[r.release]  &&
-            !combined_barrier[r.recapture] &&
-            _is_graph_reachable(W, r.release, r.recapture, r.k)
+
+        if !isempty(valid_units)
+            cents_raw = hasproperty(mesh, :centroids_lonlat) ?
+                mesh.centroids_lonlat :
+                hasproperty(mesh, :centroids) ? mesh.centroids : nothing
+
+            obs_df = copy(obs_df)
+            obs_df[!, :release_orig]   = copy(obs_df.release)
+            obs_df[!, :recapture_orig] = copy(obs_df.recapture)
+
+            if cents_raw !== nothing
+                valid_cents = cents_raw[valid_units]
+
+                # Combined barrier for endpoint-out-of-range check
+                out_bv = depth_mode == :hsi_only ? out_of_depth : land_mask
+
+                bad_rel_mask = [out_bv[r] for r in obs_df.release]
+                bad_rec_mask = [out_bv[r] for r in obs_df.recapture]
+                n_remapped_rel = count(bad_rel_mask)
+                n_remapped_rec = count(bad_rec_mask)
+
+                if n_remapped_rel > 0
+                    bad_rel_idx   = findall(bad_rel_mask)
+                    bad_rel_units = obs_df.release[bad_rel_idx]
+                    lons = [Float64(cents_raw[u][1]) for u in bad_rel_units]
+                    lats = [Float64(cents_raw[u][2]) for u in bad_rel_units]
+                    local_idx = map_to_units(lons, lats, valid_cents)
+                    obs_df.release[bad_rel_idx] = valid_units[local_idx]
+                end
+
+                if n_remapped_rec > 0
+                    bad_rec_idx   = findall(bad_rec_mask)
+                    bad_rec_units = obs_df.recapture[bad_rec_idx]
+                    lons = [Float64(cents_raw[u][1]) for u in bad_rec_units]
+                    lats = [Float64(cents_raw[u][2]) for u in bad_rec_units]
+                    local_idx = map_to_units(lons, lats, valid_cents)
+                    obs_df.recapture[bad_rec_idx] = valid_units[local_idx]
+                end
+
+                if verbose && (n_remapped_rel + n_remapped_rec) > 0
+                    println(
+                        "  Remapped $n_remapped_rel release / " *
+                        "$n_remapped_rec recapture endpoints to nearest " *
+                        "in-depth marine unit."
+                    )
+                end
+            end
+        end
+
+        # Reachability check: use land-only W so depth-mode differences don't
+        # matter here; if truly unreachable through any marine path the
+        # observation is a coordinate error or genuine isolation.
+        W_reach = W_marine_only   # land-only W for checking
+        n_k0    = count(r -> r.k <= 0 && r.release != r.recapture, eachrow(obs_df))
+        reachable_mask = [
+            _is_graph_reachable(W_reach, r.release, r.recapture, r.k)
             for r in eachrow(obs_df)
         ]
-        obs_df    = obs_df[valid_mask, :]
-        n_dropped = n_obs_orig - nrow(obs_df)
-        n_dropped > 0 && verbose && println(
-            "  Filtered $n_dropped obs outside depth corridor."
-        )
+        n_dropped = count(.!reachable_mask)
+
+        if n_dropped > 0
+            dropped_df = obs_df[.!reachable_mask, :]
+            if verbose
+                println(
+                    "  Dropped $n_dropped obs unreachable via any marine route " *
+                    "(likely coordinate/datum errors):"
+                )
+                cents_raw = hasproperty(mesh, :centroids_lonlat) ?
+                    mesh.centroids_lonlat : nothing
+                for r in eachrow(dropped_df)
+                    rel_coord = cents_raw !== nothing ?
+                        "($(round(cents_raw[r.release_orig][1]; digits=4)), " *
+                        "$(round(cents_raw[r.release_orig][2]; digits=4)))" :
+                        "node $(r.release_orig)"
+                    rec_coord = cents_raw !== nothing ?
+                        "($(round(cents_raw[r.recapture_orig][1]; digits=4)), " *
+                        "$(round(cents_raw[r.recapture_orig][2]; digits=4)))" :
+                        "node $(r.recapture_orig)"
+                    println(
+                        "    tagid=$(r.tagid)  k=$(r.k)" *
+                        "  rel=$rel_coord  rec=$rec_coord"
+                    )
+                end
+            end
+        end
+        obs_df = obs_df[reachable_mask, :]
+
         nrow(obs_df) == 0 && error(
             "Depth constraint [$min_d, $max_d] m excluded all " *
             "mark-recapture events. Widen depth_range."
         )
 
         if !isnothing(survey_df) && hasproperty(survey_df, :s_idx)
-            survey_df = survey_df[
-                [!combined_barrier[s] for s in survey_df.s_idx], :
-            ]
+            # In :hsi_only mode survey units don't need depth filtering
+            if depth_mode != :hsi_only
+                survey_df = survey_df[
+                    [!land_mask[s] for s in survey_df.s_idx], :
+                ]
+            end
         end
     end
+
+    # Forward monthly HSI and lookup from data for time-varying kernel support
+    monthly_hsi  = hasproperty(data, :monthly_hsi)  ? data.monthly_hsi  : Matrix{Float64}(undef, 0, 0)
+    month_lookup = hasproperty(data, :month_lookup)  ? data.month_lookup  : Dict{Tuple{Int,Int}, Int}()
+    years_vec    = hasproperty(data, :years)         ? data.years         : Int[]
 
     return (
         data               = data,
         mesh               = mesh,
         W                  = W,
         hsi_vec            = hsi_vec,
+        monthly_hsi        = monthly_hsi,
+        month_lookup       = month_lookup,
+        years              = years_vec,
         obs_df             = obs_df,
         survey_df          = survey_df,
         group_map          = group_map,
@@ -1086,14 +1348,42 @@ function reconstruct_paths_and_diagnostics(
         else
             fpath = Int[sub_obs.release[1]]
             for row in eachrow(sub_obs)
+                # Select the monthly HSI slice for this segment's release time
+                t_rel  = hasproperty(row, :rel_time) ? row.rel_time : NaN
+                hsi_row = isnan(t_rel) ? hsi_vec :
+                          _resolve_hsi_for_time(loaded, t_rel)
+
+                # Build a segment-specific kernel if HSI differs from the
+                # pre-computed P_k (time-varying case)
+                P_seg = if hsi_row === hsi_vec
+                    P_k
+                else
+                    a_hat = kernels.alpha_hat isa AbstractVector ?
+                        kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
+                        kernels.alpha_hat
+                    r_hat = kernels.rho_hat isa AbstractVector ?
+                        kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
+                        kernels.rho_hat
+                    g_hat = kernels.gamma_hat isa AbstractVector ?
+                        kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
+                        kernels.gamma_hat
+                    construct_stochastic_transition_kernel(
+                        W, hsi_row;
+                        gamma     = g_hat,
+                        residence = r_hat,
+                        advection = a_hat,
+                        land_mask = land_mask
+                    )
+                end
+
                 seg = if hasproperty(loaded.mesh, :is_fine)
                     astar_multiresolution_path(
                         loaded.mesh, row.release, row.recapture;
-                        hsi = hsi_vec, land_mask = land_mask
+                        hsi = hsi_row, land_mask = land_mask
                     )
                 else
                     predict_path(
-                        P_k, row.release, row.recapture, row.k;
+                        P_seg, row.release, row.recapture, row.k;
                         centroids = cents_mesh,
                         method    = params.path_method,
                         land_mask = land_mask
@@ -1110,6 +1400,9 @@ function reconstruct_paths_and_diagnostics(
 
         # Markov bridge corridor heatmap for the first segment
         first_row = first(sub_obs)
+        t_rel_first = hasproperty(first_row, :rel_time) ? first_row.rel_time : NaN
+        hsi_first   = isnan(t_rel_first) ? hsi_vec :
+                      _resolve_hsi_for_time(loaded, t_rel_first)
         prop_hsi  = get(params, :propagate_hsi_error, true) && params.hsi_se > 0.0
         n_hsi_m   = prop_hsi ? min(params.n_stochastic_draws, 5) : 1
 
@@ -1120,7 +1413,7 @@ function reconstruct_paths_and_diagnostics(
                     params.seed + abs(hash(string(tid))) % 10_000 + d
                 )
                 hsi_d = clamp.(
-                    hsi_vec .+ randn(rng_d, n_spatial) .* params.hsi_se,
+                    hsi_first .+ randn(rng_d, n_spatial) .* params.hsi_se,
                     0.001, 1.0
                 )
                 a_hat = kernels.alpha_hat isa AbstractVector ?
@@ -1656,6 +1949,67 @@ function export_dashboards(
         "  Rich path NamedTuples built: $(length(all_paths_rich))"
     )
 
+    # -- Append IBM stochastic path realizations -------------------------
+    # Each StochasticAStarResult stores a full ensemble of individual IBM
+    # paths (all_paths::Vector{Vector{Int}}). These are added as distinct
+    # lighter-coloured entries so they are visible alongside the MAP track.
+    ibm_palette = [
+        "#7dd3fc", "#fda4af", "#6ee7b7", "#fde68a",
+        "#c4b5fd", "#fdba74", "#67e8f9", "#f0abfc",
+    ]
+    n_ibm_added = 0
+    for (tid, stoch_res) in path_results.stochastic_paths
+        stoch_res isa StochasticAStarResult || continue
+        sub_obs = filter(:tagid => ==(tid), obs_df)
+        grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
+              first(sub_obs.group) : 1
+        base_color = ibm_palette[(grp - 1) % length(ibm_palette) + 1]
+
+        for (r_idx, node_vec) in enumerate(stoch_res.all_paths)
+            length(node_vec) < 2 && continue
+            coords = Tuple{Float64, Float64}[
+                (Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
+                for u in node_vec
+                if 1 <= u <= n_units
+            ]
+            length(coords) < 2 && continue
+
+            total_dist = sum(
+                haversine_distance(
+                    coords[h-1][1], coords[h-1][2],
+                    coords[h][1],   coords[h][2]
+                ) / 1_000.0
+                for h in 2:length(coords)
+            )
+            push!(all_paths_rich, (
+                tagid           = string(tid) * "_ibm$r_idx",
+                path            = node_vec,
+                coords          = coords,
+                n_steps         = length(coords) - 1,
+                total_dist_km   = total_dist,
+                displacement_km = haversine_distance(
+                    coords[1][1], coords[1][2],
+                    coords[end][1], coords[end][2]
+                ) / 1_000.0,
+                tortuosity      = 1.0,
+                mean_hsi        = mean([
+                    (1 <= u <= length(hsi_vec)) ? hsi_vec[u] : 0.5
+                    for u in node_vec
+                ]),
+                color           = base_color,
+                duration_days   = Float64(
+                    !isempty(sub_obs) ? sum(sub_obs.k) : 1
+                ),
+                group           = grp,
+                group_label     = "IBM Realization",
+            ))
+            n_ibm_added += 1
+        end
+    end
+    verbose && n_ibm_added > 0 && println(
+        "  IBM stochastic realizations added: $n_ibm_added"
+    )
+
     # -- Movement paths dashboard ---------------------------------
     try
         html_file = joinpath(out_dir, "movement_paths_dashboard.html")
@@ -1854,7 +2208,7 @@ end
 
 
 # =============================================================================
-# Phase 4b: Priority Mark-Recapture Analyses
+# Phase 5c: Priority Mark-Recapture Analyses
 # =============================================================================
 
 """
@@ -1883,7 +2237,7 @@ function execute_priority_analyses(
     mkpath(out_dir)
 
     verbose && println(
-        "\n[Phase 4b] Running Priority Mark-Recapture Analyses..."
+        "\n[Phase 5c] Running Priority Mark-Recapture Analyses..."
     )
 
     pa = run_priority_analyses(loaded, fitted, kernels, params, out_dir)
@@ -1955,10 +2309,18 @@ function run_movement_analysis(
             println("\n[Phase 2b] Simulating Agent-Based Movement Alternative Model...")
         end
         n_sim_agents = min(100, nrow(loaded.obs_df))
-        # Use observed release sites to start agents
-        start_nodes = loaded.obs_df.release_unit[1:n_sim_agents]
-        groups = [loaded.group_map[g] for g in loaded.obs_df.group[1:n_sim_agents]]
-        
+        # Use observed release sites to start agents (column is :release, not :release_unit)
+        start_nodes = loaded.obs_df.release[1:n_sim_agents]
+        # group_map maps String -> Int; obs_df.group may already be Int group indices
+        obs_groups  = loaded.obs_df.group[1:n_sim_agents]
+        groups = if eltype(obs_groups) <: Integer
+            # Already integer group indices; use directly
+            Int.(obs_groups)
+        else
+            # String keys: look up via group_map
+            [get(loaded.group_map, string(g), 1) for g in obs_groups]
+        end
+
         agent_trajectories = simulate_agent_trajectories(
             n_sim_agents, start_nodes, groups, kernels.P_kernel, 50; seed=params.seed
         )

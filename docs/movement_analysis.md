@@ -1,29 +1,29 @@
 # Movement Analysis: Pipeline Guide & Technical Reference
 
-This document provides a comprehensive technical guide to the Movement mark-recapture analysis pipeline.
 ---
 
 ## 1. Overview & Architecture
 
-The movement pipeline reconstructs individual animal trajectories,
-evaluates population-level spatial connectivity, quantifies multi-scale
-migratory corridors, and propagates Bayesian posterior parameter uncertainty.
+The movement pipeline reconstructs individual animal trajectories, evaluates
+population-level spatial connectivity, quantifies migratory corridors, and
+propagates Bayesian posterior parameter uncertainty across a discrete hexagonal
+spatial domain.
 
 The framework is organized into six cohesive phases:
 
 ```
 [Phase 1] Data Ingestion & Mesh Preparation
    │      - Telemetry observation loading (empirical or simulated)
-   │      - Hexagonal domain resharding & depth barrier masking
-   │      - Optional adaptive multiresolution domain generation
+   │      - Hexagonal domain resharding & depth preference encoding
+   │      - Optional adaptive multiresolution domain
    ▼
-[Phase 2] Bayesian Model Fitting  
+[Phase 2] Bayesian Model Fitting
    │      - Categorical pure-telemetry Markov likelihood
    │      - Joint Negative Binomial survey density & telemetry model
    ▼
 [Phase 3] Stochastic Transition Kernel Construction
-   │      - Group-stratified advection-diffusion-taxis parameter extraction
-   │      - Multi-epoch non-stationary transition kernels P^(t)
+   │      - Group-stratified advection-diffusion-taxis extraction
+   │      - Time-varying (monthly) kernel construction from seasonal HSI
    ▼
 [Phase 4] Trajectory & Corridor Reconstruction
    │      - A* least-cost paths, Viterbi dynamic programming, HMM smoothing
@@ -31,8 +31,8 @@ The framework is organized into six cohesive phases:
    │      - Domain-wide transit bottlenecks B(u) = C(u) / deg(u)
    ▼
 [Phase 4b] Priority Mark-Recapture Analyses
-   │      - Individual trajectory credible intervals (length, waypoints)
-   │      - Regional stock connectivity matrix & posterior credible intervals
+   │      - Individual trajectory credible intervals
+   │      - Regional stock connectivity matrix & credible intervals
    │      - Posterior predictive checks (Brier score, KL divergence)
    │      - Full Bayesian MCMC ensemble path & corridor propagation
    ▼
@@ -48,410 +48,416 @@ The framework is organized into six cohesive phases:
 
 ## 2. Pipeline Execution Phases
 
-### Phase 1: Data Ingestion, Resharding, and Traversal Barriers
+### Phase 1: Data Ingestion, Resharding, and Depth Encoding
+
 Function: `load_movement_data(params)`
 
-- Loads empirical mark-recapture data (e.g. Scotian Shelf snow crab) or
-  generates synthetic multi-segment telemetry histories with known ground truth.
-- **Hexagonal Resharding**: When `reshard_hex = true`, resamples coarse areal units
-  onto a regular hexagonal lattice of radius `hex_radius_km` using LibGEOS polygon
-  clipping and area-weighted centroid interpolation.
-- **Traversal Barriers**: When `depth_range = (min_d, max_d)` is specified, bathymetric
-  depth fields are evaluated to tag units outside the viable physiological range
-  as impermeable land/depth barriers (`land_mask[u] = true`).
-- **Adaptive Multiresolution**: When `adaptive_mesh = true`, synthesizes a dual-scale
-  domain with coarse offshore cells ($r_{\text{coarse}}$) and refined coastal
-  cells ($r_{\text{fine}}$) joined by cross-scale adjacency edges.
+#### 1a. Observation Loading
 
-### Phase 2: Convex Bayesian Model Fitting
+Loads empirical mark-recapture data (e.g. Scotian Shelf snow crab) or generates
+synthetic multi-segment telemetry histories with known ground truth. Each
+observation pair records:
+
+- `release`, `recapture`: mesh node indices.
+- `k`: elapsed time steps (derived from `Δt / dt` where `dt` is the time
+  resolution, e.g. `1/365.25` for daily).
+- `rel_time`: decimal-year timestamp of release (e.g. `2018.583 ≈ Aug 2018`),
+  used to select the correct monthly HSI slice during path reconstruction.
+- `sex`, `mat`: biological group covariates.
+
+#### 1b. Hexagonal Resharding
+
+When `reshard_hex = true`, resamples coarse areal units onto a regular hexagonal
+lattice of radius `hex_radius_km` using LibGEOS polygon clipping and
+area-weighted centroid interpolation. Observation endpoints are remapped to
+the nearest active marine unit in the fine mesh.
+
+#### 1c. Depth Range Encoding
+
+When `depth_range = (min_d, max_d)` is specified, bathymetric depth fields are
+evaluated to identify out-of-depth marine nodes. Behaviour is controlled by
+`depth_barrier_mode`:
+
+| Mode | W connectivity | Depth treatment | Observations dropped |
+|:-----|:--------------|:----------------|:--------------------|
+| `:hsi_only` **(default)** | Land-only barrier | HSI clamped to `hsi_ood_floor` (default 0.01) for out-of-depth nodes | Only genuine coordinate errors |
+| `:hard` | Depth + land combined barrier | Hard structural exclusion | Observations spanning disconnected depth corridors |
+| `:bridge` | Depth + land barrier + local bridge edges | Bridge edges connect in-depth neighbours separated by thin transit corridors | Only coordinate errors |
+
+**Rationale for `:hsi_only`**: applying depth as a hard structural constraint
+on the adjacency matrix $W$ fragments physically contiguous marine regions at
+fine mesh resolutions (5 km hexagons), creating many disconnected basins where
+none truly exist. The `:hsi_only` approach encodes depth preference entirely
+through the habitat suitability index — the advective taxis term
+$\exp(\gamma(H_j - H_i))$ strongly discourages transit through low-HSI
+out-of-depth nodes without severing connectivity.
+
+**Bridge method** (when `:bridge` is selected): for each out-of-depth marine
+transit node $t$, bridge edges are added between every pair of its in-depth
+marine neighbours $\{u, v\} \subseteq N_t$ not already adjacent in $W$. Cost is
+$O(\text{nnz}(W_{\text{marine}}))$ — a single pass over existing edges, at most
+$\binom{\deg(t)}{2}$ new edges per transit node. This replaces the prior
+component-wide BFS that produced $O(n^2)$ edges per disconnected component.
+
+#### Reachability Check
+
+After all remapping, a final BFS on the land-only $W$ detects observations
+whose endpoints cannot be connected via any marine route. These are reported
+by `tagid` and original lon/lat coordinates and are likely GPS/datum errors:
+
+```
+  Dropped N obs unreachable via any marine route (likely coordinate/datum errors):
+    tagid=SC_XXXX  k=7  rel=(-63.21, 45.18)  rec=(-63.22, 45.19)
+```
+
+---
+
+### Phase 2: Bayesian Model Fitting
+
 Function: `fit_movement_models(loaded, params)`
 
-Fits convex movement parameters via Turing.jl :
-- **Telemetry Likelihood (Discrete-Time)**:
-  $$\log \mathcal{L}(\mathbf{y}_{1:T} \mid \theta) =
-    \sum_{t=1}^{T-1} \log T_{y_t, y_{t+1}}(\theta)$$
-  where $\theta = (\alpha_g, \rho_g, \gamma_g)$ denote per-group advection
-  weight, site fidelity (residence probability), and habitat gradient responsiveness.
-- **Continuous-Time SSA Telemetry Likelihood**:
-  Alternatively, fits physical parameters $(v_g, D_g, \gamma_g)$ governing the spatial Markov jump process. The time evolution of the state probability distribution is described by the Master Equation (Nordsieck, Lamb & Uhlenbeck, 1940), also known as the Pauli Master Equation or M-equation, which is an equivalent linear form of the Chapman-Kolmogorov equation for Markov processes. The continuous-time Stochastic Simulation Algorithm (SSA) evaluates the transition probability matrix $T$ over continuous elapsed time intervals $\Delta t$:
-  $$T(\Delta t) = \exp(Q_g \Delta t)$$
-  where $Q_g$ is the infinitesimal advection-diffusion generator.
-- **Joint Density-Movement Model**: Integrates scientific survey counts $C_s$ via
-  Negative Binomial observation likelihood coupled to habitat suitability $H_s$. Can be used with both discrete-time and SSA transition kernels.
+Fits movement parameters via Turing.jl NUTS (No-U-Turn Sampler) using
+**ForwardDiff automatic differentiation**. The transition kernel
+`build_sparse_transition_kernel` is fully generic over the element type,
+accepting `ForwardDiff.Dual` numbers during gradient evaluation. All
+intermediate computations use the promoted type `T = promote_type(Float64,
+typeof(gamma), ...)` to preserve dual-number partials.
+
+#### Model Parameters
+
+The model samples three physical parameters per group $g$:
+
+- `velocity[g]` $\sim \text{Truncated-Normal}(0.3, 0.2; 0, 0.95)$: raw
+  advection rate.
+- `diffusion[g]` $\sim \text{Truncated-Normal}(0.1, 0.2; 0, \infty)$: raw
+  isotropic diffusion rate.
+- `gamma[g]` $\sim \text{Normal}(1.0, 1.0)$: habitat gradient responsiveness.
+
+Derived parameters:
+
+$$\alpha_g = \frac{v_g}{v_g + D_g + \epsilon}, \qquad
+  \rho_g = \frac{1}{1 + v_g + D_g + \epsilon}$$
+
+where $\epsilon = 10^{-6}$ avoids division by zero.
+
+#### Likelihood (Discrete-Time Telemetry)
+
+$$\log \mathcal{L}(\mathbf{y}_{1:T} \mid \theta) =
+  \sum_{t=1}^{T-1} \log [T_g^{k_t}]_{y_t, y_{t+1}}$$
+
+where $T_g^k$ is the $k$-step matrix power of the group-$g$ transition kernel
+and $(y_t, y_{t+1})$ are the release/recapture node indices of observation $t$.
+
+**HSI in MCMC**: the Turing model uses the climatological mean `hsi_vec`
+(temporal average across all months). This is intentional — parameters
+$(v_g, D_g, \gamma_g)$ are global; conditioning on a time-specific HSI during
+HMC would require a different kernel per observation, making gradient
+evaluation infeasible. Time-varying HSI is applied post-estimation during
+path reconstruction and kernel construction (Phase 3–4).
+
+#### Continuous-Time SSA Telemetry Model
+
+Alternatively, fits parameters governing a spatial Markov jump process. The
+transition probability matrix over elapsed time $\Delta t$ is:
+
+$$T(\Delta t) = \exp(Q_g \Delta t)$$
+
+where $Q_g$ is the infinitesimal advection-diffusion-taxis generator.
+Evaluated via the Uniformization (Poisson-Krylov) algorithm applied to a
+sparse initial state vector to avoid forming the full matrix exponential.
+
+#### Joint Density-Movement Model
+
+Integrates scientific survey counts $C_s$ via Negative Binomial observation
+likelihood coupled to habitat suitability $H_s$. Compatible with both
+discrete-time and SSA transition kernels.
+
+---
 
 ### Phase 3: Transition Kernel Construction
+
 Function: `extract_transition_kernels(loaded, fitted, params)`
 
-Constructs group-specific stochastic transition matrices $T_g \in \mathbb{R}^{S \times S}$:
+Constructs group-specific stochastic transition matrices
+$T_g \in \mathbb{R}^{S \times S}$:
+
 $$T_g = (1 - \rho_g) \left[ (1 - \alpha_g) T_{\text{diff}} +
-    \alpha_g A_g(\eta) \right] + \rho_g I$$
+    \alpha_g A_g(H) \right] + \rho_g I$$
+
 where:
-- $T_{\text{diff}, ij} = W_{ij} / \sum_k W_{ik}$ is isotropic diffusion over adjacency $W$.
-- $A_{g, ij} = W_{ij} \exp(\gamma_g (H_j - H_i)) / \sum_k W_{ik} \exp(\gamma_g (H_k - H_i))$
-  is directional advective-taxis driven by habitat suitability index $H$.
-- $\rho_g \in [0, 1)$ governs local patch residence (diagonal persistence).
+
+- $T_{\text{diff}, ij} = W_{ij} / \sum_k W_{ik}$ is isotropic diffusion over
+  adjacency $W$.
+- $A_{g, ij} = W_{ij} \exp(\gamma_g (H_j - H_i)) /
+  \sum_k W_{ik} \exp(\gamma_g (H_k - H_i))$ is directional habitat-taxis.
+- $\rho_g \in [0, 1)$ governs local patch residence.
+
+The posterior mean kernel uses `loaded.hsi_vec` (climatological mean). When
+`loaded.monthly_hsi` is non-empty, Phase 4 (path reconstruction) builds
+observation-specific kernels using the appropriate monthly HSI slice selected
+by `_resolve_hsi_for_time(loaded, rel_time)`.
+
+---
 
 ### Phase 4: Trajectory & Corridor Reconstruction
+
 Function: `reconstruct_paths_and_diagnostics(loaded, kernels, params)`
 
-- **Least-Cost Path Routing**: Evaluates shortest movement routes via:
-  - A* search (`:astar`) with Euclidean admissible heuristic.
-  - Multiresolution A* search across mixed cell scales.
-  - Dynamic programming Viterbi decoding (`:viterbi`).
-- **Markov Bridge Corridors**: Computes space-time transit probability fields between
-  release $u$ and recapture $v$ across $k$ discrete steps:
-  $$\mathbb{P}(X_\tau = j \mid X_0 = u, X_k = v) =
-    \frac{[T^\tau]_{uj} [T^{k-\tau}]_{jv}}{[T^k]_{uv}}$$
-- **Domain-Wide Bottleneck Index**: Quantifies geographic migration pinch-points:
-  $$B(u) = \frac{C_{\text{domain}}(u)}{\max(1, \deg_{\text{marine}}(u))}$$
-  where $C_{\text{domain}}(u)$ aggregates transit density across all mark-recapture
-  pairs and $\deg_{\text{marine}}(u)$ is the marine node degree.
+#### Time-Varying HSI in Path Reconstruction
+
+For each observation segment, the release time `rel_time` (stored in `obs_df`)
+is used to select the appropriate monthly HSI slice:
+
+```julia
+hsi_seg = _resolve_hsi_for_time(loaded, row.rel_time)
+```
+
+If `monthly_hsi` is available and contains a column for the observation's
+(year, month), `hsi_seg = monthly_hsi[:, col]`. Otherwise, falls back to
+`hsi_vec`. A segment-specific kernel is then built from the posterior mean
+parameters and this seasonal HSI, ensuring paths reflect the habitat
+conditions present at the time of observed movement.
+
+The same logic applies to Markov bridge corridor computation and HSI error
+propagation — perturbations are centred on the seasonally correct `hsi_first`
+rather than the temporal mean.
+
+#### Path Methods
+
+- **A\* search** (`:astar`): shortest-cost route with Euclidean admissible heuristic.
+- **Viterbi** (`:viterbi`): dynamic programming decoding.
+- **Multiresolution A\*** : for adaptive dual-scale mesh domains.
+- **HMM Viterbi smoothing** (`hmm_smoothing = true`): globally decodes the
+  entire multi-segment capture history in log-space.
+
+#### Markov Bridge Corridors
+
+Transit probability field between release $u$ and recapture $v$ across $k$ steps:
+
+$$\mathbb{P}(X_\tau = j \mid X_0 = u, X_k = v) =
+  \frac{[T^\tau]_{uj} [T^{k-\tau}]_{jv}}{[T^k]_{uv}}$$
+
+#### Domain-Wide Bottleneck Index
+
+$$B(u) = \frac{C_{\text{domain}}(u)}{\max(1, \deg_{\text{marine}}(u))}$$
+
+where $C_{\text{domain}}(u)$ aggregates transit density across all mark-recapture
+pairs.
+
+---
 
 ### Phase 4b: Priority Mark-Recapture Analyses
+
 Function: `execute_priority_analyses(loaded, fitted, kernels, params)`
 
-Consolidated priority post-processing executing:
-1. Individual path credible intervals (`path_credible_intervals`).
-2. Regional stock connectivity matrix and credible intervals
-   (`compute_stock_connectivity_matrix`, `compute_connectivity_credible_intervals`).
-3. Posterior predictive validation checks (`posterior_predictive_check`).
-4. Optional full Bayesian posterior trajectory & corridor propagation
-   (`reconstruct_paths_bayesian_ensemble`).
+1. Per-path credible intervals (`path_credible_intervals`).
+2. Regional stock connectivity matrix and credible intervals.
+3. Posterior predictive validation (Brier score, KL divergence).
+4. Optional full Bayesian posterior trajectory & corridor ensemble.
+
+---
 
 ### Phase 5: Advanced Physical & Spectral Diagnostics
+
 Function: `compute_advanced_diagnostics(loaded, path_res, params)`
 
-- **Circuit Theory Resistance Networks**: Models the spatial graph as an electrical
-  resistor grid where conductances $C_{ij} = W_{ij} \sqrt{H_i H_j}$. Solves Poisson
-  system $L v = I_{\text{ext}}$ to compute current densities and identify migratory
-  pinch-points without pre-specifying travel duration $k$.
-- **Spectral Graph Wavelets (SGWT)**: Employs Chebyshev polynomial expansions of the
-  graph Laplacian $L = D - W$ across multiple spatial scales, combined with
-  BayesShrink adaptive soft thresholding for spatial habitat denoising.
+- **Circuit Theory**: models the spatial graph as a resistor grid with
+  conductances $C_{ij} = W_{ij} \sqrt{H_i H_j}$. Solves Poisson system
+  $L v = I_{\text{ext}}$ to identify migratory pinch-points.
+- **Spectral Graph Wavelets (SGWT)**: Chebyshev polynomial expansions of the
+  graph Laplacian across multiple spatial scales, with BayesShrink adaptive
+  soft thresholding.
+
+---
 
 ### Phase 6: Interactive Dashboard Export
+
 Function: `export_dashboards(loaded, kernels, path_res, diagnostics, params)`
 
-Generates standalone interactive HTML/SVG dashboards:
-- Reconstructed movement tracks with animated particle playback.
-- Forward-backward Markov bridge corridor probability heatmaps.
-- Domain-wide bottleneck and pinch-point maps.
-- Electrical current density and stochastic circuit flow maps.
-- Multi-scale Chebyshev spectral graph wavelet dashboards.
-- Posterior parameter distributions with bivariate correlation scatter plots.
-- Directed network flow graphs with dynamic volume sliders.
+Generates standalone interactive HTML/SVG dashboards: reconstructed tracks,
+Markov bridge corridors, bottleneck maps, circuit density, wavelet dashboards,
+posterior parameter distributions, and directed network flow graphs.
 
 ---
 
-## 3. Priority Analyses (Consolidated Reference)
+## 3. HSI: Static vs. Time-Varying
 
-### 1. Per-Path Credible Intervals (`path_credible_intervals`)
+The pipeline supports both a static HSI field and a time-varying (annual/monthly)
+field. The distinction affects different pipeline stages:
 
-#### Purpose
-Quantifies spatial and topological uncertainty in individual movement paths
-by drawing parameter vectors from the posterior MCMC chain and reconstructing
-an ensemble of trajectories for each individual animal.
+| Stage | Static HSI | Monthly HSI |
+|:------|:-----------|:------------|
+| MCMC estimation (Phase 2) | `hsi_vec` | `hsi_vec` (climatological mean, by design) |
+| Kernel construction (Phase 3, posterior mean) | `hsi_vec` | `hsi_vec` |
+| Path reconstruction (Phase 4, per observation) | `hsi_vec` | `monthly_hsi[:, col]` for release (year, month) |
+| Corridor / HSI error propagation | `hsi_vec` | `monthly_hsi[:, col]` for release time |
 
-#### Algorithm
-1. Extract MCMC posterior parameter samples $(\alpha^{(s)}, \rho^{(s)}, \gamma^{(s)})$.
-2. For each posterior draw $s \in \{1, \dots, S_d\}$:
-   - Reconstruct draw-specific transition kernel $T^{(s)}$.
-   - Evaluate trajectory from release to recapture via A* routing.
-   - Record path length and node visitation indicators.
-3. Compute empirical quantiles (2.5%, 50%, 97.5%) across draws.
+**`_resolve_hsi_for_time(loaded, t_decimal)`**: resolves the appropriate HSI
+vector for decimal-year timestamp `t_decimal`. Decomposes as:
 
-#### Key Outputs
-- `path_credible_intervals.csv`:
-  - `tagid`: Animal identifier.
-  - `release_site`, `recapture_site`: Spatial boundary units.
-  - `path_length_mean`: Mean path length in hops/km.
-  - `path_length_lower`, `path_length_upper`: 95% Bayesian credible interval.
-  - `path_length_sd`: Standard deviation across posterior draws.
-  - `modal_waypoint`: Most-visited intermediate mesh unit.
-- `node_visit_probs`: $S \times S$ matrix of pairwise transition frequencies.
+```
+year  = floor(Int, t_decimal)
+month = clamp(ceil(Int, (t_decimal - year) × 12), 1, 12)
+```
 
-### 2. Bayesian Ensemble Trajectory & Corridor Propagation
-Function: `reconstruct_paths_bayesian_ensemble(loaded, fitted, params)`
+and looks up `month_lookup[(year, month)]` in the column index of `monthly_hsi`.
+Falls back to `hsi_vec` if no monthly data is present or the lookup fails.
 
-#### Purpose
-Propagates parameter uncertainty directly into both path trajectories and Markov
-bridge corridor probability fields by integrating across MCMC samples rather than
-conditioning on the posterior mean parameter point estimate.
-
-#### Mathematical Formulation
-For each draw $s$:
-$$T^{(s)} =
-    \text{construct_stochastic_transition_kernel}(W, H;
-    \alpha^{(s)}, \rho^{(s)}, \gamma^{(s)})$$
-$$\bar{\Pi}_i = \frac{1}{S_d} \sum_{s=1}^{S_d} \Pi_i^{(s)}$$
-where $\Pi_i^{(s)}$ is the forward-backward Markov bridge intensity under draw $s$.
-
-#### Returns
-- `ensemble_corridors`: Dict mapping tag ID to mean corridor field $\bar{\Pi}$.
-- `ensemble_paths`: Dict mapping tag ID to collection of sampled paths across draws.
-
-### 3. Regional Stock Connectivity Matrix
-Functions:
-- `compute_stock_connectivity_matrix(loaded, kernels, params; region_labels, region_map)`
-- `compute_connectivity_credible_intervals(loaded, fitted, kernels, params, region_map)`
-
-#### Purpose
-Aggregates fine-scale mesh transition probabilities into a population-level
-stochastic connectivity matrix between biologically distinct spatial regions
-(e.g., Fishery Management Areas, depth strata, spawning vs. nursery grounds).
-
-#### Mathematical Formulation
-Given region assignments $r, s \in \{1, \dots, N_{\text{regions}}\}$:
-$$\text{Connectivity}[r, s] = \frac{1}{|r| \cdot |s|} \sum_{u \in r} \sum_{v \in s} T[u, v]$$
-Rows are normalized to enforce row-stochastic conservation: $\sum_s \text{Connectivity}[r, s] = 1$.
-
-Posterior uncertainty is propagated across MCMC draws to derive 95% credible intervals
-$[\text{lower}_{rs}, \text{upper}_{rs}]$ for every pairwise inter-regional flow.
-
-#### Key Outputs
-- `stock_connectivity_summary.csv`: Point estimates of connectivity probabilities,
-  observed mark-recapture transition counts, and flow rates.
-- `stock_connectivity_credible_intervals.csv`: Lower (2.5%) and upper (97.5%) credible
-  bounds for all donor-recipient region pairs.
-
-### 4. Posterior Predictive Validation Checks
-Functions:
-- `posterior_predictive_check(loaded, fitted, kernels, params)`
-- `export_posterior_predictive_check(ppc, output_dir)`
-- `plot_posterior_predictive_check(ppc, output_dir)`
-
-#### Purpose
-Assesses whether the fitted movement model reproduces empirical recapture distributions
-by forward-simulating recapture locations from observed release sites across posterior
-draws.
-
-#### Quantitative Metrics
-1. **Brier Score (Mean Squared Error)**:
-   $$\text{Brier} = \frac{1}{S} \sum_{j=1}^S
-    \left( P_{\text{obs}}(j) - P_{\text{sim}}(j) \right)^2$$
-   Measures calibration quality ($0.0 = \text{perfect}$, $< 0.01 = \text{excellent}$).
-2. **Kullback-Leibler Divergence**:
-   $$D_{\text{KL}}(P_{\text{obs}} \parallel P_{\text{sim}}) =
-    \sum_{j=1}^S P_{\text{obs}}(j) \log \left(
-    \frac{P_{\text{obs}}(j)}{P_{\text{sim}}(j) + \epsilon} \right)$$
-   Quantifies information-theoretic discrepancy ($< 0.5 \text{ nats} = \text{good}$).
-3. **Rank Histogram**: Assesses uncertainty calibration across posterior draws. A uniform
-   histogram indicates well-calibrated posterior spread; U-shaped indicates overconfidence.
-
-#### Key Outputs
-- `posterior_predictive_summary.txt`: Summary of Brier score, KL divergence, entropy.
-- `posterior_predictive_diagnostics.csv`: Per-draw metric trace records.
-- `posterior_predictive_distributions.csv`: Observed vs. predicted recapture vectors.
-- `posterior_predictive_rank_histogram.csv`: Uniformity calibration counts.
+The `:hsi_only` depth mode also uses HSI as the sole depth encoding mechanism:
+out-of-depth marine nodes receive `hsi_vec[u] = min(hsi_vec[u], hsi_ood_floor)`
+(default `hsi_ood_floor = 0.01`). Monthly HSI slices are floored similarly
+during path reconstruction.
 
 ---
 
-## 4. Agent-Based Alternative Model (ABM)
+## 4. Configuration Parameters
 
-Function: `simulate_agent_trajectories(n_agents, start_nodes, groups, transition_kernels, n_steps)`
-
-### Purpose & Integration
-The Agent-Based Model provides a simplified, mechanistic alternative to the Eulerian (grid-based) Master Equation formulations. It simulates individual discrete animals undergoing pure advective (directed by habitat gradients) and diffusive (random walk) movement across the spatial hexagon mesh, without demographic growth processes. 
-
-The ABM serves a dual purpose in the pipeline:
-1. **Forward Generative Simulation:** It generates synthetic telemetry tracking datasets exhibiting emergent spatial behaviors from bottom-up rules. This is useful for building baseline simulated datasets (`--simulate`).
-2. **Approximate Bayesian Computation (ABC) Inference:** Because the ABM maps physical movement parameters $(\alpha_g, \rho_g, \gamma_g)$ directly to simulated trajectories, it acts as a forward model for likelihood-free inference via ABC. By comparing empirical telemetry data to ABM-simulated data using spatial summary statistics (e.g., mean displacement, residence time), we can fit the advection-diffusion parameters without evaluating the exact transition likelihoods.
-
-### Mathematical Rules
-At each discrete step, an agent located at node $i$ evaluates the transition kernel $T_{ij}$ associated with its group $g$. The agent then probabilistically jumps to a neighboring node $j$ sampled from the Categorical distribution defined by the $i$-th row of $T_g$.
-
----
-
-## 5. Advanced Movement Enhancements
-
-### 1. Adaptive Multiresolution Hexagonal Mesh Routing
-Functions:
-- `construct_adaptive_multiresolution_domain`:
-  `(coarse_mesh, coastal_polygons; coarse_radius_km, fine_radius_km)`
-- `astar_multiresolution_path(adaptive_domain, release, recapture; hsi, land_mask)`
-
-Combines coarse offshore cells ($r_{\text{coarse}} = 25\text{ km}$) with fine coastal
-cells ($r_{\text{fine}} = 8\text{ km}$) to dramatically reduce the state space dimension
-$S$ while maintaining fine-scale resolution along convoluted shorelines and telemetry arrays.
-
-The cross-scale graph links boundary nodes via distance-scaled edge costs:
-$$\Delta g_{ij} = \frac{\Delta x_{ij}}{c_i \cdot c_j}$$
-where $c_i, c_j$ are habitat conductance values and $\Delta x_{ij}$ is the physical
-great-circle distance between cell centroids.
-
-### 2. Time-Varying Dynamic Environmental Covariates
-Functions:
-- `construct_dynamic_transition_kernels(W, hsi_matrices; land_mask, delta_km)`
-- `predict_dynamic_path(P_kernels, release, recapture, times; centroids, land_mask)`
-- `predict_dynamic_corridor(P_kernels, release, recapture; land_mask)`
-
-Accommodates non-stationary environmental dynamics (e.g. seasonal warming, shifting
-thermoclines, dynamic chlorophyll blooms) by constructing an epoch-indexed sequence
-of transition matrices $[T^{(1)}, \dots, T^{(T)}]$ from an $S \times T$ habitat matrix.
-Forward-backward Markov bridges evaluate time-dependent corridor likelihoods
-$\Pi_i^{(t)} = \alpha_t(i) \beta_t(i)$.
-
-### 3. Multi-Segment Hidden Markov Model (HMM) Viterbi Smoothing
-Functions:
-- `viterbi_hmm_path_smoothing(obs_times, obs_locations, P_kernel; mesh, land_mask, sigma_obs_km)`
-- `forward_backward_state_probabilities`:
-  `(obs_times, obs_locations, P_kernel; mesh, land_mask, sigma_obs_km)`
-
-Globally decodes the entire multi-stage capture-recapture history in log-space:
-$$\max_{z_{1:T}} \left[ \log \pi(z_1) +
-    \sum_{t=1}^{T-1} \log T^{(t)}(z_t, z_{t+1}) +
-    \sum_{t=1}^T \log f(y_t \mid z_t) \right]$$
-where $f(y_t \mid z_t) = \mathcal{N}(y_t; z_t, \sigma_y^2)$ is the continuous spatial
-emission density. Avoids segment-isolation artifacts and guarantees continuous pathing.
-
----
-
-## 6. Configuration Parameters
-
-Parameter NamedTuples are generated via `movement_parameters_default()` or
-`movement_parameters_snowcrab()`, and can be customized by merging overrides:
+Generated by `movement_parameters_default()` or `movement_parameters_snowcrab()`,
+and customized by merging overrides:
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
-| `data_source` | `Symbol` | `:simulate` | `:simulate` or `:snowcrab` empirical data |
-| `model_mode` | `String` | `"telemetry"` | `"telemetry"`, `"telemetry_and_survey"`, `"agent"`, or `"both"` |
-| `reshard_hex` | `Bool` | `false` | Reshard domain to fine regular hexagons via LibGEOS |
+| `data_source` | `Symbol` | `:simulate` | `:simulate` or `:snowcrab` |
+| `model_mode` | `String` | `"telemetry"` | `"telemetry"`, `"telemetry_and_survey"`, `"ssa"`, `"both"` |
+| `reshard_hex` | `Bool` | `false` | Reshard domain to fine hexagons via LibGEOS |
 | `hex_radius_km` | `Float64` | `10.0` | Cell radius for resharded hexagons (km) |
-| `use_hydrodynamics` | `Bool` | `false` | Ingest 3D hydrodynamic velocity and bathymetry |
-| `depth_range` | `Tuple / Nothing` | `nothing` | Depth barrier `(min, max)` (m) |
-| `max_paths` | `Int` | `25` | Maximum number of individual trajectories to reconstruct |
+| `use_hydrodynamics` | `Bool` | `false` | Ingest 3D hydrodynamic velocity & bathymetry |
+| `depth_range` | `Tuple / Nothing` | `nothing` | Depth window `(min, max)` (m) |
+| `depth_barrier_mode` | `Symbol` | `:hsi_only` | `:hsi_only`, `:bridge`, or `:hard` |
+| `hsi_ood_floor` | `Float64` | `0.01` | HSI floor for out-of-depth nodes (`:hsi_only` mode) |
+| `max_paths` | `Int` | `25` | Maximum individual trajectories to reconstruct |
 | `path_method` | `Symbol` | `:astar` | Routing algorithm (`:astar` or `:viterbi`) |
-| `smooth_paths` | `Bool` | `false` | Apply line-of-sight raycast path smoothing |
-| `compute_priority` | `Bool` | `true` | Execute priority uncertainty and connectivity analyses |
-| `run_bayesian_ensemble` | `Bool` | `false` | Run full posterior MCMC path/corridor propagation |
-| `compute_circuit` | `Bool` | `false` | Compute electrical circuit resistance current density |
-| `compute_stochastic` | `Bool` | `false` | Reconstruct Monte Carlo stochastic least-cost paths |
-| `compute_bottlenecks` | `Bool` | `false` | Evaluate domain-wide migration bottleneck index B(u) |
+| `smooth_paths` | `Bool` | `false` | Apply line-of-sight path smoothing |
+| `compute_priority` | `Bool` | `true` | Execute priority uncertainty & connectivity analyses |
+| `run_bayesian_ensemble` | `Bool` | `false` | Full posterior MCMC path/corridor propagation |
+| `compute_circuit` | `Bool` | `false` | Electrical circuit resistance current density |
+| `compute_stochastic` | `Bool` | `false` | Monte Carlo stochastic least-cost paths |
+| `compute_bottlenecks` | `Bool` | `false` | Domain-wide migration bottleneck index $B(u)$ |
 | `compute_wavelets` | `Bool` | `false` | Multi-scale Chebyshev graph wavelet decomposition |
-| `adaptive_mesh` | `Bool` | `false` | Use dual-resolution coarse/fine hexagonal mesh |
+| `adaptive_mesh` | `Bool` | `false` | Dual-resolution coarse/fine hexagonal mesh |
 | `coarse_radius_km` | `Float64` | `25.0` | Cell radius for coarse offshore units (km) |
 | `fine_radius_km` | `Float64` | `8.0` | Cell radius for refined coastal units (km) |
-| `dynamic_kernels` | `Bool` | `false` | Use time-varying dynamic transition kernels |
-| `hmm_smoothing` | `Bool` | `false` | Apply multi-segment HMM Viterbi trajectory smoothing |
+| `dynamic_kernels` | `Bool` | `false` | Time-varying dynamic transition kernels |
+| `hmm_smoothing` | `Bool` | `false` | Multi-segment HMM Viterbi trajectory smoothing |
 | `n_samples` | `Int` | `200` | Turing MCMC posterior draw count |
-| `n_warmup` | `Int` | `100` | Turing MCMC warmup iterations |
+| `n_warmup` | `Int` | `100` | Turing MCMC warmup (NUTS adaptation) iterations |
 | `seed` | `Int` | `42` | Random number generator seed |
 | `hsi_se` | `Float64` | `0.08` | Observation standard error on habitat suitability |
-| `propagate_hsi_error` | `Bool` | `true` | Propagate HSI uncertainty |
-| `render_html` | `Bool` | `true` | Export interactive Leaflet HTML maps and dashboards |
-| `output_dir` | `String` | `"output"` | Directory for all generated tables and HTML dashboards |
-| `verbose` | `Bool` | `true` | Enable detailed step-by-step progress logging |
+| `propagate_hsi_error` | `Bool` | `true` | Propagate HSI uncertainty into corridors |
+| `render_html` | `Bool` | `true` | Export interactive Leaflet HTML dashboards |
+| `output_dir` | `String` | `"output"` | Directory for generated tables and dashboards |
+| `verbose` | `Bool` | `true` | Detailed step-by-step progress logging |
 | `species_name` | `String` | `"Animal"` | Display name in reports/dashboards |
 
 ---
 
-## 7. Command-Line Interface (CLI)
-
-The pipeline can be executed directly from the terminal with modular flags:
+## 5. Command-Line Interface (CLI)
 
 ```bash
-# Display help and all available switches
-julia --project=. docs/movement/movement_analysis.jl --help
+# Display help
+julia --project=. scripts/run_movement.jl --help
 
-# Run default simulated telemetry analysis
-julia --project=. docs/movement/movement_analysis.jl --simulate
+# Default simulated analysis
+julia --project=. scripts/run_movement.jl --simulate
 
-# Run Scotian Shelf snow crab analysis with all diagnostics
-julia --project=. docs/movement/movement_analysis.jl --snowcrab --all-diagnostics
+# Snow crab analysis
+julia --project=. scripts/run_movement.jl --snowcrab
 
-# Snow crab with custom depth constraint and fine hexagonal lattice
-julia --project=. docs/movement/movement_analysis.jl \
-  --snowcrab --depth-range 50,450 --hex --hex-radius 5.0
+# Snow crab with depth encoding (hsi_only default) and fine hexagonal mesh
+julia --project=. scripts/run_movement.jl \
+  --snowcrab --depth-range 25,400 --hex --hex-radius 5.0
 
-# Run with full Bayesian posterior ensemble propagation
-julia --project=. docs/movement/movement_analysis.jl --snowcrab --bayesian-ensemble --samples 300
+# Use hard depth barrier
+julia --project=. scripts/run_movement.jl \
+  --snowcrab --depth-range 25,400 --depth-barrier-mode hard
 
-# Run with adaptive multiresolution mesh and HMM smoothing
-julia --project=. docs/movement/movement_analysis.jl --snowcrab --adaptive-mesh --hmm-smoothing
+# Full Bayesian ensemble with all diagnostics
+julia --project=. scripts/run_movement.jl \
+  --snowcrab --bayesian-ensemble --all-diagnostics --samples 500
 ```
 
 ### CLI Switch Table
 
-| CLI Flag | Long Form | Parameter Mapping |
-|:---------|:----------|:------------------|
-| `-d` | `--data-source <src>` | `data_source = Symbol(src)` |
-| | `--simulate` | `data_source = :simulate` |
-| | `--snowcrab` | Snow crab preset configuration |
-| `-m` | `--model-mode <mode>` | `model_mode = "telemetry"` or `"both"` |
-| | `--ssa` | Fits continuous-time SSA pure telemetry model |
-| | `--ssa-joint` | Fits continuous-time SSA joint survey+telemetry model |
-| | `--agent` | Runs the Agent-Based Alternative Model |
-| | `--reshard-hex`, `--hex` | `reshard_hex = true` |
-| | `--hex-radius <km>` | `hex_radius_km = Float64(km)` |
-| | `--depth-range <min,max>`| `depth_range = (min, max)` |
-| `-p` | `--max-paths <N>` | `max_paths = Int(N)` |
-| | `--astar` | `path_method = :astar` |
-| | `--viterbi` | `path_method = :viterbi` |
-| | `--smooth-paths` | `smooth_paths = true` |
-| | `--priority` / `--no-priority` | `compute_priority = true / false` |
-| | `--bayesian-ensemble` | `run_bayesian_ensemble = true` |
-| | `--adaptive-mesh` | `adaptive_mesh = true` |
-| | `--dynamic-kernels` | `dynamic_kernels = true` |
-| | `--hmm-smoothing` | `hmm_smoothing = true` |
-| | `--circuit` | `compute_circuit = true` |
-| | `--stochastic` | `compute_stochastic = true` |
-| | `--bottlenecks` | `compute_bottlenecks = true` |
-| | `--wavelets`, `--sgwt` | `compute_wavelets = true` |
-| | `--all-diagnostics` | Enables circuit, stochastic, bottlenecks, wavelets |
-| `-n` | `--samples <N>` | `n_samples = Int(N)` |
-| `-w` | `--warmup <N>` | `n_warmup = Int(N)` |
-| `-o` | `--output-dir <path>` | `output_dir = String(path)` |
-| `-q` | `--quiet` | `verbose = false` |
+| CLI Flag | Parameter |
+|:---------|:----------|
+| `--simulate` | `data_source = :simulate` |
+| `--snowcrab` | Snow crab preset |
+| `--model-mode <mode>` | `model_mode` |
+| `--ssa` | `model_mode = "ssa"` |
+| `--hex` / `--reshard-hex` | `reshard_hex = true` |
+| `--hex-radius <km>` | `hex_radius_km` |
+| `--depth-range <min,max>` | `depth_range = (min, max)` |
+| `--depth-barrier-mode <mode>` | `depth_barrier_mode` (`:hsi_only`, `:bridge`, `:hard`) |
+| `--hsi-ood-floor <v>` | `hsi_ood_floor` |
+| `--max-paths <N>` | `max_paths` |
+| `--astar` / `--viterbi` | `path_method` |
+| `--smooth-paths` | `smooth_paths = true` |
+| `--bayesian-ensemble` | `run_bayesian_ensemble = true` |
+| `--adaptive-mesh` | `adaptive_mesh = true` |
+| `--dynamic-kernels` | `dynamic_kernels = true` |
+| `--hmm-smoothing` | `hmm_smoothing = true` |
+| `--circuit` | `compute_circuit = true` |
+| `--stochastic` | `compute_stochastic = true` |
+| `--bottlenecks` | `compute_bottlenecks = true` |
+| `--wavelets` / `--sgwt` | `compute_wavelets = true` |
+| `--all-diagnostics` | Enables circuit, stochastic, bottlenecks, wavelets |
+| `--samples <N>` | `n_samples` |
+| `--warmup <N>` | `n_warmup` |
+| `--output-dir <path>` | `output_dir` |
+| `--quiet` / `-q` | `verbose = false` |
 
 ---
 
-## 8. Scripting Examples & Workflows
+## 6. Scripting Examples
 
-### Example 1: Basic Analysis with Default Settings
+### Example 1: Basic Simulated Analysis
 
 ```julia
+using MovementAnalysis
 
-include("src/MovementAnalysis.jl")
-
-# Run default simulated analysis pipeline
 results = run_movement_analysis()
-
-println("Reconstructed paths: ", length(results.paths))
-println("Fitted velocity alpha: ", results.parameters.alpha)
-println("Fitted residence rho:  ", results.parameters.residence)
+println("Paths reconstructed: ", length(results.paths))
 ```
 
-### Example 2: Snow Crab with Depth Barriers & Priority Uncertainty
+### Example 2: Snow Crab with Seasonal HSI
 
 ```julia
-include("src/MovementAnalysis.jl")
+using MovementAnalysis
 
-# Configure snow crab analysis with physiological depth boundaries
 params = merge(movement_parameters_snowcrab(), (
-    depth_range           = (60.0, 450.0),
-    n_samples             = 300,
-    n_warmup              = 100,
-    compute_priority      = true,
-    run_bayesian_ensemble = true,
-    max_paths             = 40,
+    depth_range      = (25.0, 400.0),
+    depth_barrier_mode = :hsi_only,    # default; depth encoded via HSI
+    n_samples        = 500,
+    n_warmup         = 100,
+    compute_priority = true,
+    max_paths        = 40,
 ))
 
-# Execute complete workflow
 results = run_movement_analysis(params)
-
-# Inspect priority outputs
 pa = results.priority_analyses
-println("Path uncertainty summary: ", pa.summary_file)
-println("Posterior predictive Brier: ", pa.posterior_predictive.summary.brier_mean)
-println("Stock connectivity matrix size: ", size(pa.connectivity_matrix.connectivity_matrix))
+println("Brier score: ", pa.posterior_predictive.summary.brier_mean)
+println("Connectivity matrix: ", size(pa.connectivity_matrix.connectivity_matrix))
 ```
 
-### Example 3: Adaptive Mesh Routing & Dynamic Corridors
+### Example 3: Hard Depth Barrier with Bridge Fallback
 
 ```julia
-include("src/MovementAnalysis.jl")
+using MovementAnalysis
 
-# Configure high-resolution coastal refinement
+# Use hard structural depth barrier with bridge edges for shallow corridors
+params = merge(movement_parameters_snowcrab(), (
+    depth_barrier_mode = :bridge,
+    depth_range        = (25.0, 400.0),
+))
+
+results = run_movement_analysis(params)
+```
+
+### Example 4: Adaptive Mesh & Dynamic Corridors
+
+```julia
+using MovementAnalysis
+
 params = merge(movement_parameters_default(), (
     adaptive_mesh    = true,
     coarse_radius_km = 20.0,
@@ -466,49 +472,69 @@ results = run_movement_analysis(params)
 
 ---
 
-## 9. Output Directory Structure
+## 7. Agent-Based Model (ABM)
 
-Executing the pipeline populates `output_dir` with standardized deliverables:
+Function: `simulate_agent_trajectories(n_agents, start_nodes, groups, transition_kernels, n_steps)`
+
+Simulates individual discrete animals undergoing advective-diffusive movement
+across the hexagonal mesh. At each step, an agent at node $i$ samples a
+transition from the Categorical distribution defined by row $i$ of $T_g$.
+
+Serves two purposes:
+1. **Forward simulation**: generates synthetic telemetry datasets with known
+   ground truth.
+2. **ABC inference**: maps physical parameters to simulated trajectories for
+   likelihood-free fitting via spatial summary statistics.
+
+---
+
+## 8. Output Directory Structure
 
 ```text
 output/
-├── path_credible_intervals.csv              # Per-path length CIs & modal waypoints
-├── stock_connectivity_summary.csv           # Regional connectivity point estimates
-├── stock_connectivity_credible_intervals.csv# Regional connectivity 95% CIs
-├── posterior_predictive_summary.txt         # Brier score & KL divergence summary
-├── posterior_predictive_diagnostics.csv     # Per-draw PPC metrics trace
-├── posterior_predictive_distributions.csv   # Observed vs. predicted recapture dists
-├── posterior_predictive_rank_histogram.csv  # Uncertainty calibration histogram
-├── movement_path_metrics.csv                # Path displacement, tortuosity, bearing
-├── movement_tracks_animated.html            # Animated Leaflet trajectory playback
-├── movement_corridors_heatmap.html          # Markov bridge transition corridors
-├── movement_domain_bottlenecks.html         # Regional pinch-points and bottleneck index
-├── movement_current_density.html            # Circuit theory electrical current flux
-├── movement_stochastic_circuit.html         # Posterior current density with HSI error
-├── movement_wavelet_dashboard.html          # Multi-scale Chebyshev SGWT wavelets
-├── movement_posterior_uncertainty.html      # MCMC parameter KDEs & correlations
-├── movement_network_flow.html               # Directed Bézier network flow graph
-└── movement_summary_diagnostics.html        # Comprehensive diagnostics overview
+├── path_credible_intervals.csv               # Per-path length CIs & modal waypoints
+├── stock_connectivity_summary.csv            # Regional connectivity point estimates
+├── stock_connectivity_credible_intervals.csv # Regional connectivity 95% CIs
+├── posterior_predictive_summary.txt          # Brier score & KL divergence
+├── posterior_predictive_diagnostics.csv      # Per-draw PPC metrics
+├── posterior_predictive_distributions.csv    # Observed vs. predicted recaptures
+├── posterior_predictive_rank_histogram.csv   # Calibration histogram
+├── movement_path_metrics.csv                 # Displacement, tortuosity, bearing
+├── movement_tracks_animated.html             # Animated Leaflet trajectory playback
+├── movement_corridors_heatmap.html           # Markov bridge transition corridors
+├── movement_domain_bottlenecks.html          # Pinch-points and bottleneck index
+├── movement_current_density.html             # Circuit theory current flux
+├── movement_stochastic_circuit.html          # Posterior current density with HSI error
+├── movement_wavelet_dashboard.html           # Multi-scale Chebyshev SGWT wavelets
+├── movement_posterior_uncertainty.html       # MCMC parameter KDEs & correlations
+├── movement_network_flow.html                # Directed network flow graph
+└── movement_summary_diagnostics.html         # Comprehensive diagnostics overview
 ```
 
 ---
 
-## 10. Scientific References
+## 9. Scientific References
 
-1. **MovementAnalysis**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for Marine Ecology*.
-2. **Circuit Theory in Ecology**: McRae, B. H., Dickson, B. G., Keitt, T. H., & Shah, V. B.
-   (2008). Using circuit theory to model connectivity in ecology, evolution, and
-   conservation. *Ecology*, 89(10), 2712–2724.
-3. **Spectral Graph Wavelets**: Hammond, D. K., Vandergheynst, P., & Gribonval, R. (2011).
-   Wavelets on graphs via spectral graph theory. *Applied and Computational Harmonic Analysis*,
-   30(2), 129–150.
-4. **BayesShrink Wavelet Denoising**: Chang, S. G., Yu, B., & Vetterli, M. (2000). Adaptive
-   wavelet thresholding for image denoising and compression. *IEEE Trans. Image Processing*,
-   9(9), 1532–1546.
-5. **Forecast Verification (Brier Score)**: Brier, G. W. (1950). Verification of forecasts
-   expressed in terms of probability. *Monthly Weather Review*, 78(1), 1–3.
-6. **Information Divergence**: Kullback, S., & Leibler, R. A. (1951). On information and
+1. **MovementAnalysis**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for
+   Marine Ecology*.
+2. **Circuit Theory in Ecology**: McRae, B. H., Dickson, B. G., Keitt, T. H.,
+   & Shah, V. B. (2008). Using circuit theory to model connectivity in ecology,
+   evolution, and conservation. *Ecology*, 89(10), 2712–2724.
+3. **Spectral Graph Wavelets**: Hammond, D. K., Vandergheynst, P., & Gribonval,
+   R. (2011). Wavelets on graphs via spectral graph theory. *Applied and
+   Computational Harmonic Analysis*, 30(2), 129–150.
+4. **BayesShrink**: Chang, S. G., Yu, B., & Vetterli, M. (2000). Adaptive
+   wavelet thresholding for image denoising and compression. *IEEE Trans. Image
+   Processing*, 9(9), 1532–1546.
+5. **Brier Score**: Brier, G. W. (1950). Verification of forecasts expressed in
+   terms of probability. *Monthly Weather Review*, 78(1), 1–3.
+6. **KL Divergence**: Kullback, S., & Leibler, R. A. (1951). On information and
    sufficiency. *Annals of Mathematical Statistics*, 22(1), 79–86.
-7. **Bayesian Posterior Predictive Checks**: Gelman, A., Carlin, J. B., Stern, H. S.,
-   Dunson, D. B., Vehtari, A., & Rubin, D. B. (2013). *Bayesian Data Analysis* (3rd ed.).
-   Chapman and Hall/CRC.
+7. **Bayesian Posterior Predictive Checks**: Gelman, A., Carlin, J. B., Stern,
+   H. S., Dunson, D. B., Vehtari, A., & Rubin, D. B. (2013). *Bayesian Data
+   Analysis* (3rd ed.). Chapman and Hall/CRC.
+8. **Master Equation**: Nordsieck, A., Lamb, W. E., & Uhlenbeck, G. E. (1940).
+   On the theory of cosmic-ray showers I. *Physica*, 7(4), 344–360.
+9. **Uniformization (Poisson-Krylov)**: Grassmann, W. K. (1977). Transient
+   solutions in Markovian queuing systems. *Computers & Operations Research*,
+   4(1), 47–53.

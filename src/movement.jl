@@ -2161,10 +2161,9 @@ function compute_directed_adjacency(
     hsi::AbstractVector{<:Real},
     W::SparseMatrixCSC;
     gamma::Union{Real, AbstractVector{<:Real}} = 1.0
-)::Matrix{Float64}
+)::SparseMatrixCSC{Float64, Int}
     S = size(W, 1)
-    A = zeros(Float64, S, S)
-    
+
     is_spatial = gamma isa AbstractVector
     if is_spatial
         n_g = length(gamma)
@@ -2181,24 +2180,33 @@ function compute_directed_adjacency(
         gamma_scalar = Float64(gamma)
     end
 
+    # Build sparse triplets -- same sparsity pattern as W
+    nnz_W = nnz(W)
+    I_out = Vector{Int}(undef, nnz_W)
+    J_out = Vector{Int}(undef, nnz_W)
+    V_out = Vector{Float64}(undef, nnz_W)
+    ptr_out = 0
+
     if !is_spatial
         # Fast path: precompute exponents once for uniform scalar gamma
-        exp_hsi = exp.(gamma_scalar .* hsi)
+        exp_hsi = exp.(gamma_scalar .* Float64.(hsi))
         for i in 1:S
             col_start = W.colptr[i]
             col_end   = W.colptr[i+1] - 1
-            col_start > col_end && continue 
-            
+            col_start > col_end && continue
+
             sw = 0.0
             @inbounds for ptr in col_start:col_end
-                j = W.rowval[ptr]
-                sw += exp_hsi[j]
+                sw += exp_hsi[W.rowval[ptr]]
             end
             sw <= 0.0 && continue
-            
+
             @inbounds for ptr in col_start:col_end
                 j = W.rowval[ptr]
-                A[i, j] = exp_hsi[j] / sw
+                ptr_out += 1
+                I_out[ptr_out] = i
+                J_out[ptr_out] = j
+                V_out[ptr_out] = exp_hsi[j] / sw
             end
         end
     else
@@ -2206,25 +2214,33 @@ function compute_directed_adjacency(
         for i in 1:S
             col_start = W.colptr[i]
             col_end   = W.colptr[i+1] - 1
-            col_start > col_end && continue 
-            
+            col_start > col_end && continue
+
             g_i = Float64(gamma[i])
             sw = 0.0
             @inbounds for ptr in col_start:col_end
-                j = W.rowval[ptr]
-                sw += exp(g_i * Float64(hsi[j]))
+                sw += exp(g_i * Float64(hsi[W.rowval[ptr]]))
             end
             sw <= 0.0 && continue
-            
+
             @inbounds for ptr in col_start:col_end
                 j = W.rowval[ptr]
-                A[i, j] = exp(g_i * Float64(hsi[j])) / sw
+                ptr_out += 1
+                I_out[ptr_out] = i
+                J_out[ptr_out] = j
+                V_out[ptr_out] = exp(g_i * Float64(hsi[j])) / sw
             end
         end
     end
-    
-    return A
+
+    return sparse(
+        view(I_out, 1:ptr_out),
+        view(J_out, 1:ptr_out),
+        view(V_out, 1:ptr_out),
+        S, S
+    )
 end
+
 
  
 """
@@ -2503,25 +2519,18 @@ function construct_stochastic_transition_kernel(
                  (advection isa AbstractVector)
 
     if !any_vector
-        # Standard scalar parameter execution (backward-compatible)
-        rho = clamp(Float64(residence), 0.0, 0.9999)
+        # Standard scalar parameter execution — build P as sparse combination
+        rho   = clamp(Float64(residence), 0.0, 0.9999)
         alpha = clamp(Float64(advection), 0.0, 1.0)
         A = compute_directed_adjacency(hsi, W; gamma=Float64(gamma))
 
-        P = Matrix{Float64}(undef, S, S)
         w_move = 1.0 - rho
         w_adv  = w_move * alpha
         w_diff = w_move * (1.0 - alpha)
 
-        @inbounds for j in 1:S
-            for i in 1:S
-                val = w_adv * A[i, j] + w_diff * T_diff[i, j]
-                if i == j
-                    val += rho
-                end
-                P[i, j] = val
-            end
-        end
+        # Sparse combination: rho * I + w_adv * A + w_diff * T_diff
+        P_sparse = w_adv * A + w_diff * T_diff + rho * sparse(I, S, S)
+        P = Matrix{Float64}(P_sparse)
 
         return _postprocess_kernel!(P)
 
@@ -2551,22 +2560,32 @@ function construct_stochastic_transition_kernel(
 
         A = compute_directed_adjacency(hsi, W; gamma=g_vec)
 
-        P = Matrix{Float64}(undef, S, S)
-        @inbounds for i in 1:S
+        # Spatially-varying: build sparse P row by row over W-neighbours only
+        P_rows = Int[]; P_cols = Int[]; P_vals = Float64[]
+        A_csc  = SparseMatrixCSC(A)
+        Td_csc = SparseMatrixCSC(T_diff)
+        for i in 1:S
             rho_i    = rho_vec[i]
             alpha_i  = adv_vec[i]
-            w_move_i = 1.0 - rho_i
-            w_adv_i  = w_move_i * alpha_i
-            w_diff_i = w_move_i * (1.0 - alpha_i)
-
-            for j in 1:S
-                val = w_adv_i * A[i, j] + w_diff_i * T_diff[i, j]
-                if i == j
-                    val += rho_i
-                end
-                P[i, j] = val
+            w_adv_i  = (1.0 - rho_i) * alpha_i
+            w_diff_i = (1.0 - rho_i) * (1.0 - alpha_i)
+            # Collect neighbours from A and T_diff (union of sparsity patterns)
+            nbr_vals = Dict{Int, Float64}()
+            for ptr in nzrange(A_csc, i)
+                j = A_csc.rowval[ptr]
+                nbr_vals[j] = get(nbr_vals, j, 0.0) + w_adv_i * A_csc.nzval[ptr]
+            end
+            for ptr in nzrange(Td_csc, i)
+                j = Td_csc.rowval[ptr]
+                nbr_vals[j] = get(nbr_vals, j, 0.0) + w_diff_i * Td_csc.nzval[ptr]
+            end
+            nbr_vals[i] = get(nbr_vals, i, 0.0) + rho_i
+            for (j, v) in nbr_vals
+                push!(P_rows, i); push!(P_cols, j); push!(P_vals, v)
             end
         end
+        P_sparse = sparse(P_rows, P_cols, P_vals, S, S)
+        P = Matrix{Float64}(P_sparse)
 
         return _postprocess_kernel!(P)
 
@@ -2594,27 +2613,18 @@ function construct_stochastic_transition_kernel(
             fill(Float64(advection), G)
 
         kernels = Vector{Matrix{Float64}}(undef, G)
+        I_diag = sparse(I, S, S)
         for g in 1:G
             rho_g   = clamp(rho_vec[g], 0.0, 0.9999)
             alpha_g = clamp(adv_vec[g], 0.0, 1.0)
             A_g     = compute_directed_adjacency(hsi, W; gamma=g_vec[g])
 
-            P_g = Matrix{Float64}(undef, S, S)
             w_move = 1.0 - rho_g
             w_adv  = w_move * alpha_g
             w_diff = w_move * (1.0 - alpha_g)
 
-            @inbounds for j in 1:S
-                for i in 1:S
-                    val = w_adv * A_g[i, j] + w_diff * T_diff[i, j]
-                    if i == j
-                        val += rho_g
-                    end
-                    P_g[i, j] = val
-                end
-            end
-
-            kernels[g] = _postprocess_kernel!(P_g)
+            P_g_sparse = w_adv * A_g + w_diff * T_diff + rho_g * I_diag
+            kernels[g] = _postprocess_kernel!(Matrix{Float64}(P_g_sparse))
         end
         return kernels
     end
@@ -5104,8 +5114,8 @@ function prepare_movement_data(
     mats_col  = has_mat ? sorted_df.mat : nothing
 
     RecordType = NamedTuple{
-        (:tagid, :release, :recapture, :k, :sex, :mat), 
-        Tuple{String, Int, Int, Int, String, String}
+        (:tagid, :release, :recapture, :k, :rel_time, :sex, :mat),
+        Tuple{String, Int, Int, Int, Float64, String, String}
     }
     pair_records = Vector{RecordType}(undef, 0)
 
@@ -5120,6 +5130,7 @@ function prepare_movement_data(
                     release   = s_idxs[i-1],
                     recapture = s_idxs[i],
                     k         = k,
+                    rel_time  = Float64(times[i-1]),
                     sex       = has_sex ? string(sexes_col[i-1]) : "unknown",
                     mat       = has_mat ? string(mats_col[i-1])  : "unknown"
                 ))

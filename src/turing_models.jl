@@ -52,57 +52,60 @@ function build_sparse_transition_kernel(
     rows = rowvals(W)
     vals = nonzeros(W)
 
-    rho = clamp(Float64(residence), 0.0, 0.999)
-    alpha = clamp(Float64(advection), 0.0, 1.0)
-    w_move = 1.0 - rho
-    w_adv = w_move * alpha
-    w_diff = w_move * (1.0 - alpha)
-    gam = Float64(gamma)
+    # Use T throughout so ForwardDiff.Dual partials are preserved
+    rho   = clamp(T(residence), T(0), T(0.999))
+    alpha = clamp(T(advection), T(0), T(1))
+    w_move = one(T) - rho
+    w_adv  = w_move * alpha
+    w_diff = w_move * (one(T) - alpha)
+    gam    = T(gamma)
 
     for i in 1:S
         if !isnothing(land_mask) && land_mask[i]
             push!(I_idx, i)
             push!(J_idx, i)
-            push!(V_val, 1.0)
+            push!(V_val, one(T))
             continue
         end
 
-        h_i = Float64(hsi[i])
+        h_i = T(hsi[i])
 
         # 1. Identify eligible marine neighbors (excluding self-loops)
-        nbrs = Int[]
-        nbr_w = Float64[]
+        nbrs  = Int[]
+        nbr_w = T[]
         for idx in nzrange(W, i)
             j = rows[idx]
             if j != i && (isnothing(land_mask) || !land_mask[j])
                 push!(nbrs, j)
-                push!(nbr_w, Float64(vals[idx]))
+                push!(nbr_w, T(vals[idx]))
             end
         end
 
         if isempty(nbrs)
             push!(I_idx, i)
             push!(J_idx, i)
-            push!(V_val, 1.0)
+            push!(V_val, one(T))
             continue
         end
 
         # 2. Diffusive weights: normalized by total marine degree
-        sum_deg = sum(nbr_w)
-        diff_weights = sum_deg > 0.0 ? nbr_w ./ sum_deg : fill(1.0 / length(nbrs), length(nbrs))
+        sum_deg      = sum(nbr_w)
+        diff_weights = sum_deg > zero(T) ?
+            nbr_w ./ sum_deg :
+            fill(one(T) / length(nbrs), length(nbrs))
 
         # 3. Directed taxis weights: log-sum-exp numerically stable softmax
-        dh = [clamp(gam * (Float64(hsi[j]) - h_i), -25.0, 25.0) for j in nbrs]
-        max_dh = maximum(dh)
-        exp_dh = [w * exp(d - max_dh) for (w, d) in zip(nbr_w, dh)]
+        dh = [clamp(gam * (T(hsi[j]) - h_i), T(-25), T(25)) for j in nbrs]
+        max_dh  = maximum(dh)
+        exp_dh  = [w * exp(d - max_dh) for (w, d) in zip(nbr_w, dh)]
         sum_exp = sum(exp_dh)
-        tax_weights = sum_exp > 0.0 ? exp_dh ./ sum_exp : diff_weights
+        tax_weights = sum_exp > zero(T) ? exp_dh ./ sum_exp : diff_weights
 
         # 4. Assemble off-diagonal transition probabilities
-        row_sum = 0.0
+        row_sum = zero(T)
         for (k_idx, j) in enumerate(nbrs)
             val = w_adv * tax_weights[k_idx] + w_diff * diff_weights[k_idx]
-            if val > 1e-12
+            if val > T(1e-12)
                 push!(I_idx, i)
                 push!(J_idx, j)
                 push!(V_val, val)
@@ -110,8 +113,8 @@ function build_sparse_transition_kernel(
             end
         end
 
-        # 5. Diagonal residence probability guarantees exact row-stochasticity (sum = 1.0)
-        diag_val = max(0.0, 1.0 - row_sum)
+        # 5. Diagonal residence probability guarantees exact row-stochasticity
+        diag_val = max(zero(T), one(T) - row_sum)
         push!(I_idx, i)
         push!(J_idx, i)
         push!(V_val, diag_val)

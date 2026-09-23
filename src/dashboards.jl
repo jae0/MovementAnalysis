@@ -2027,6 +2027,7 @@ function leaflet_tracks_map(
             dist_val_str = ""
             disp_val_str = ""
             tort_val_str = ""
+            grp_label_str = ""
             hsi_val_str = ""
             start_date_str = ""
             end_date_str = ""
@@ -2063,6 +2064,8 @@ function leaflet_tracks_map(
                     @sprintf("%.2f", tr.tortuosity) : ""
                 hsi_val_str = hasproperty(tr, :mean_hsi) ?
                     @sprintf("%.3f", tr.mean_hsi) : ""
+                grp_label_str = hasproperty(tr, :group_label) ?
+                    string(tr.group_label) : ""
             elseif isa(paths, AbstractVector) && isa(paths[1], AbstractVector)
                 if !isempty(paths[1]) && paths[1][1] isa Integer && !isempty(cents)
                     for u_idx in paths[i]
@@ -2104,6 +2107,7 @@ function leaflet_tracks_map(
                   "id": $i,
                   "properties": {
                     "tag_id": "$tag_id_str",
+                    "group_label": "$grp_label_str",
                     "n_steps": $n_steps_val,
                     "duration_days": $(round(dur_days_val, digits=1)),
                     "total_dist": "$dist_val_str",
