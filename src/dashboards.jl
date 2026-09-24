@@ -590,7 +590,7 @@ end
         map_setup_js::String,
         extra_css::String = "",
         extra_html_body::String = "",
-        dark_mode::Bool = true,
+        dark_mode::Bool = false,
         width::String = "100%",
         height::String = "650px"
     )::String
@@ -605,7 +605,7 @@ function _generate_leaflet_html_document(;
     map_setup_js::String,
     extra_css::String = "",
     extra_html_body::String = "",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "650px"
 )::String
@@ -972,7 +972,7 @@ function leaflet_choropleth(
     is_geo::Union{Nothing, Bool} = nothing,
     width::String = "100%",
     height::String = "650px",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     kwargs...
 )::LeafletMap
     n_poly = length(polygons)
@@ -1016,7 +1016,7 @@ function leaflet_choropleth(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=-160.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
     # Build GeoJSON Features
     features_json = String[]
@@ -1261,7 +1261,7 @@ function leaflet_spatial_graph(
     node_color::String = "#38bdf8",
     edge_color::String = "#f43f5e",
     edge_width::Real = 1.8,
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "650px",
     kwargs...
@@ -1291,7 +1291,7 @@ function leaflet_spatial_graph(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=-160.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
     all_lats = Float64[]
     all_lngs = Float64[]
@@ -1641,7 +1641,7 @@ function leaflet_residence_time_map(
     Gamma::AbstractMatrix{<:Real},
     au::NamedTuple;
     title::String = "Stationary Residence Distribution (π)",
-    cmap::Symbol = :inferno,
+    cmap::Symbol = :viridis,
     colorbar_label::String = "Stationary π",
     kwargs...
 )::LeafletMap
@@ -1698,7 +1698,7 @@ function leaflet_advection_arrows(
     min_speed_quantile::Real = 0.05,
     wkt::Union{Nothing, AbstractString} = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "650px",
     kwargs...
@@ -1708,7 +1708,7 @@ function leaflet_advection_arrows(
     vy = zeros(Float64, S)
 
     wkt_str = !isnothing(wkt) ? string(wkt) : _extract_wkt(au)
-    tf = _build_coordinate_transformer(au.centroids; wkt=wkt_str, is_geo=is_geo, lon_center=-160.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(au.centroids; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
     if !isnothing(hsi) && hasproperty(au, :W) && !isnothing(au.W)
         W = au.W
@@ -1947,7 +1947,7 @@ function leaflet_tracks_map(
     animated::Bool = true,
     wkt::Union{Nothing, AbstractString} = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "650px",
     kwargs...
@@ -2007,7 +2007,7 @@ function leaflet_tracks_map(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=-160.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
     all_lats = Float64[]
     all_lngs = Float64[]
@@ -2693,7 +2693,7 @@ function leaflet_spacetime_map(
     colorbar_label::String = "Fitted Mean",
     wkt::Union{Nothing, AbstractString} = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "650px",
     kwargs...
@@ -2711,7 +2711,7 @@ function leaflet_spacetime_map(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=-160.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
     # Compute global min and max across all time slices
     all_vals = Float64[]
@@ -2994,7 +2994,7 @@ function leaflet_movement_dashboard(
     title::String = "MovementAnalysis Diagnostics Dashboard",
     wkt::Union{Nothing, AbstractString} = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     kwargs...
 )::LeafletMap
@@ -3439,7 +3439,7 @@ function leaflet_dispersal_kernel(
     Gamma::AbstractMatrix{<:Real},
     au::NamedTuple;
     title::String = "Dispersal Kernel Distance Decay",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "400px",
     kwargs...
@@ -3521,7 +3521,7 @@ function leaflet_step_diagnostics(
     paths,
     au::NamedTuple;
     title::String = "Step Length & Turning Angle Diagnostics",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "400px",
     kwargs...
@@ -3629,7 +3629,7 @@ function leaflet_regional_connectivity(
     C_regional::AbstractMatrix{<:Real};
     strata_names::Union{Nothing, Vector{String}} = nothing,
     title::String = "Macro-Regional Connectivity Matrix",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "400px",
     kwargs...
@@ -3694,7 +3694,7 @@ function leaflet_ad_ratio_distribution(
     advection_field::AbstractVector{<:Real},
     diffusion_field::AbstractVector{<:Real};
     title::String = "Advection-to-Diffusion Ratio Distribution",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "400px",
     kwargs...
@@ -3758,7 +3758,7 @@ end
         hydro_data::NamedTuple;
         trajectories::Union{Nothing, NamedTuple, AbstractVector} = nothing,
         title::AbstractString = "Hydrodynamic Ocean Circulation & Stratification Dashboard",
-        dark_mode::Bool = true,
+        dark_mode::Bool = false,
         width::String = "100%",
         height::String = "750px",
         wkt = nothing,
@@ -3800,7 +3800,7 @@ function leaflet_hydrodynamic_dashboard(
     arg2::NamedTuple;
     trajectories::Union{Nothing, NamedTuple, AbstractVector} = nothing,
     title::AbstractString = "Hydrodynamic Ocean Circulation & Stratification Dashboard",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "750px",
     wkt = nothing,
@@ -3832,7 +3832,7 @@ function leaflet_hydrodynamic_dashboard(
 
     S = length(cents)
     wkt_str = !isnothing(wkt) ? string(wkt) : _extract_wkt(au)
-    tf = _build_coordinate_transformer(cents; wkt=wkt_str, is_geo=is_geo, lon_center=-160.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(cents; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
     # 2. Extract multi-depth hydrodynamic variables
     depth_levels = hasproperty(hydro_data, :depths) ? Float64.(hydro_data.depths) : [-2.5, -25.0, -50.0, -100.0]
@@ -4326,7 +4326,7 @@ end
         empirical_paths = nothing,
         group_labels::Vector{String} = String[],
         title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
-        dark_mode::Bool = true,
+        dark_mode::Bool = false,
         width::String = "100%",
         height::String = "750px",
         k_default::Int = 4,
@@ -4379,7 +4379,7 @@ function leaflet_interactive_corridor_dashboard(
     empirical_paths = nothing,
     group_labels::Vector{String} = String[],
     title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
-    dark_mode::Bool = true,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "750px",
     k_default::Int = 4,
@@ -5093,8 +5093,8 @@ end
         centroids::Union{Nothing, AbstractVector} = nothing,
         output_html::Union{Nothing, AbstractString} = nothing,
         title::String = "MovementAnalysis Migratory Current Density & Ecological Pinch-Points",
-        colormap::Symbol = :inferno,
-        dark_mode::Bool = true,
+        colormap::Symbol = :viridis,
+        dark_mode::Bool = false,
         width::String = "100%",
         height::String = "750px",
         legend_title::String = "Current Density (J)"
@@ -5155,8 +5155,8 @@ function leaflet_current_density_map(
     centroids::Union{Nothing, AbstractVector} = nothing,
     output_html::Union{Nothing, AbstractString} = nothing,
     title::String = "MovementAnalysis Migratory Current Density & Ecological Pinch-Points",
-    colormap::Symbol = :inferno,
-    dark_mode::Bool = true,
+    colormap::Symbol = :viridis,
+    dark_mode::Bool = false,
     width::String = "100%",
     height::String = "750px",
     legend_title::String = "Current Density (J)"

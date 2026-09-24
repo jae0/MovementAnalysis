@@ -30,7 +30,7 @@ The framework is organized into six cohesive phases:
    │      - Forward-backward Markov bridge corridor probability heatmaps
    │      - Domain-wide transit bottlenecks B(u) = C(u) / deg(u)
    ▼
-[Phase 4b] Priority Mark-Recapture Analyses
+[Phase 4b] Validation Mark-Recapture Analyses
    │      - Individual trajectory credible intervals
    │      - Regional stock connectivity matrix & credible intervals
    │      - Posterior predictive checks (Brier score, KL divergence)
@@ -246,9 +246,9 @@ pairs.
 
 ---
 
-### Phase 4b: Priority Mark-Recapture Analyses
+### Phase 4b: Validation Mark-Recapture Analyses
 
-Function: `execute_priority_analyses(loaded, fitted, kernels, params)`
+Function: `execute_validation_analyses(loaded, fitted, kernels, params)`
 
 1. Per-path credible intervals (`path_credible_intervals`).
 2. Regional stock connectivity matrix and credible intervals.
@@ -328,7 +328,7 @@ and customized by merging overrides:
 | `max_paths` | `Int` | `25` | Maximum individual trajectories to reconstruct |
 | `path_method` | `Symbol` | `:astar` | Routing algorithm (`:astar` or `:viterbi`) |
 | `smooth_paths` | `Bool` | `false` | Apply line-of-sight path smoothing |
-| `compute_priority` | `Bool` | `true` | Execute priority uncertainty & connectivity analyses |
+| `compute_validation` | `Bool` | `true` | Execute validation uncertainty & connectivity analyses |
 | `run_bayesian_ensemble` | `Bool` | `false` | Full posterior MCMC path/corridor propagation |
 | `compute_circuit` | `Bool` | `false` | Electrical circuit resistance current density |
 | `compute_stochastic` | `Bool` | `false` | Monte Carlo stochastic least-cost paths |
@@ -429,12 +429,12 @@ params = merge(movement_parameters_snowcrab(), (
     depth_barrier_mode = :hsi_only,    # default; depth encoded via HSI
     n_samples        = 500,
     n_warmup         = 100,
-    compute_priority = true,
+    compute_validation = true,
     max_paths        = 40,
 ))
 
 results = run_movement_analysis(params)
-pa = results.priority_analyses
+pa = results.validation_analyses
 println("Brier score: ", pa.posterior_predictive.summary.brier_mean)
 println("Connectivity matrix: ", size(pa.connectivity_matrix.connectivity_matrix))
 ```

@@ -616,9 +616,18 @@ function compute_suitability_transition_kernel(
 ) where T <: Real
 
     n_spatial = length(suitability_vec)
-    Gamma = spzeros(T, n_spatial, n_spatial)
+    
     rows = rowvals(W)
     vals = nonzeros(W)
+    
+    I_vec = Int[]
+    J_vec = Int[]
+    V_vec = T[]
+    
+    # Pre-calculate estimated number of non-zeros
+    sizehint!(I_vec, nnz(W) + n_spatial)
+    sizehint!(J_vec, nnz(W) + n_spatial)
+    sizehint!(V_vec, nnz(W) + n_spatial)
     
     for i in 1:n_spatial
         h_i = suitability_vec[i]
@@ -629,7 +638,10 @@ function compute_suitability_transition_kernel(
         else # :linear
             max(0.01, 1.0 + sensitivity * h_i)
         end
-        Gamma[i, i] = bias_i
+        
+        push!(I_vec, i)
+        push!(J_vec, i)
+        push!(V_vec, bias_i)
 
         for j_idx in nzrange(W, i)
             j = rows[j_idx]
@@ -645,18 +657,35 @@ function compute_suitability_transition_kernel(
                 max(0.01, 1.0 + sensitivity * h_j)
             end
             edge_weight = vals[j_idx]
-            Gamma[i, j] = (suitability_bias + diffusion_weight) * edge_weight
+            
+            push!(I_vec, i)
+            push!(J_vec, j)
+            push!(V_vec, (suitability_bias + diffusion_weight) * edge_weight)
         end
     end
     
-    for i in 1:n_spatial
-        row_sum = sum(Gamma[i, :])
-        if row_sum > 1e-12
-            Gamma[i, :] ./= row_sum
-        else
-            Gamma[i, i] = 1.0
+    Gamma = sparse(I_vec, J_vec, V_vec, n_spatial, n_spatial)
+    
+    # Efficient row-stochastic normalization for CSC matrix
+    row_sums = zeros(T, n_spatial)
+    for i in 1:length(Gamma.nzval)
+        row_sums[Gamma.rowval[i]] += Gamma.nzval[i]
+    end
+    
+    for i in 1:length(Gamma.nzval)
+        r = Gamma.rowval[i]
+        if row_sums[r] > 1e-12
+            Gamma.nzval[i] /= row_sums[r]
         end
     end
+    
+    # Fix rows with zero sum (if any)
+    for r in 1:n_spatial
+        if row_sums[r] <= 1e-12
+            Gamma[r, r] = 1.0
+        end
+    end
+    
     return Gamma
 end
 
@@ -674,11 +703,23 @@ function calculate_regional_connectivity(Gamma::AbstractMatrix, strata_definitio
     
     C = zeros(Float64, n_strata, n_strata)
 
-    for i in 1:n_units
-        from_stratum_idx = strata_map[strata_definition[i]]
+    if Gamma isa SparseMatrixCSC
         for j in 1:n_units
             to_stratum_idx = strata_map[strata_definition[j]]
-            C[from_stratum_idx, to_stratum_idx] += Gamma[i, j]
+            for p in Gamma.colptr[j]:(Gamma.colptr[j+1]-1)
+                i = Gamma.rowval[p]
+                v = Gamma.nzval[p]
+                from_stratum_idx = strata_map[strata_definition[i]]
+                C[from_stratum_idx, to_stratum_idx] += v
+            end
+        end
+    else
+        for j in 1:n_units
+            to_stratum_idx = strata_map[strata_definition[j]]
+            for i in 1:n_units
+                from_stratum_idx = strata_map[strata_definition[i]]
+                C[from_stratum_idx, to_stratum_idx] += Gamma[i, j]
+            end
         end
     end
 
@@ -2280,14 +2321,8 @@ function resolvent_transition(
     b = Float64(beta)
     d = Float64(D_diff)
 
-    # 1. Construct M in a single allocation-free, column-major pass
-    M = Matrix{Float64}(undef, S, S)
-    @inbounds for j in 1:S
-        for i in 1:S
-            diag = (i == j) ? 1.0 : 0.0
-            M[i, j] = diag - b * A[i, j] - d * L[i, j]
-        end
-    end
+    # 1. Construct M efficiently relying on Julia's broadcast and sparse matrix rules
+    M = Matrix(sparse(1.0I, S, S) - b .* A - d .* L)
 
     # 2. Invert M
     Gamma = try
@@ -2308,6 +2343,7 @@ function resolvent_transition(
     end
 
     # 4. Row-normalise using the accumulated sums (Column-Major)
+    # Row-normalise using the accumulated sums (Column-Major)
     @inbounds for j in 1:S
         for i in 1:S
             if row_sums[i] > 0.0
@@ -2317,6 +2353,27 @@ function resolvent_transition(
     end
 
     return Gamma
+end
+
+"""
+    resolvent_expected_visits(P::SparseMatrixCSC{Float64, Int}, target::Int; alpha::Float64=0.99)
+
+Computes the target column of the resolvent transition matrix Γ = (I - α P)^-1.
+This returns a vector `x` where `x[i]` is the expected number of (discounted) visits 
+to `target` starting from `i`, representing an infinite-horizon reachability metric.
+"""
+function resolvent_expected_visits(P::SparseMatrixCSC{Float64, Int}, target::Int; alpha::Float64=0.99)
+    S = size(P, 1)
+    M = sparse(I, S, S) - alpha * P
+    b = zeros(Float64, S)
+    b[target] = 1.0
+    x = try
+        M \ b
+    catch e
+        @warn "resolvent_expected_visits: linear solve failed, returning uniform. ($e)"
+        fill(1.0, S)
+    end
+    return max.(x, 1e-15)
 end
 
  
@@ -2462,132 +2519,20 @@ function construct_stochastic_transition_kernel(
 )::Union{Matrix{Float64}, Vector{Matrix{Float64}}}
     S = size(W, 1)
 
-    # 1. Unbiased topological random walk matrix T_diff (row-stochastic, independent of params)
-    T_diff = zeros(Float64, S, S)
-    for i in 1:S
-        col_start = W.colptr[i]
-        col_end   = W.colptr[i+1] - 1
-        deg_i = col_end - col_start + 1
-        if deg_i > 0 && col_start <= col_end
-            inv_deg = 1.0 / deg_i
-            @inbounds for ptr in col_start:col_end
-                j = W.rowval[ptr]
-                T_diff[i, j] = inv_deg
-            end
-        else
-            T_diff[i, i] = 1.0
-        end
-    end
-
-    # Helper to enforce land zero-transition barrier and row stochasticity
-    function _postprocess_kernel!(P_mat::Matrix{Float64})
-        if land_mask !== nothing
-            for i in 1:S
-                if land_mask[i]
-                    P_mat[i, :] .= 0.0
-                    P_mat[i, i] = 1.0
-                else
-                    for j in 1:S
-                        if land_mask[j]
-                            P_mat[i, j] = 0.0
-                        end
-                    end
-                    rs = sum(view(P_mat, i, :))
-                    if rs > 0.0
-                        P_mat[i, :] ./= rs
-                    else
-                        P_mat[i, i] = 1.0
-                    end
-                end
-            end
-        else
-            for i in 1:S
-                rs = sum(view(P_mat, i, :))
-                if rs > 0.0
-                    P_mat[i, :] ./= rs
-                else
-                    P_mat[i, i] = 1.0
-                end
-            end
-        end
-        return P_mat
-    end
-
-    # 2. Check for vector parameters
+    # 1. Check for vector parameters
     any_vector = (gamma isa AbstractVector) ||
                  (residence isa AbstractVector) ||
                  (advection isa AbstractVector)
 
     if !any_vector
-        # Standard scalar parameter execution — build P as sparse combination
-        rho   = clamp(Float64(residence), 0.0, 0.9999)
-        alpha = clamp(Float64(advection), 0.0, 1.0)
-        A = compute_directed_adjacency(hsi, W; gamma=Float64(gamma))
-
-        w_move = 1.0 - rho
-        w_adv  = w_move * alpha
-        w_diff = w_move * (1.0 - alpha)
-
-        # Sparse combination: rho * I + w_adv * A + w_diff * T_diff
-        P_sparse = w_adv * A + w_diff * T_diff + rho * sparse(I, S, S)
-        P = Matrix{Float64}(P_sparse)
-
-        return _postprocess_kernel!(P)
+        # Standard scalar parameter execution — delegate to highly efficient sparse builder
+        P_sparse = build_sparse_transition_kernel(
+            W, hsi, gamma, residence, advection, land_mask
+        )
+        return Matrix{Float64}(P_sparse)
 
     elseif spatial
-        # Spatially-varying parameters across S spatial units
-        for (name, p) in (("gamma", gamma), ("residence", residence), ("advection", advection))
-            if p isa AbstractVector && length(p) != S && length(p) != 1
-                throw(DimensionMismatch(
-                    "In spatial mode, parameter `$name` has length $(length(p)), " *
-                    "but must match spatial units S=$S or be a scalar."
-                ))
-            end
-        end
-
-        rho_vec = residence isa AbstractVector ?
-            (length(residence) == 1 ? fill(Float64(residence[1]), S) : Float64.(residence)) :
-            fill(Float64(residence), S)
-        adv_vec = advection isa AbstractVector ?
-            (length(advection) == 1 ? fill(Float64(advection[1]), S) : Float64.(advection)) :
-            fill(Float64(advection), S)
-        g_vec = gamma isa AbstractVector ?
-            (length(gamma) == 1 ? fill(Float64(gamma[1]), S) : Float64.(gamma)) :
-            fill(Float64(gamma), S)
-
-        clamp!(rho_vec, 0.0, 0.9999)
-        clamp!(adv_vec, 0.0, 1.0)
-
-        A = compute_directed_adjacency(hsi, W; gamma=g_vec)
-
-        # Spatially-varying: build sparse P row by row over W-neighbours only
-        P_rows = Int[]; P_cols = Int[]; P_vals = Float64[]
-        A_csc  = SparseMatrixCSC(A)
-        Td_csc = SparseMatrixCSC(T_diff)
-        for i in 1:S
-            rho_i    = rho_vec[i]
-            alpha_i  = adv_vec[i]
-            w_adv_i  = (1.0 - rho_i) * alpha_i
-            w_diff_i = (1.0 - rho_i) * (1.0 - alpha_i)
-            # Collect neighbours from A and T_diff (union of sparsity patterns)
-            nbr_vals = Dict{Int, Float64}()
-            for ptr in nzrange(A_csc, i)
-                j = A_csc.rowval[ptr]
-                nbr_vals[j] = get(nbr_vals, j, 0.0) + w_adv_i * A_csc.nzval[ptr]
-            end
-            for ptr in nzrange(Td_csc, i)
-                j = Td_csc.rowval[ptr]
-                nbr_vals[j] = get(nbr_vals, j, 0.0) + w_diff_i * Td_csc.nzval[ptr]
-            end
-            nbr_vals[i] = get(nbr_vals, i, 0.0) + rho_i
-            for (j, v) in nbr_vals
-                push!(P_rows, i); push!(P_cols, j); push!(P_vals, v)
-            end
-        end
-        P_sparse = sparse(P_rows, P_cols, P_vals, S, S)
-        P = Matrix{Float64}(P_sparse)
-
-        return _postprocess_kernel!(P)
+        throw(ArgumentError("spatial=true is unsupported with the sparse builder."))
 
     else
         # Group vector mode: construct distinct transition matrix per group g in 1:G
@@ -2613,18 +2558,11 @@ function construct_stochastic_transition_kernel(
             fill(Float64(advection), G)
 
         kernels = Vector{Matrix{Float64}}(undef, G)
-        I_diag = sparse(I, S, S)
         for g in 1:G
-            rho_g   = clamp(rho_vec[g], 0.0, 0.9999)
-            alpha_g = clamp(adv_vec[g], 0.0, 1.0)
-            A_g     = compute_directed_adjacency(hsi, W; gamma=g_vec[g])
-
-            w_move = 1.0 - rho_g
-            w_adv  = w_move * alpha_g
-            w_diff = w_move * (1.0 - alpha_g)
-
-            P_g_sparse = w_adv * A_g + w_diff * T_diff + rho_g * I_diag
-            kernels[g] = _postprocess_kernel!(Matrix{Float64}(P_g_sparse))
+            P_sparse = build_sparse_transition_kernel(
+                W, hsi, g_vec[g], rho_vec[g], adv_vec[g], land_mask
+            )
+            kernels[g] = Matrix{Float64}(P_sparse)
         end
         return kernels
     end
@@ -2724,6 +2662,8 @@ expanding an order of magnitude fewer nodes than a full trellis search.
 - `land_mask`: Optional boolean vector of length \$S\$ (`true` for impermeable land).
 - `p_min`: Numerical cutoff below which transitions are treated as zero probability (default `1e-12`).
 
+- `resolvent_heuristic`: Optional target-centric steady state vector from `resolvent_expected_visits`.
+
 # Returns
 - `Vector{Int}`: Ordered sequence of spatial unit indices connecting `release` to `recapture`.
 """
@@ -2734,7 +2674,8 @@ function astar_predict_path(
     centroids = nothing,
     k::Union{Nothing, Int} = nothing,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
-    p_min::Real = 1e-12
+    p_min::Real = 1e-12,
+    resolvent_heuristic::Union{Nothing, Vector{Float64}} = nothing
 )::Vector{Int}
     S = size(P, 1)
     if !(1 <= release <= S) || !(1 <= recapture <= S)
@@ -2816,7 +2757,12 @@ function astar_predict_path(
     end
 
     has_cents = cents_vec !== nothing && length(cents_vec) == S
-    heuristic = if has_cents && !isempty(rows_c)
+    heuristic = if resolvent_heuristic !== nothing
+        v -> begin
+            h = -log(resolvent_heuristic[v])
+            return isfinite(h) ? h : 1e6
+        end
+    elseif has_cents && !isempty(rows_c)
         max_d = 1e-6
         for k_idx in 1:length(rows_c)
             u = rows_c[k_idx]
@@ -3574,6 +3520,7 @@ between `release` and `recapture` using either goal-directed \$A^*\$ heuristic s
 - `method`: Algorithm selector (`:astar` for high-performance \$A^*\$,
   `:viterbi` for classic trellis).
 - `land_mask`: Optional boolean vector of length ``S`` (`true` for land units).
+- `use_resolvent`: Boolean to utilize the infinite-horizon heuristic (default `true`).
 
 # Returns
 - `Vector{Int}`: Sequence of spatial unit indices from `release` to `recapture`.
@@ -3585,14 +3532,21 @@ function predict_path(
     k::Union{Nothing, Int} = nothing;
     centroids = nothing,
     method::Symbol = :astar,
-    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    use_resolvent::Bool = true
 )::Vector{Int}
     if k === nothing || method == :astar
+        res_heuristic = nothing
+        if use_resolvent
+            P_sp = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
+            res_heuristic = resolvent_expected_visits(P_sp, recapture)
+        end
         return astar_predict_path(
             P, release, recapture;
             centroids = centroids,
             k = k,
-            land_mask = land_mask
+            land_mask = land_mask,
+            resolvent_heuristic = res_heuristic
         )
     elseif method == :viterbi
         S = size(P, 1)
@@ -3621,22 +3575,8 @@ function predict_path(
             end
         end
 
-        logP = Matrix{Float64}(undef, S, S)
-        @inbounds for j in 1:S
-            for i in 1:S
-                p_ij = Float64(P[i, j])
-                logP[i, j] = p_ij > 1e-15 ? log(p_ij) : -1e12
-            end
-        end
-
-        if land_mask !== nothing
-            for l in 1:S
-                if land_mask[l]
-                    logP[:, l] .= -1e12
-                    logP[l, :] .= -1e12
-                end
-            end
-        end
+        P_csc = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
+        Pt_csc = SparseMatrixCSC(P_csc') # Transpose for fast incoming edge lookup
 
         delta = fill(-1e12, S, k + 1)
         psi   = zeros(Int, S, k + 1)
@@ -3644,18 +3584,37 @@ function predict_path(
 
         for tau in 2:(k + 1)
             prev_tau = tau - 1
-            for j in 1:S
+            @inbounds for j in 1:S
+                if land_mask !== nothing && land_mask[j]
+                    continue
+                end
+
                 best_val = -Inf
                 best_prev = 1
-                for i in 1:S
-                    score = delta[i, prev_tau] + logP[i, j]
-                    if score > best_val
-                        best_val = score
-                        best_prev = i
+
+                col_start = Pt_csc.colptr[j]
+                col_end   = Pt_csc.colptr[j+1] - 1
+
+                for ptr in col_start:col_end
+                    i = Pt_csc.rowval[ptr]
+                    if land_mask !== nothing && land_mask[i]
+                        continue
+                    end
+
+                    p_ij = Pt_csc.nzval[ptr]
+                    if p_ij > 1e-15
+                        score = delta[i, prev_tau] + log(p_ij)
+                        if score > best_val
+                            best_val = score
+                            best_prev = i
+                        end
                     end
                 end
-                delta[j, tau] = best_val
-                psi[j, tau]   = best_prev
+
+                if best_val > -Inf
+                    delta[j, tau] = best_val
+                    psi[j, tau]   = best_prev
+                end
             end
         end
 
@@ -3677,6 +3636,48 @@ function predict_path(
     else
         throw(ArgumentError("Unknown path method '$method'. Expected :astar or :viterbi."))
     end
+end
+
+"""
+    predict_steady_state_corridor(P::AbstractMatrix{<:Real}, release::Int, recapture::Int; alpha=0.99, land_mask=nothing) -> Vector{Float64}
+
+Computes a time-independent (infinite-horizon) connectivity corridor representing the 
+probability of ever visiting a spatial unit `x` en route from `release` to `recapture`.
+This leverages the fast sparse resolvent transition method.
+"""
+function predict_steady_state_corridor(
+    P::AbstractMatrix{<:Real},
+    release::Int,
+    recapture::Int;
+    alpha::Float64 = 0.99,
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
+)::Vector{Float64}
+    S = size(P, 1)
+    P_sp = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
+    
+    # 1. Expected visits to recapture from all x: (I - aP) x_to_v = e_v
+    x_to_v = resolvent_expected_visits(P_sp, recapture; alpha=alpha)
+    
+    # 2. Expected visits to all x from release: (I - aP') u_to_x = e_u
+    M_t = sparse(I, S, S) - alpha * P_sp'
+    b_u = zeros(Float64, S)
+    b_u[release] = 1.0
+    u_to_x = try M_t \ b_u catch e fill(1.0, S) end
+    u_to_x = max.(u_to_x, 0.0)
+    
+    corridor = zeros(Float64, S)
+    for x in 1:S
+        if land_mask !== nothing && land_mask[x]
+            continue
+        end
+        corridor[x] = u_to_x[x] * x_to_v[x]
+    end
+    
+    sum_c = sum(corridor)
+    if sum_c > 0.0
+        corridor ./= sum_c
+    end
+    return corridor
 end
 
 
@@ -5635,7 +5636,7 @@ function export_movement_summary_csv(
 end
 
 # =============================================================================
-# Posterior Uncertainty Propagation & Priority Analyses
+# Posterior Uncertainty Propagation & Validation Analyses
 # =============================================================================
 
 """
@@ -5710,6 +5711,22 @@ function path_credible_intervals(
     n_eval_draws = min(n_draws, 50)
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
 
+    P_draws = Any[]
+    for draw in eval_indices
+        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
+        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
+        gamma_arr = [g_samples[draw, g] for g in 1:G]
+
+        P_draw = construct_stochastic_transition_kernel(
+            loaded.W, loaded.hsi_vec;
+            gamma     = gamma_arr,
+            residence = rho_arr,
+            advection = alpha_arr,
+            land_mask = land_mask
+        )
+        push!(P_draws, P_draw)
+    end
+
     for tid in all_tags
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
@@ -5720,21 +5737,8 @@ function path_credible_intervals(
         path_ens = Vector{Int}[]
         path_lengths = Float64[]
 
-        for draw in eval_indices
-            alpha_draw = clamp(v_samples[draw, grp] /
-                               (v_samples[draw, grp] + d_samples[draw, grp] + 1e-6),
-                               0.0, 1.0)
-            rho_draw   = clamp(1.0 / (1.0 + v_samples[draw, grp] + d_samples[draw, grp]),
-                               0.01, 0.95)
-            gamma_draw = g_samples[draw, grp]
-
-            P_draw = construct_stochastic_transition_kernel(
-                loaded.W, loaded.hsi_vec;
-                gamma     = fill(gamma_draw, G),
-                residence = fill(rho_draw, G),
-                advection = fill(alpha_draw, G),
-                land_mask = land_mask
-            )
+        for (draw_idx, draw) in enumerate(eval_indices)
+            P_draw = P_draws[draw_idx]
             P_k = P_draw isa AbstractVector ? P_draw[grp] : P_draw
 
             full_path = Int[sub_obs.release[1]]
@@ -5913,6 +5917,23 @@ function reconstruct_paths_bayesian_ensemble(
         "$n_ensemble MCMC posterior samples..."
     )
 
+    G_eff = size(chn_mat_v, 2)
+    P_draws = Any[]
+    for d_idx in draw_indices
+        alpha_arr = [clamp(chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] / (chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] + chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))] + 1e-6), 0.0, 1.0) for g in 1:G_eff]
+        rho_arr   = [clamp(1.0 / (1.0 + chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] + chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))]), 0.01, 0.95) for g in 1:G_eff]
+        gamma_arr = [chn_mat_g[d_idx, min(g, size(chn_mat_g, 2))] for g in 1:G_eff]
+
+        P_draw = construct_stochastic_transition_kernel(
+            W, hsi_vec;
+            gamma     = gamma_arr,
+            residence = rho_arr,
+            advection = alpha_arr,
+            land_mask = land_mask
+        )
+        push!(P_draws, P_draw)
+    end
+
     for tid in sample_tags
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
@@ -5924,25 +5945,9 @@ function reconstruct_paths_bayesian_ensemble(
         sample_path_collection = Vector{Int}[]
 
         for (i, d_idx) in enumerate(draw_indices)
-            v_col = min(grp, size(chn_mat_v, 2))
-            d_col = min(grp, size(chn_mat_d, 2))
-            g_col = min(grp, size(chn_mat_g, 2))
-
-            v_s = chn_mat_v[d_idx, v_col]
-            d_s = chn_mat_d[d_idx, d_col]
-            g_s = chn_mat_g[d_idx, g_col]
-
-            tot_s   = v_s + d_s + 1e-6
-            alpha_s = clamp(v_s / tot_s, 0.0, 1.0)
-            rho_s   = clamp(1.0 / (1.0 + tot_s), 0.01, 0.95)
-
-            P_draw = construct_stochastic_transition_kernel(
-                W, hsi_vec;
-                gamma     = g_s,
-                residence = rho_s,
-                advection = alpha_s,
-                land_mask = land_mask
-            )
+            P_draw_all = P_draws[i]
+            grp_eff = min(grp, G_eff)
+            P_draw = P_draw_all isa AbstractVector ? P_draw_all[grp_eff] : P_draw_all
 
             corr_draw = predict_corridor(
                 P_draw, first_row.release, first_row.recapture, k_steps;
@@ -6112,18 +6117,15 @@ function compute_connectivity_credible_intervals(
     connectivity_samples = Matrix{Float64}[]
 
     for draw in eval_indices
-        alpha_draw = clamp(v_samples[draw, 1] /
-                           (v_samples[draw, 1] + d_samples[draw, 1] + 1e-6),
-                           0.0, 1.0)
-        rho_draw   = clamp(1.0 / (1.0 + v_samples[draw, 1] + d_samples[draw, 1]),
-                           0.01, 0.95)
-        gamma_draw = g_samples[draw, 1]
+        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
+        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
+        gamma_arr = [g_samples[draw, g] for g in 1:G]
 
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = fill(gamma_draw, G),
-            residence = fill(rho_draw, G),
-            advection = fill(alpha_draw, G),
+            gamma     = gamma_arr,
+            residence = rho_arr,
+            advection = alpha_arr,
             land_mask = land_mask
         )
         P_k = P_draw isa AbstractVector ? P_draw[1] : P_draw
@@ -6281,18 +6283,15 @@ function posterior_predictive_check(
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
 
     for draw in eval_indices
-        alpha_draw = clamp(v_samples[draw, 1] /
-                           (v_samples[draw, 1] + d_samples[draw, 1] + 1e-6),
-                           0.0, 1.0)
-        rho_draw   = clamp(1.0 / (1.0 + v_samples[draw, 1] + d_samples[draw, 1]),
-                           0.01, 0.95)
-        gamma_draw = g_samples[draw, 1]
+        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
+        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
+        gamma_arr = [g_samples[draw, g] for g in 1:G]
 
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = fill(gamma_draw, G),
-            residence = fill(rho_draw, G),
-            advection = fill(alpha_draw, G),
+            gamma     = gamma_arr,
+            residence = rho_arr,
+            advection = alpha_arr,
             land_mask = land_mask
         )
 
@@ -6418,14 +6417,14 @@ function plot_posterior_predictive_check(ppc, output_dir)::String
 end
 
 """
-    run_priority_analyses(loaded, fitted, kernels, params, output_dir) -> NamedTuple
+    run_validation_analyses(loaded, fitted, kernels, params, output_dir) -> NamedTuple
 
-Consolidated priority post-processing pipeline executing:
+Consolidated validation post-processing pipeline executing:
 1. Path credible intervals
 2. Stock connectivity matrix
 3. Posterior predictive checks
 """
-function run_priority_analyses(
+function run_validation_analyses(
     loaded::NamedTuple,
     fitted::NamedTuple,
     kernels::NamedTuple,
@@ -6435,7 +6434,7 @@ function run_priority_analyses(
     mkpath(output_dir)
     verbose = get(params, :verbose, true)
 
-    verbose && println("\n--- Running Priority Analyses ---")
+    verbose && println("\n--- Running Validation Analyses ---")
     path_unc = path_credible_intervals(loaded, fitted, kernels, params)
     export_path_uncertainty_summary(path_unc, loaded, output_dir)
 
@@ -8812,4 +8811,30 @@ function generate_movement_data(;
         depth_vec    = depth_vec,
         group_lookup = group_lookup
     )
+end
+
+"""
+    simulate_forward_ibm(P, start_node, steps; land_mask)
+
+Simulate an unconstrained forward Individual-Based Model (IBM) random walk
+on the transition kernel `P`.
+"""
+function simulate_forward_ibm(
+    P::AbstractMatrix{<:Real},
+    start_node::Int,
+    steps::Int;
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
+)::Vector{Int}
+    path = Int[start_node]
+    node = start_node
+    for _ in 1:steps
+        row = copy(vec(P[node, :]))
+        land_mask !== nothing && (row[land_mask] .= 0.0)
+        rs = sum(row)
+        rs <= 0.0 && break
+        row ./= rs
+        node = rand(Categorical(row))
+        push!(path, node)
+    end
+    return path
 end

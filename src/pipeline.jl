@@ -6,6 +6,100 @@ const _DepthRangeArg = Union{
 }
 
 
+using RCall
+using Arrow
+using DataFrames
+
+"""
+    r_to_ipc(filepath::AbstractString)
+
+Read tabular R data by utilizing an R session to convert it to a temporary 
+Arrow IPC (Feather v2) file, which is then parsed into Julia.
+
+This method achieves extremely high performance by writing the exact in-memory 
+representation to disk. Julia reads the bytes into memory and constructs the 
+DataFrame pointing directly at those bytes (zero-copy parsing), avoiding 
+both memory duplication and deserialization CPU overhead.
+
+# Analytical Assumptions
+- **Tabular Data Requirement**: IPC exclusively supports tabular data. The R object 
+  stored in the file must be a `data.frame`, `tibble`, or `data.table`.
+- **Single Object extraction**: For `.rda` files, this extracts only the first 
+  variable loaded alphabetically.
+- **Garbage Collection**: The raw bytes of the file are held in a Julia byte array. 
+  These bytes will remain in memory until the returned DataFrame is garbage collected.
+
+# Arguments
+- `filepath::AbstractString`: The path to the R data file.
+
+# Returns
+- A `DataFrame` containing the deserialized tabular data.
+
+# Dependencies
+- Julia packages: `RCall`, `Arrow`, `DataFrames`.
+- R packages: `qs` and `arrow` must be installed.
+"""
+function r_to_ipc(filepath::AbstractString)
+    if !isfile(filepath)
+        error("File not found: ", filepath)
+    end
+    
+    # Generate a temporary file path for the IPC intermediate
+    temp_ipc = tempname() * ".arrow"
+    
+    try
+        # Execute the R logic inside a local environment
+        R"""
+        local({
+            filepath <- $(filepath)
+            outpath <- $(temp_ipc)
+            
+            ext <- tolower(tools::file_ext(filepath))
+            
+            # 1. Parse the R serialization format
+            if (ext %in% c("rdz", "qs")) {
+                obj <- qs::qread(filepath)
+            } else if (ext == "rds") {
+                obj <- readRDS(filepath)
+            } else if (ext %in% c("rda", "rdata")) {
+                env <- new.env()
+                load(filepath, envir = env)
+                vars <- ls(env)
+                if (length(vars) == 0) stop("No objects found in .rda file")
+                obj <- env[[vars[1]]]
+            } else {
+                stop(paste("Unsupported file extension:", ext))
+            }
+            
+            # 2. Validate tabular structure
+            if (!is.data.frame(obj)) {
+                stop("Object is not a data.frame. IPC requires tabular data.")
+            }
+            
+            # 3. Export to intermediate Arrow IPC
+            # zstd provides excellent block-level compression to minimize disk IO time
+            arrow::write_ipc_file(obj, outpath, compression = "zstd")
+        })
+        """
+        
+        # Read the raw bytes from disk into memory. This avoids Windows file-locking 
+        # issues that occur if we were to memory-map the file directly from disk.
+        ipc_bytes = read(temp_ipc)
+        
+        # Construct the Arrow Table from the in-memory byte array, and wrap it in a 
+        # DataFrame without copying the underlying columns (zero-copy parsing).
+        return DataFrame(Arrow.Table(ipc_bytes), copycols=false)
+        
+    finally
+        # Safely delete the temporary file
+        if isfile(temp_ipc)
+            rm(temp_ipc)
+        end
+    end
+end
+
+
+
 
 # Ingest empirical telemetry data, construct 20 km hexagonal mesh, sever
 # terrestrial barriers, and infill unobserved marine HSI values
@@ -64,7 +158,10 @@ function snowcrab_movement_data(;
     ref_doy       :: Int     = 182,
     verbose       :: Bool    = true,
     pre_mapped               = nothing,
-    data_dir      :: Union{Nothing, AbstractString} = nothing
+    data_dir      :: Union{Nothing, AbstractString} = nothing,
+    tagging_file  :: Union{Nothing, AbstractString} = nothing,
+    hsi_file      :: Union{Nothing, AbstractString} = nothing,
+    sppoly_file   :: Union{Nothing, AbstractString} = nothing
 )::NamedTuple
 
     dir = if data_dir !== nothing
@@ -77,18 +174,50 @@ function snowcrab_movement_data(;
         normpath(joinpath(@__DIR__, "..", "..", "docs", "movement", "data"))
     end
 
-    tagging_file = joinpath(dir, "tagging.jld2")
-    isfile(tagging_file) || error("Snow crab tagging file not found at: $tagging_file")
+    actual_tagging = if tagging_file !== nothing
+        tagging_file
+    else
+        # Fallback to defaults
+        t_jld = joinpath(dir, "tagging.jld2")
+        t_rdz = joinpath(dir, "tagging.rdz")
+        t_rds = joinpath(dir, "tagging.rds")
+        if isfile(t_rdz)
+            t_rdz
+        elseif isfile(t_rds)
+            t_rds
+        else
+            t_jld
+        end
+    end
 
-    loaded_tag = JLD2.load(tagging_file)
-    tagging = loaded_tag isa AbstractDict ? (haskey(loaded_tag, "tagging") ? loaded_tag["tagging"] : first(values(loaded_tag))) : loaded_tag
-    hsi_jld2 = joinpath(dir, "hsi.jld2")
-    sppoly_jld2 = joinpath(dir, "sppoly.jld2")
+    isfile(actual_tagging) || error("Snow crab tagging file not found at: $actual_tagging")
+
+    ext = lowercase(splitext(actual_tagging)[2])
+    tagging = if ext == ".jld2"
+        loaded_tag = JLD2.load(actual_tagging)
+        loaded_tag isa AbstractDict ? (haskey(loaded_tag, "tagging") ? loaded_tag["tagging"] : first(values(loaded_tag))) : loaded_tag
+    elseif ext in (".rdz", ".rds", ".rda", ".rdata", ".qs")
+        r_to_ipc(actual_tagging)
+    else
+        error("Unsupported tagging file format: $ext")
+    end
+
+    actual_hsi = if hsi_file !== nothing
+        hsi_file
+    else
+        joinpath(dir, "hsi.jld2")
+    end
+
+    actual_sppoly = if sppoly_file !== nothing
+        sppoly_file
+    else
+        joinpath(dir, "sppoly.jld2")
+    end
 
     return prepare_movement_data(
         tagging;
-        hsi_file      = isfile(hsi_jld2) ? hsi_jld2 : nothing,
-        sppoly_file   = isfile(sppoly_jld2) ? sppoly_jld2 : nothing,
+        hsi_file      = isfile(actual_hsi) ? actual_hsi : nothing,
+        sppoly_file   = isfile(actual_sppoly) ? actual_sppoly : nothing,
         radius_km     = radius_km,
         time_interval = time_interval,
         land_polygons = :maritimes,
@@ -207,8 +336,9 @@ species-specific parameter function:
 - `fine_radius_km::Real`: Cell radius for coastal/refined units (km).
 - `dynamic_kernels::Bool`: Use time-varying dynamic transition kernels.
 - `hmm_smoothing::Bool`: Use global multi-segment HMM Viterbi smoothing.
-- `compute_priority::Bool`: Run priority path uncertainty & connectivity.
+- `compute_validation::Bool`: Run validation path uncertainty & connectivity.
 - `run_bayesian_ensemble::Bool`: Reconstruct Bayesian MCMC path ensembles.
+- `resume_from_checkpoint::Bool`: Load intermediate states if checkpoint file exists.
 - `region_labels`: Human-readable labels for stock connectivity regions.
 - `region_map`: Spatial mapping assigning mesh units to regions.
 """
@@ -246,8 +376,9 @@ function movement_parameters_default()
         fine_radius_km       = 8.0,
         dynamic_kernels      = false,
         hmm_smoothing        = false,
-        compute_priority     = true,
+        compute_validation   = true,
         run_bayesian_ensemble = false,
+        resume_from_checkpoint = false,
         region_labels        = nothing,
         region_map           = nothing,
     )
@@ -542,11 +673,20 @@ function load_movement_data(params)::NamedTuple
     data = if Symbol(params.data_source) == :snowcrab
         sc_rad = params.hex_radius_km != 10.0 ? params.hex_radius_km : 15.0
         try
+            kw = Dict{Symbol, Any}(:radius_km => sc_rad, :verbose => verbose)
             if hasproperty(params, :data_dir) && !isnothing(params.data_dir)
-                snowcrab_movement_data(radius_km = sc_rad, verbose = verbose, data_dir=params.data_dir)
-            else
-                snowcrab_movement_data(radius_km = sc_rad, verbose = verbose)
+                kw[:data_dir] = params.data_dir
             end
+            if hasproperty(params, :tagging_file) && !isnothing(params.tagging_file)
+                kw[:tagging_file] = params.tagging_file
+            end
+            if hasproperty(params, :hsi_file) && !isnothing(params.hsi_file)
+                kw[:hsi_file] = params.hsi_file
+            end
+            if hasproperty(params, :sppoly_file) && !isnothing(params.sppoly_file)
+                kw[:sppoly_file] = params.sppoly_file
+            end
+            snowcrab_movement_data(; kw...)
         catch err
             @warn "Could not load snow crab data: $err -- using simulate."
             generate_movement_data()
@@ -970,6 +1110,35 @@ function fit_movement_models(loaded, params)::NamedTuple
         verbose && println("  SSA telemetry model complete.")
     end
 
+    # -- Continuous-Time Joint Survey + SSA Telemetry Model ------------------
+    if fit_ssa_joint && !isnothing(loaded.survey_df)
+        verbose && println("\n[Phase 2] Fitting Continuous-Time Joint Survey + SSA Telemetry model...")
+        
+        obs_df     = loaded.obs_df
+        releases   = Int.(obs_df.release)
+        recaptures = Int.(obs_df.recapture)
+        dts        = Float64.(obs_df.k)
+        groups     = hasproperty(obs_df, :group) ?
+                     Int.(obs_df.group) : ones(Int, length(releases))
+        G          = isempty(groups) ? 1 : maximum(groups)
+
+        survey_df  = loaded.survey_df
+        counts     = Int.(round.(survey_df.density))
+        depths     = hasproperty(survey_df, :depth) ?
+                     Float64.(survey_df.depth) : zeros(Float64, length(counts))
+
+        m_ssa_j = joint_survey_ssa_telemetry_turing_model(
+            counts, depths,
+            releases, recaptures, dts, groups,
+            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+        )
+        models[:ssa_and_survey] = m_ssa_j
+        verbose && println("  Sampling $(params.n_samples) draws...")
+        chn_ssa_j = sample(rng, m_ssa_j, MH(), params.n_samples; progress = false)
+        chains[:ssa_and_survey] = chn_ssa_j
+        verbose && println("  Joint SSA model complete.")
+    end
+
     # -- Pure Telemetry Model ------------------------------------------------
     if fit_tel
         verbose && println("\n[Phase 2] Fitting Pure Telemetry model...")
@@ -1068,8 +1237,10 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
         chains[:telemetry]
     elseif haskey(chains, :telemetry_and_survey)
         chains[:telemetry_and_survey]
-    else
+    elseif !isempty(chains)
         first(values(chains))
+    else
+        nothing
     end
 
     # Build integer-keyed group name lookup from the loaded group_map
@@ -1089,6 +1260,9 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
     # Extract posterior mean vector for a named parameter prefix
     function _extract_mean_vec(prefix::String, G_count::Int, defval::Float64)
         vals     = fill(defval, G_count)
+        if active_chain === nothing
+            return vals
+        end
         chn_keys = keys(active_chain)
         found    = false
         for g in 1:G_count
@@ -1317,9 +1491,32 @@ function reconstruct_paths_and_diagnostics(
         "for $n_sample / $(length(all_tags)) individuals..."
     )
 
+    max_k_dyn = 0
+    if get(params, :dynamic_kernels, false)
+        for tid in sample_tags
+            sub_obs = filter(:tagid => ==(tid), obs_df)
+            isempty(sub_obs) && continue
+            max_k_dyn = max(max_k_dyn, first(sub_obs).k)
+        end
+    end
+
+    P_dyn_seq_cache = nothing
+    if max_k_dyn > 0
+        hsi_dyn_all = [
+            clamp.(hsi_vec .+ 0.05 * sin(t * π / 2), 0.01, 1.0)
+            for t in 1:max_k_dyn
+        ]
+        P_dyn_seq_cache = construct_dynamic_transition_kernels(
+            W, hsi_dyn_all; land_mask = land_mask
+        )
+    end
+
+    P_seg_cache = Dict{Tuple{Float64, Int}, Any}()
+
     reconstructed_paths     = Dict{String, Vector{Int}}()
     reconstructed_corridors = Dict{String, Matrix{Float64}}()
     stochastic_paths        = Dict{String, Any}()
+    forward_ibm_paths       = Dict{String, Vector{Int}}()
 
     for tid in sample_tags
         sub_obs = filter(:tagid => ==(tid), obs_df)
@@ -1358,22 +1555,24 @@ function reconstruct_paths_and_diagnostics(
                 P_seg = if hsi_row === hsi_vec
                     P_k
                 else
-                    a_hat = kernels.alpha_hat isa AbstractVector ?
-                        kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
-                        kernels.alpha_hat
-                    r_hat = kernels.rho_hat isa AbstractVector ?
-                        kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
-                        kernels.rho_hat
-                    g_hat = kernels.gamma_hat isa AbstractVector ?
-                        kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
-                        kernels.gamma_hat
-                    construct_stochastic_transition_kernel(
-                        W, hsi_row;
-                        gamma     = g_hat,
-                        residence = r_hat,
-                        advection = a_hat,
-                        land_mask = land_mask
-                    )
+                    get!(P_seg_cache, (Float64(t_rel), grp)) do
+                        a_hat = kernels.alpha_hat isa AbstractVector ?
+                            kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
+                            kernels.alpha_hat
+                        r_hat = kernels.rho_hat isa AbstractVector ?
+                            kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
+                            kernels.rho_hat
+                        g_hat = kernels.gamma_hat isa AbstractVector ?
+                            kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
+                            kernels.gamma_hat
+                        construct_stochastic_transition_kernel(
+                            W, hsi_row;
+                            gamma     = g_hat,
+                            residence = r_hat,
+                            advection = a_hat,
+                            land_mask = land_mask
+                        )
+                    end
                 end
 
                 seg = if hasproperty(loaded.mesh, :is_fine)
@@ -1397,6 +1596,10 @@ function reconstruct_paths_and_diagnostics(
             full_path = smooth_marine_path(full_path, cents_mesh)
         end
         reconstructed_paths[string(tid)] = full_path
+
+        # Generate unconditioned forward IBM path
+        fwd_ibm = simulate_forward_ibm(P_k, first(sub_obs).release, sum(sub_obs.k); land_mask=land_mask)
+        forward_ibm_paths[string(tid)] = fwd_ibm
 
         # Markov bridge corridor heatmap for the first segment
         first_row = first(sub_obs)
@@ -1436,13 +1639,8 @@ function reconstruct_paths_and_diagnostics(
                 P_k
             end
             corr_d = if get(params, :dynamic_kernels, false)
-                hsi_dyn = [
-                    clamp.(hsi_vec .+ 0.05 * sin(t * π / 2), 0.01, 1.0)
-                    for t in 1:max(1, first_row.k)
-                ]
-                P_dyn_seq = construct_dynamic_transition_kernels(
-                    W, hsi_dyn; land_mask = land_mask
-                )
+                k_val = max(1, first_row.k)
+                P_dyn_seq = P_dyn_seq_cache[1:k_val]
                 predict_dynamic_corridor(
                     P_dyn_seq, first_row.release, first_row.recapture;
                     land_mask = land_mask
@@ -1625,6 +1823,7 @@ function reconstruct_paths_and_diagnostics(
         paths              = reconstructed_paths,
         corridors          = reconstructed_corridors,
         stochastic_paths   = stochastic_paths,
+        forward_ibm_paths  = forward_ibm_paths,
         domain_bottlenecks = domain_bottlenecks,
         cents_planar       = cents_planar,
         cents_lonlat       = cents_lonlat,
@@ -2010,6 +2209,54 @@ function export_dashboards(
         "  IBM stochastic realizations added: $n_ibm_added"
     )
 
+    # -- Append Unconditioned Forward IBM paths --------------------------
+    if haskey(path_results, :forward_ibm_paths)
+        for (tid, node_vec) in path_results.forward_ibm_paths
+            length(node_vec) < 2 && continue
+            coords = Tuple{Float64, Float64}[
+                (Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
+                for u in node_vec
+                if 1 <= u <= n_units
+            ]
+            length(coords) < 2 && continue
+
+            total_dist = sum(
+                haversine_distance(
+                    coords[h-1][1], coords[h-1][2],
+                    coords[h][1],   coords[h][2]
+                ) / 1_000.0
+                for h in 2:length(coords)
+            )
+
+            sub_obs = filter(:tagid => ==(tid), obs_df)
+            grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
+                  first(sub_obs.group) : 1
+
+            push!(all_paths_rich, (
+                tagid           = string(tid) * "_forward_ibm",
+                path            = node_vec,
+                coords          = coords,
+                n_steps         = length(coords) - 1,
+                total_dist_km   = total_dist,
+                displacement_km = haversine_distance(
+                    coords[1][1], coords[1][2],
+                    coords[end][1], coords[end][2]
+                ) / 1_000.0,
+                tortuosity      = 1.0,
+                mean_hsi        = mean([
+                    (1 <= u <= length(hsi_vec)) ? hsi_vec[u] : 0.5
+                    for u in node_vec
+                ]),
+                color           = "#f97316", # orange
+                duration_days   = Float64(
+                    !isempty(sub_obs) ? sum(sub_obs.k) : 1
+                ),
+                group           = grp,
+                group_label     = "IBM Forward Walk",
+            ))
+        end
+    end
+
     # -- Movement paths dashboard ---------------------------------
     try
         html_file = joinpath(out_dir, "movement_paths_dashboard.html")
@@ -2199,6 +2446,122 @@ function export_dashboards(
         end
     end
 
+    # -- New Missing Visualizations: Speeds, Directions, Home Range, Corridors --
+    
+    # 1. Step Diagnostics (Speeds, Turning Angles)
+    if !isempty(path_results.paths)
+        try
+            step_file = joinpath(out_dir, "movement_step_diagnostics.html")
+            map_obj = leaflet_step_diagnostics(
+                path_results.paths, loaded.au_mesh;
+                title = "$spp Speeds and Directions Distributions"
+            )
+            save_html(map_obj, step_file)
+            verbose && println("  Step diagnostics dashboard: $step_file")
+        catch e
+            verbose && println("  (Step diagnostics note: $e)")
+        end
+    end
+    
+    # 2. Regional Connectivity & Home Range Estimates
+    try
+        conn_file = joinpath(out_dir, "movement_regional_connectivity.html")
+        map_obj = leaflet_regional_connectivity(
+            loaded.au_mesh, path_results.paths;
+            title = "$spp Regional Connectivity and Home Range Estimates"
+        )
+        save_html(map_obj, conn_file)
+        verbose && println("  Regional connectivity dashboard: $conn_file")
+    catch e
+        verbose && println("  (Regional connectivity note: $e)")
+    end
+
+    # 3. Advection Velocity Field
+    if !isnothing(loaded.advection_x) && !isnothing(loaded.advection_y)
+        try
+            adv_file = joinpath(out_dir, "movement_advection_velocity.html")
+            map_obj = leaflet_velocity_field(
+                loaded.advection_x, loaded.advection_y, loaded.au_mesh;
+                title = "$spp Advection Drift & Velocity Field Vectors"
+            )
+            save_html(map_obj, adv_file)
+            verbose && println("  Advection velocity dashboard: $adv_file")
+        catch e
+            verbose && println("  (Advection velocity note: $e)")
+        end
+        
+        try
+            ad_file = joinpath(out_dir, "movement_ad_ratio_distribution.html")
+            map_obj = leaflet_ad_ratio_distribution(
+                loaded.advection_x, loaded.advection_y, 0.1;
+                title = "$spp Advection/Diffusion Ratio"
+            )
+            save_html(map_obj, ad_file)
+            verbose && println("  Advection ratio dashboard: $ad_file")
+        catch e
+            verbose && println("  (Advection ratio note: $e)")
+        end
+    end
+
+    # 4. Residence Time & Diffusion Field
+    if !isnothing(loaded.residence_time)
+        try
+            res_file = joinpath(out_dir, "movement_residence_time.html")
+            map_obj = leaflet_residence_time_map(
+                loaded.residence_time, loaded.au_mesh;
+                title = "$spp Residence Time Map"
+            )
+            save_html(map_obj, res_file)
+            verbose && println("  Residence time dashboard: $res_file")
+        catch e
+            verbose && println("  (Residence time note: $e)")
+        end
+    end
+
+    if !isnothing(loaded.diffusion)
+        try
+            diff_file = joinpath(out_dir, "movement_diffusion_field.html")
+            map_obj = leaflet_diffusion_map(
+                loaded.diffusion, loaded.au_mesh;
+                title = "$spp Diffusion Field"
+            )
+            save_html(map_obj, diff_file)
+            verbose && println("  Diffusion dashboard: $diff_file")
+        catch e
+            verbose && println("  (Diffusion note: $e)")
+        end
+    end
+    
+    # 5. HSI Map
+    if !isnothing(loaded.hsi)
+        try
+            hsi_file = joinpath(out_dir, "movement_hsi_map.html")
+            map_obj = leaflet_hsi_map(
+                loaded.hsi, loaded.au_mesh;
+                title = "$spp Habitat Suitability Index (HSI)"
+            )
+            save_html(map_obj, hsi_file)
+            verbose && println("  HSI dashboard: $hsi_file")
+        catch e
+            verbose && println("  (HSI map note: $e)")
+        end
+    end
+
+    # 6. Dispersal Kernel
+    if !isnothing(kernels.P_kernel)
+        try
+            disp_file = joinpath(out_dir, "movement_dispersal_kernel.html")
+            map_obj = leaflet_dispersal_kernel(
+                kernels.P_kernel, loaded.au_mesh;
+                title = "$spp Empirical Dispersal Kernel"
+            )
+            save_html(map_obj, disp_file)
+            verbose && println("  Dispersal kernel dashboard: $disp_file")
+        catch e
+            verbose && println("  (Dispersal kernel note: $e)")
+        end
+    end
+
     return (
         movement_stats = mov_stats,
         phenology      = pheno_res,
@@ -2208,14 +2571,14 @@ end
 
 
 # =============================================================================
-# Phase 5c: Priority Mark-Recapture Analyses
+# Phase 5c: Validation Mark-Recapture Analyses
 # =============================================================================
 
 """
-    execute_priority_analyses(loaded, fitted, kernels, params) ->
+    execute_validation_analyses(loaded, fitted, kernels, params) ->
         Union{NamedTuple, Nothing}
 
-Executes priority post-processing analyses for mark-recapture telemetry:
+Executes validation post-processing analyses for mark-recapture telemetry:
 1. Path credible intervals and node visitation distributions
    (`path_credible_intervals`)
 2. Regional stock connectivity matrix and credible intervals
@@ -2224,23 +2587,23 @@ Executes priority post-processing analyses for mark-recapture telemetry:
 4. Optional full Bayesian ensemble trajectory and corridor propagation
    (`reconstruct_paths_bayesian_ensemble`)
 """
-function execute_priority_analyses(
+function execute_validation_analyses(
     loaded::NamedTuple,
     fitted::NamedTuple,
     kernels::NamedTuple,
     params
 )::Union{NamedTuple, Nothing}
-    get(params, :compute_priority, true) || return nothing
+    get(params, :compute_validation, true) || return nothing
     verbose = get(params, :verbose, true)
     out_dir = get(params, :output_dir,
                   normpath(joinpath(@__DIR__, "..", "..", "output")))
     mkpath(out_dir)
 
     verbose && println(
-        "\n[Phase 5c] Running Priority Mark-Recapture Analyses..."
+        "\n[Phase 5c] Running Validation Mark-Recapture Analyses..."
     )
 
-    pa = run_priority_analyses(loaded, fitted, kernels, params, out_dir)
+    pa = run_validation_analyses(loaded, fitted, kernels, params, out_dir)
 
     ensemble_res = if get(params, :run_bayesian_ensemble, false)
         verbose && println(
@@ -2299,9 +2662,29 @@ function run_movement_analysis(
     params = movement_parameters_default()
 )::NamedTuple
 
-    loaded      = load_movement_data(params)
-    fitted      = fit_movement_models(loaded, params)
-    kernels     = extract_transition_kernels(loaded, fitted, params)
+    out_dir = get(params, :output_dir, normpath(joinpath(@__DIR__, "..", "..", "output")))
+    mkpath(out_dir)
+    checkpoint_file = joinpath(out_dir, "movement_checkpoint.jld2")
+    resume_from_checkpoint = get(params, :resume_from_checkpoint, false)
+
+    loaded, fitted, kernels = if resume_from_checkpoint && isfile(checkpoint_file)
+        if params.verbose
+            println("\n[Checkpoint] Resuming from existing checkpoint: $checkpoint_file")
+        end
+        data = JLD2.load(checkpoint_file)
+        (data["loaded"], data["fitted"], data["kernels"])
+    else
+        loaded_  = load_movement_data(params)
+        fitted_  = fit_movement_models(loaded_, params)
+        kernels_ = extract_transition_kernels(loaded_, fitted_, params)
+        
+        if params.verbose
+            println("\n[Checkpoint] Saving intermediate states to: $checkpoint_file")
+        end
+        JLD2.save(checkpoint_file, "loaded", loaded_, "fitted", fitted_, "kernels", kernels_)
+        
+        (loaded_, fitted_, kernels_)
+    end
     
     agent_trajectories = nothing
     if params.model_mode == "agent"
@@ -2331,7 +2714,7 @@ function run_movement_analysis(
     
     path_res    = reconstruct_paths_and_diagnostics(loaded, kernels, params)
     diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
-    priority    = execute_priority_analyses(loaded, fitted, kernels, params)
+    validation  = execute_validation_analyses(loaded, fitted, kernels, params)
     dashboards  = export_dashboards(loaded, kernels, path_res, diagnostics, params)
 
     if params.verbose
@@ -2351,7 +2734,7 @@ function run_movement_analysis(
         domain_bottlenecks = path_res.domain_bottlenecks,
         circuit            = diagnostics.circuit,
         wavelets           = diagnostics.wavelets,
-        priority_analyses  = priority,
+        validation_analyses = validation,
         agent_trajectories = agent_trajectories,
         movement_stats     = !isnothing(dashboards) && hasproperty(dashboards, :movement_stats) ?
                              dashboards.movement_stats : nothing,

@@ -396,6 +396,81 @@ function solve_circuit_voltage(
 end
 
 """
+    solve_directed_circuit_voltage(
+        P::AbstractMatrix,
+        source::Int,
+        sink::Int;
+        alpha::Float64 = 0.99
+    ) -> (
+        V::Vector{Float64},
+        R_eff::Float64,
+        edge_currents::SparseMatrixCSC{Float64, Int}
+    )
+
+Computes the directed equivalent of electrical current and potential using the 
+resolvent transition matrix Γ = (I - α P)^-1. The "voltage" is the expected 
+number of visits to the sink, and the directed current flows along the advective 
+gradients encoded in the transition matrix P.
+"""
+function solve_directed_circuit_voltage(
+    P::AbstractMatrix,
+    source::Int,
+    sink::Int;
+    alpha::Float64 = 0.99
+)
+    S = size(P, 1)
+    if source < 1 || source > S || sink < 1 || sink > S
+        throw(BoundsError(P, (source, sink)))
+    end
+
+    V = zeros(Float64, S)
+    if source == sink
+        return V, 0.0, spzeros(Float64, S, S)
+    end
+
+    P_sp = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
+    
+    # "Voltage" is derived from expected reachability
+    M = sparse(I, S, S) - alpha * P_sp
+    b = zeros(Float64, S)
+    b[sink] = 1.0
+    v_reach = try
+        M \ b
+    catch
+        fill(1e-15, S)
+    end
+    v_reach = max.(v_reach, 1e-15)
+
+    # Convert reachability to a "voltage" that drops as it gets closer to sink
+    V = -log.(v_reach)
+    V .-= minimum(V) # Shift so minimum is 0
+
+    R_eff = V[source] - V[sink]
+
+    I_rows = Int[]
+    I_cols = Int[]
+    I_vals = Float64[]
+    
+    for i in 1:S
+        for ptr in nzrange(P_sp, i)
+            j = rowvals(P_sp)[ptr]
+            if i != j
+                dV = V[i] - V[j]
+                if dV > 0
+                    p_ij = nonzeros(P_sp)[ptr]
+                    push!(I_rows, i)
+                    push!(I_cols, j)
+                    push!(I_vals, p_ij * dV)
+                end
+            end
+        end
+    end
+
+    edge_I = sparse(I_rows, I_cols, I_vals, S, S)
+    return V, R_eff, edge_I
+end
+
+"""
     pairwise_effective_resistance(
         L::AbstractMatrix,
         source::Int,

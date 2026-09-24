@@ -102,6 +102,7 @@ export
     simulate_correlated_density_vector,
     generate_ADR_simulation_bundle,
     generate_movement_data,
+    simulate_forward_ibm,
 
     # Path & Corridor Trajectory Reconstruction
     predict_path,
@@ -116,6 +117,7 @@ export
     get_astar_paths,
     smooth_marine_path,
     predict_corridor,
+    predict_steady_state_corridor,
     predict_dynamic_path,
     predict_dynamic_corridor,
     sample_markov_bridge,
@@ -139,7 +141,7 @@ export
     posterior_predictive_check,
     export_posterior_predictive_check,
     plot_posterior_predictive_check,
-    run_priority_analyses,
+    run_validation_analyses,
 
     # Electrical Circuit Theory & Ecological Pinchpoints
     Circuit,
@@ -147,6 +149,7 @@ export
     build_circuit_laplacian,
     effective_resistance_matrix,
     solve_circuit_voltage,
+    solve_directed_circuit_voltage,
     pairwise_effective_resistance,
     current_density_map,
     identify_ecological_pinchpoints,
@@ -205,8 +208,11 @@ export
     reconstruct_paths_and_diagnostics,
     compute_advanced_diagnostics,
     export_dashboards,
-    execute_priority_analyses,
-    run_movement_analysis
+    execute_validation_analyses,
+    run_movement_analysis,
+    julia_main
+
+include("cli.jl")
 
 function __init__()
     Random.seed!(42)
