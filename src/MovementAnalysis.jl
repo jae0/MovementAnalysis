@@ -5,8 +5,7 @@ Standalone Spatial Animal Movement, Trajectory Reconstruction, and Ecological
 Connectivity Analysis Engine. Provides mark-recapture telemetry ingestion,
 stochastic transition kernel estimation, explicit Turing.jl probabilistic
 telemetry calibration, A* least-cost trajectory and corridor routing, electrical
-circuit theory pinchpoint analysis, Chebyshev Spectral Graph Wavelets (SGWT),
-and interactive Leaflet HTML dashboard generation.
+circuit theory pinchpoint analysis, and interactive Leaflet HTML dashboard generation.
 """
 module MovementAnalysis
 
@@ -27,19 +26,17 @@ using CoordRefSystems
 using Unitful
 
 using FFTW
-using Wavelets
-using WaveletsExt
 
 using JLD2
 using Turing
 
 # Source modules in logical dependency order
+include("config.jl")
 include("spatial_utils.jl")
 include("ssa_movement.jl")
 include("turing_models.jl")
 include("movement.jl")
 include("circuit.jl")
-include("graph_wavelets.jl")
 include("dashboards.jl")
 include("pipeline.jl")
 include("agent_movement.jl")
@@ -158,18 +155,6 @@ export
     get_circuit_paths,
     resistance_covariance_matrix,
 
-    # Spectral Graph Wavelet Transform (SGWT)
-    GraphWavelet,
-    SpectralGraphWaveletResult,
-    build_normalized_laplacian,
-    compute_laplacian_spectral_bounds,
-    chebyshev_polynomial_coefficients,
-    apply_graph_spectral_filter,
-    spectral_graph_wavelet_transform,
-    inverse_spectral_graph_wavelet_transform,
-    denoise_spatial_signal_wavelet,
-    graph_wavelet_basis_matrix,
-
     # Interactive HTML / Leaflet Visualization
     LeafletMap,
     save_html,
@@ -194,14 +179,17 @@ export
     leaflet_ad_ratio_distribution,
     leaflet_hydrodynamic_dashboard,
     leaflet_current_density_map,
-    leaflet_graph_wavelet_dashboard,
     export_movement_posterior_dashboard,
     export_movement_flow_dashboard,
     export_movement_summary_dashboard,
 
+    # Configuration
+    MovementAnalysisConfig,
+    load_config,
+    save_config,
+
     # Pipeline Orchestration
     movement_parameters_default,
-    movement_parameters_snowcrab,
     load_movement_data,
     fit_movement_models,
     extract_transition_kernels,

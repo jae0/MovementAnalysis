@@ -1,0 +1,57 @@
+# Snow Crab (Chionoecetes opilio) Configuration
+# Scotian Shelf snow crab movement analysis with species-specific parameters
+
+# Data & Model
+data_source = "snowcrab"  # Use built-in snowcrab dataset, or path to custom data config TOML
+model_mode = "telemetry"
+
+# Domain Resharding
+reshard_hex = false
+hex_radius_km = 5.0
+use_hydrodynamics = true
+depth_range = [25.0, 400.0]
+
+# Path Reconstruction
+max_paths = 25
+path_method = "astar"
+smooth_paths = true
+
+# Validation
+compute_validation = true
+run_bayesian_ensemble = false
+
+# Advanced Routing
+adaptive_mesh = false
+coarse_radius_km = 25.0
+fine_radius_km = 8.0
+dynamic_kernels = false
+hmm_smoothing = false
+
+# Diagnostics
+compute_circuit = true
+compute_stochastic = true
+compute_bottlenecks = true
+
+# HSI Error
+hsi_se = 0.08
+propagate_hsi_error = true
+n_stochastic_draws = 100
+
+# MCMC
+n_samples = 500
+n_warmup = 100
+seed = 42
+
+# Output
+render_html = true
+output_dir = "output"
+verbose = true
+
+# Biological Groups
+group_labels = ["Mature Female", "Mature Male", "Immature"]
+group_alpha = [0.25, 0.65, 0.30]
+group_rho = [0.60, 0.15, 0.35]
+group_gamma = [0.80, 1.50, 0.50]
+
+# Species
+species_name = "Snow Crab"

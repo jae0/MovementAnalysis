@@ -11,74 +11,64 @@ MovementAnalysis Pipeline
 Usage:
   julia --project=movement scripts/run_movement.jl [OPTIONS]
 
+Configuration:
+  --config=<path>           Path to TOML config file (optional).
+
 Data & Model:
-  -d, --data-source=<src>   'simulate' (default) or 'snowcrab'.
-      --simulate             Shorthand for --data-source=simulate.
-      --snowcrab             Shorthand: snowcrab preset + all diagnostics.
-  -m, --model-mode=<mode>   'telemetry' (default), 'telemetry_and_survey',
-                             'ssa', 'ssa_and_survey', or 'both'.
-      --telemetry            Shorthand for --model-mode=telemetry.
-      --joint, --survey      Shorthand for telemetry_and_survey.
-      --ssa                  Shorthand for continuous-time SSA model.
-      --ssa-joint            Shorthand for joint survey + SSA model.
-      --agent                Shorthand for agent-based alternative model.
-      --both                 Shorthand for --model-mode=both.
+  --data-source=<src>       Data source: 'simulate' or path to data config TOML.
+  --model-mode=<mode>       Model mode: 'telemetry', 'telemetry_and_survey', 'ssa', 'ssa_and_survey', 'agent', 'both'.
 
 Domain Resharding:
-      --reshard-hex, --hex   Reshard to finer hexagons via LibGEOS.
-      --hex-radius=<km>      Fine hexagon cell radius in km (default: 10.0).
-      --hydro                Extract 3D hydrodynamic fields and bathymetry.
-      --depth-range=<m,M>    Restrict movement to depth range [m, M] m.
+  --reshard-hex             Reshard domain to finer hexagons via LibGEOS (true/false).
+  --hex-radius=<km>         Fine hexagon cell radius in km (default: 10.0).
+  --use-hydrodynamics       Extract 3D hydrodynamic fields and bathymetry (true/false).
+  --depth-range=<m,M>       Restrict movement to depth range [m, M] m.
 
 Path Reconstruction:
-  -p, --max-paths=<N>        Maximum trajectories (default: 25).
-      --astar                Use A* path method (default).
-      --viterbi              Use Viterbi path method.
-      --smooth-paths         Apply line-of-sight raycast smoothing.
+  --max-paths=<N>           Maximum trajectories to reconstruct (default: 25).
+  --path-method=<method>    Path method: 'astar' or 'viterbi' (default: astar).
+  --smooth-paths            Apply line-of-sight raycast smoothing (true/false).
 
 Validation Analyses & Uncertainty:
-      --validation           Run validation analyses (path CIs, connectivity, PPC).
-      --no-validation        Skip validation mark-recapture analyses.
-      --bayesian-ensemble    Full posterior MCMC ensemble path/corridor propagation.
+  --validation              Run validation analyses (path CIs, connectivity, PPC) (true/false).
+  --bayesian-ensemble       Full posterior MCMC ensemble path/corridor propagation (true/false).
 
 Advanced Routing & Dynamics:
-      --adaptive-mesh        Adaptive multiresolution hexagonal mesh routing.
-      --dynamic-kernels      Time-varying dynamic environmental covariates.
-      --hmm-smoothing        Multi-segment HMM Viterbi trajectory smoothing.
+  --adaptive-mesh           Adaptive multiresolution hexagonal mesh routing (true/false).
+  --dynamic-kernels         Time-varying dynamic environmental covariates (true/false).
+  --hmm-smoothing           Multi-segment HMM Viterbi trajectory smoothing (true/false).
 
 Optional Diagnostics:
-      --stochastic           Stochastic least-cost path ensembles.
-      --bottlenecks          Domain-wide bottleneck index B(u).
-      --circuit              Circuit current density & pinch-points.
-      --wavelets, --sgwt     Chebyshev spectral graph wavelets.
-      --all-diagnostics      Enable all four optional diagnostics.
+  --stochastic              Stochastic least-cost path ensembles (true/false).
+  --bottlenecks             Domain-wide bottleneck index B(u) (true/false).
+  --circuit                 Circuit current density & pinch-points (true/false).
+  --all-diagnostics         Enable all optional diagnostics (true/false).
 
 MCMC:
-  -n, --samples=<N>          Posterior draws (default: 200).
-  -w, --warmup=<N>           Warmup iterations (default: 100).
-      --seed=<N>             Random seed (default: 42).
-      --hsi-se=<sigma>       HSI observation error (default: 0.08).
-      --n-draws=<N>          MC draws per stochastic path (default: 10).
+  --samples=<N>             Posterior draws (default: 200).
+  --warmup=<N>              Warmup iterations (default: 100).
+  --seed=<N>                Random seed (default: 42).
+  --hsi-se=<sigma>          HSI observation error (default: 0.08).
+  --propagate-hsi-error     Propagate HSI error (true/false).
+  --n-draws=<N>             MC draws per stochastic path (default: 10).
 
 Output & UI:
-      --no-html              Disable HTML export.
-  -o, --output-dir=<path>    Output directory (default: <repo>/output).
-      --tagging-file=<path>  Explicit tagging data file path (.jld2, .rds, .rdz).
-      --hsi-file=<path>      Explicit HSI data file path.
-      --sppoly-file=<path>   Explicit spatial polygon data file path.
-      --resume               Resume analysis from intermediate checkpoint if available.
-      --dark-mode            Use dark mode for visualizations.
-      --light-mode           Use light mode for visualizations (default).
-      --palette=<cmap>       Color palette for maps (e.g. viridis, plasma, turbo).
-      --font=<font>          Main font stack to use in dashboards.
-  -q, --quiet                Suppress progress output.
-  -h, --help                 Display this help and exit.
+  --render-html             Render HTML export (true/false).
+  --output-dir=<path>       Output directory (default: <repo>/output).
+  --tagging-file=<path>     Explicit tagging data file path (.jld2, .rds, .rdz).
+  --hsi-file=<path>         Explicit HSI data file path.
+  --sppoly-file=<path>      Explicit spatial polygon data file path.
+  --resume                  Resume analysis from intermediate checkpoint if available (true/false).
+  --dark-mode               Use dark mode for visualizations (true/false).
+  --palette=<cmap>          Color palette for maps (e.g. viridis, plasma, turbo).
+  --font=<font>             Main font stack to use in dashboards.
+  --quiet                   Suppress progress output (true/false).
+  --help                    Display this help and exit.
 
 Examples:
-  julia --project=movement scripts/run_movement.jl --simulate
-  julia --project=movement scripts/run_movement.jl --snowcrab
-  julia --project=movement scripts/run_movement.jl --depth-range=50,400
-  julia --project=movement scripts/run_movement.jl --snowcrab --wavelets
+  julia --project=movement scripts/run_movement.jl --data-source=simulate
+  julia --project=movement scripts/run_movement.jl --config=configs/snowcrab.toml
+  julia --project=movement scripts/run_movement.jl --data-source=simulate --depth-range=50,400
   julia --project=movement scripts/run_movement.jl --help
 """)
     return nothing
@@ -118,57 +108,21 @@ function parse_movement_cli_args(args = ARGS)::NamedTuple
             end
         end
 
-        if key in ("-h", "--help")
+        if key == "--help"
             opts[:help] = true
-        elseif key in ("-d", "--data-source", "--data")
-            opts[:data_source] = Symbol(fv())
-        elseif key == "--simulate"
-            opts[:data_source] = :simulate
-        elseif key == "--snowcrab"
-            opts[:data_source]         = :snowcrab
-            opts[:compute_circuit]     = true
-            opts[:compute_stochastic]  = true
-            opts[:compute_bottlenecks] = true
-            opts[:compute_wavelets]    = true
-        elseif key in ("-m", "--model-mode", "--mode")
-            opts[:model_mode] = String(fv())
-        elseif key == "--telemetry"
-            opts[:model_mode] = "telemetry"
-        elseif key in ("--joint", "--survey")
-            opts[:model_mode] = "telemetry_and_survey"
-        elseif key == "--ssa"
-            opts[:model_mode] = "ssa"
-        elseif key in ("--ssa-joint", "--joint-ssa")
-            opts[:model_mode] = "ssa_and_survey"
-        elseif key == "--agent"
-            opts[:model_mode] = "agent"
-        elseif key == "--both"
-            opts[:model_mode] = "both"
-        elseif key in ("--reshard-hex", "--reshard", "--hex")
+        elseif key == "--config"
+            opts[:config_path] = fv()
+        elseif key == "--data-source"
+            opts[:data_source] = fv()
+        elseif key == "--model-mode"
+            opts[:model_mode] = fv()
+        elseif key == "--reshard-hex"
             opts[:reshard_hex] = has_inline ? !_is_false(inline_val) : true
-        elseif key in ("--no-reshard-hex", "--no-reshard", "--no-hex")
-            opts[:reshard_hex] = false
-        elseif key in ("--hex-radius", "--radius", "-r")
+        elseif key == "--hex-radius"
             opts[:hex_radius_km] = parse(Float64, fv())
-        elseif key == "--coarse-radius"
-            opts[:coarse_radius_km] = parse(Float64, fv())
-        elseif key == "--fine-radius"
-            opts[:fine_radius_km] = parse(Float64, fv())
-        elseif key == "--species-name"
-            opts[:species_name] = String(fv())
-        elseif key == "--group-labels"
-            opts[:group_labels] = String.(split(fv(), ','))
-        elseif key == "--group-alpha"
-            opts[:group_alpha] = parse.(Float64, split(fv(), ','))
-        elseif key == "--group-rho"
-            opts[:group_rho] = parse.(Float64, split(fv(), ','))
-        elseif key == "--group-gamma"
-            opts[:group_gamma] = parse.(Float64, split(fv(), ','))
-        elseif key in ("--hydro", "--use-hydrodynamics")
+        elseif key == "--use-hydrodynamics"
             opts[:use_hydrodynamics] = has_inline ? !_is_false(inline_val) : true
-        elseif key == "--no-hydro"
-            opts[:use_hydrodynamics] = false
-        elseif key in ("--depth-range", "--depths", "--depth")
+        elseif key == "--depth-range"
             val_str = fv()
             parts = split(val_str, ',')
             if length(parts) == 2
@@ -179,88 +133,63 @@ function parse_movement_cli_args(args = ARGS)::NamedTuple
             else
                 @warn "Invalid depth-range format: '$val_str'. Expected 'min,max'."
             end
-        elseif key in ("-p", "--max-paths", "--paths")
+        elseif key == "--max-paths"
             opts[:max_paths] = parse(Int, fv())
-        elseif key == "--astar"
-            opts[:path_method] = :astar
-        elseif key == "--viterbi"
-            opts[:path_method] = :viterbi
+        elseif key == "--path-method"
+            opts[:path_method] = Symbol(fv())
         elseif key == "--smooth-paths"
             opts[:smooth_paths] = has_inline ? !_is_false(inline_val) : true
-        elseif key == "--no-smooth-paths"
-            opts[:smooth_paths] = false
         elseif key == "--validation"
-            opts[:compute_validation] = true
-        elseif key == "--no-validation"
-            opts[:compute_validation] = false
+            opts[:compute_validation] = has_inline ? !_is_false(inline_val) : true
         elseif key == "--bayesian-ensemble"
-            opts[:run_bayesian_ensemble] = true
+            opts[:run_bayesian_ensemble] = has_inline ? !_is_false(inline_val) : true
         elseif key == "--adaptive-mesh"
-            opts[:adaptive_mesh] = true
+            opts[:adaptive_mesh] = has_inline ? !_is_false(inline_val) : true
         elseif key == "--dynamic-kernels"
-            opts[:dynamic_kernels] = true
+            opts[:dynamic_kernels] = has_inline ? !_is_false(inline_val) : true
         elseif key == "--hmm-smoothing"
-            opts[:hmm_smoothing] = true
-        elseif key in ("--circuit", "--compute-circuit")
-            opts[:compute_circuit] = has_inline ? !_is_false(inline_val) : true
-        elseif key == "--no-circuit"
-            opts[:compute_circuit] = false
-        elseif key in ("--stochastic", "--compute-stochastic")
+            opts[:hmm_smoothing] = has_inline ? !_is_false(inline_val) : true
+        elseif key == "--stochastic"
             opts[:compute_stochastic] = has_inline ? !_is_false(inline_val) : true
-        elseif key == "--no-stochastic"
-            opts[:compute_stochastic] = false
-        elseif key in ("--bottlenecks", "--compute-bottlenecks")
+        elseif key == "--bottlenecks"
             opts[:compute_bottlenecks] = has_inline ? !_is_false(inline_val) : true
-        elseif key == "--no-bottlenecks"
-            opts[:compute_bottlenecks] = false
-        elseif key in ("--wavelets", "--sgwt", "--compute-wavelets")
-            opts[:compute_wavelets] = has_inline ? !_is_false(inline_val) : true
-        elseif key in ("--no-wavelets", "--no-sgwt")
-            opts[:compute_wavelets] = false
+        elseif key == "--circuit"
+            opts[:compute_circuit] = has_inline ? !_is_false(inline_val) : true
         elseif key == "--all-diagnostics"
             opts[:compute_circuit]     = true
             opts[:compute_stochastic]  = true
             opts[:compute_bottlenecks] = true
-            opts[:compute_wavelets]    = true
-        elseif key in ("-n", "--samples")
+        elseif key == "--samples"
             opts[:n_samples] = parse(Int, fv())
-        elseif key in ("-w", "--warmup")
+        elseif key == "--warmup"
             opts[:n_warmup] = parse(Int, fv())
         elseif key == "--seed"
             opts[:seed] = parse(Int, fv())
-        elseif key in ("--hsi-se", "--hsi-error")
+        elseif key == "--hsi-se"
             opts[:hsi_se] = parse(Float64, fv())
         elseif key == "--propagate-hsi-error"
-            opts[:propagate_hsi_error] = true
-        elseif key == "--no-propagate-hsi-error"
-            opts[:propagate_hsi_error] = false
-        elseif key in ("--n-draws", "--stochastic-draws")
+            opts[:propagate_hsi_error] = has_inline ? !_is_false(inline_val) : true
+        elseif key == "--n-draws"
             opts[:n_stochastic_draws] = parse(Int, fv())
-        elseif key in ("--render-html", "--html")
+        elseif key == "--render-html"
             opts[:render_html] = has_inline ? !_is_false(inline_val) : true
-        elseif key in ("--no-render-html", "--no-html")
-            opts[:render_html] = false
-        elseif key == "--resume"
-            opts[:resume_from_checkpoint] = true
-        elseif key in ("--dark-mode")
-            opts[:dark_mode] = true
-        elseif key in ("--light-mode")
-            opts[:dark_mode] = false
-        elseif key in ("--palette", "--cmap")
-            opts[:cmap] = Symbol(fv())
-        elseif key in ("--font")
-            opts[:font] = String(fv())
+        elseif key == "--output-dir"
+            opts[:output_dir] = fv()
         elseif key == "--tagging-file"
-            opts[:tagging_file] = String(fv())
+            opts[:tagging_file] = fv()
         elseif key == "--hsi-file"
-            opts[:hsi_file] = String(fv())
+            opts[:hsi_file] = fv()
         elseif key == "--sppoly-file"
-            opts[:sppoly_file] = String(fv())
-        elseif key in ("--output-dir", "--output", "-o")
-            opts[:output_dir] = String(fv())
-        elseif key in ("--verbose", "-v")
-            opts[:verbose] = true
-        elseif key in ("--quiet", "-q", "--silent")
+            opts[:sppoly_file] = fv()
+        elseif key == "--resume"
+            opts[:resume_from_checkpoint] = has_inline ? !_is_false(inline_val) : true
+        elseif key == "--dark-mode"
+            opts[:dark_mode] = has_inline ? !_is_false(inline_val) : true
+        elseif key == "--palette"
+            opts[:cmap] = Symbol(fv())
+        elseif key == "--font"
+            opts[:font] = fv()
+        elseif key == "--quiet"
             opts[:verbose] = false
         else
             @warn "Unrecognized CLI flag: '$raw' -- ignoring."
@@ -277,14 +206,21 @@ Base.@ccallable function julia_main()::Cint
         cli = parse_movement_cli_args(ARGS)
         if get(cli, :help, false)
             print_movement_help()
-        else
-            base_params = (
-                haskey(cli, :data_source) && cli.data_source == :snowcrab ?
-                movement_parameters_snowcrab() :
-                movement_parameters_default()
-            )
-            run_movement_analysis(merge(base_params, cli))
+            return 0
         end
+
+        # Load config file if provided
+        config_path = get(cli, :config_path, nothing)
+        if config_path !== nothing && isfile(config_path)
+            config = MovementAnalysisConfig(config_path)
+        else
+            config = MovementAnalysisConfig()
+        end
+
+        # Merge CLI overrides
+        overrides_dict = Dict{Symbol,Any}(pairs(cli))
+        merged_config = load_config(config_path=nothing, cli_args=ARGS, overrides=overrides_dict)
+        run_movement_analysis(merged_config)
     catch e
         @error "Pipeline failed" exception=(e, catch_backtrace())
         return 1

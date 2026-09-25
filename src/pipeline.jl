@@ -801,14 +801,14 @@ function load_movement_data(params)::NamedTuple
     end
 
     # -- 1b-ii. Adaptive Multiresolution Hexagonal Mesh ----------------------
-    if get(params, :adaptive_mesh, false)
+    if _get(params, :adaptive_mesh, false)
         verbose && println(
             "\n[Phase 1b-ii] Constructing adaptive multiresolution domain..."
         )
         cents_lon = [Float64(c[1]) for c in mesh.centroids_lonlat]
         cents_lat = [Float64(c[2]) for c in mesh.centroids_lonlat]
-        rc = Float64(get(params, :coarse_radius_km, 25.0))
-        rf = Float64(get(params, :fine_radius_km, 8.0))
+        rc = Float64(_get(params, :coarse_radius_km, 25.0))
+        rf = Float64(_get(params, :fine_radius_km, 8.0))
         mesh = construct_adaptive_multiresolution_domain(
             cents_lon, cents_lat;
             coarse_radius_km = rc,
@@ -873,7 +873,7 @@ function load_movement_data(params)::NamedTuple
         #       edges wherever two in-depth basins share a marine transit
         #       corridor (shallow/deep). Avoids drops but can generate many
         #       extra edges when basins are numerous.
-        depth_mode = Symbol(get(params, :depth_barrier_mode, :hsi_only))
+        depth_mode = Symbol(_get(params, :depth_barrier_mode, :hsi_only))
 
         # Land-only W: always needed for reachability checks and :hsi_only mode
         land_only_bv = land_mask !== nothing ?
@@ -884,7 +884,7 @@ function load_movement_data(params)::NamedTuple
             # Structural W: land barrier only
             W, hsi_vec = apply_land_barrier(W, hsi_vec, land_only_bv)
             # Encode depth preference via HSI floor for out-of-depth nodes
-            hsi_floor  = Float64(get(params, :hsi_ood_floor, 0.01))
+            hsi_floor  = Float64(_get(params, :hsi_ood_floor, 0.01))
             hsi_vec[out_of_depth .& .!land_only_bv] .= min.(
                 hsi_vec[out_of_depth .& .!land_only_bv], hsi_floor
             )
@@ -1492,7 +1492,7 @@ function reconstruct_paths_and_diagnostics(
     )
 
     max_k_dyn = 0
-    if get(params, :dynamic_kernels, false)
+if _get(params, :dynamic_kernels, false)
         for tid in sample_tags
             sub_obs = filter(:tagid => ==(tid), obs_df)
             isempty(sub_obs) && continue
@@ -1527,7 +1527,7 @@ function reconstruct_paths_and_diagnostics(
               P_kernel[clamp(grp, 1, length(P_kernel))] : P_kernel
 
         # Concatenate multi-segment trajectories for this individual
-        full_path = if get(params, :hmm_smoothing, false) && nrow(sub_obs) > 1
+        full_path = if _get(params, :hmm_smoothing, false) && nrow(sub_obs) > 1
             # Global multi-segment Hidden Markov Model Viterbi smoothing
             times = Int[1]
             cum_t = 1
@@ -1606,7 +1606,7 @@ function reconstruct_paths_and_diagnostics(
         t_rel_first = hasproperty(first_row, :rel_time) ? first_row.rel_time : NaN
         hsi_first   = isnan(t_rel_first) ? hsi_vec :
                       _resolve_hsi_for_time(loaded, t_rel_first)
-        prop_hsi  = get(params, :propagate_hsi_error, true) && params.hsi_se > 0.0
+        prop_hsi  = _get(params, :propagate_hsi_error, true) && params.hsi_se > 0.0
         n_hsi_m   = prop_hsi ? min(params.n_stochastic_draws, 5) : 1
 
         corr_accum = nothing
@@ -1638,7 +1638,7 @@ function reconstruct_paths_and_diagnostics(
             else
                 P_k
             end
-            corr_d = if get(params, :dynamic_kernels, false)
+            corr_d = if _get(params, :dynamic_kernels, false)
                 k_val = max(1, first_row.k)
                 P_dyn_seq = P_dyn_seq_cache[1:k_val]
                 predict_dynamic_corridor(
@@ -2593,8 +2593,8 @@ function execute_validation_analyses(
     kernels::NamedTuple,
     params
 )::Union{NamedTuple, Nothing}
-    get(params, :compute_validation, true) || return nothing
-    verbose = get(params, :verbose, true)
+    _get(params, :compute_validation, true) || return nothing
+    verbose = _get(params, :verbose, true)
     out_dir = get(params, :output_dir,
                   normpath(joinpath(@__DIR__, "..", "..", "output")))
     mkpath(out_dir)
@@ -2605,7 +2605,7 @@ function execute_validation_analyses(
 
     pa = run_validation_analyses(loaded, fitted, kernels, params, out_dir)
 
-    ensemble_res = if get(params, :run_bayesian_ensemble, false)
+    ensemble_res = if _get(params, :run_bayesian_ensemble, false)
         verbose && println(
             "  Evaluating Bayesian ensemble path & corridor propagation..."
         )
@@ -2662,10 +2662,10 @@ function run_movement_analysis(
     params = movement_parameters_default()
 )::NamedTuple
 
-    out_dir = get(params, :output_dir, normpath(joinpath(@__DIR__, "..", "..", "output")))
+    out_dir = _get(params, :output_dir, normpath(joinpath(@__DIR__, "..", "..", "output")))
     mkpath(out_dir)
     checkpoint_file = joinpath(out_dir, "movement_checkpoint.jld2")
-    resume_from_checkpoint = get(params, :resume_from_checkpoint, false)
+    resume_from_checkpoint = _get(params, :resume_from_checkpoint, false)
 
     loaded, fitted, kernels = if resume_from_checkpoint && isfile(checkpoint_file)
         if params.verbose

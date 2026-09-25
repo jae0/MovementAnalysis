@@ -2518,6 +2518,16 @@ function construct_stochastic_transition_kernel(
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
 )::Union{Matrix{Float64}, Vector{Matrix{Float64}}}
     S = size(W, 1)
+    if length(hsi) != S
+        throw(DimensionMismatch(
+            "Dimension mismatch: W is $(S)x$(S), but hsi has length $(length(hsi))."
+        ))
+    end
+    if !isnothing(land_mask) && length(land_mask) != S
+        throw(DimensionMismatch(
+            "Dimension mismatch: W is $(S)x$(S), but land_mask has length $(length(land_mask))."
+        ))
+    end
 
     # 1. Check for vector parameters
     any_vector = (gamma isa AbstractVector) ||

@@ -1,0 +1,57 @@
+# MovementAnalysis Default Configuration
+# Generic simulation configuration with sensible defaults
+
+# Data & Model
+data_source = "simulate"
+model_mode = "telemetry"
+
+# Domain Resharding
+reshard_hex = false
+hex_radius_km = 10.0
+use_hydrodynamics = false
+depth_range = []
+
+# Path Reconstruction
+max_paths = 1000
+path_method = "astar"
+smooth_paths = true
+
+# Validation
+compute_validation = true
+run_bayesian_ensemble = false
+
+# Advanced Routing
+adaptive_mesh = false
+coarse_radius_km = 25.0
+fine_radius_km = 8.0
+dynamic_kernels = false
+hmm_smoothing = false
+
+# Diagnostics
+compute_circuit = true
+compute_stochastic = true
+compute_bottlenecks = true
+
+# HSI Error
+hsi_se = 0.08
+propagate_hsi_error = true
+n_stochastic_draws = 10
+
+# MCMC
+n_samples = 200
+n_warmup = 100
+seed = 42
+
+# Output
+render_html = true
+output_dir = "output"
+verbose = true
+
+# Biological Groups
+group_labels = ["All"]
+group_alpha = [0.40]
+group_rho = [0.25]
+group_gamma = [1.00]
+
+# Species
+species_name = "Animal"

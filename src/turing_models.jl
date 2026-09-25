@@ -41,6 +41,16 @@ function build_sparse_transition_kernel(
     gamma, residence, advection, land_mask
 )
     S = size(W, 1)
+    if length(hsi) != S
+        throw(DimensionMismatch(
+            "Dimension mismatch: W is $(S)x$(S), but hsi has length $(length(hsi))."
+        ))
+    end
+    if !isnothing(land_mask) && length(land_mask) != S
+        throw(DimensionMismatch(
+            "Dimension mismatch: W is $(S)x$(S), but land_mask has length $(length(land_mask))."
+        ))
+    end
     T = promote_type(Float64, eltype(W), typeof(gamma), typeof(residence), typeof(advection))
     I_idx = Int[]
     J_idx = Int[]
@@ -149,6 +159,9 @@ where ``\\lambda = \\max |Q_{ii}| \\Delta t`` and ``T_{\\text{unif}} = I + Q / \
 """
 function calculate_ssa_transition_row(Q::SparseMatrixCSC, dt::Real, rel::Int)
     S = size(Q, 1)
+    if !(1 <= rel <= S)
+        throw(BoundsError("Release node index $rel is out of bounds [1, $S]."))
+    end
     q_diag = abs.(diag(Q))
     alpha = maximum(q_diag)
     
