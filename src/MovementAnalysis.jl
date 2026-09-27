@@ -18,6 +18,7 @@ using Random
 using Dates
 using DataFrames
 using Printf
+using CodecZlib
 
 using Graphs
 using NearestNeighbors
@@ -32,6 +33,7 @@ using Turing
 
 # Source modules in logical dependency order
 include("config.jl")
+include("spatial_sources.jl")
 include("spatial_utils.jl")
 include("ssa_movement.jl")
 include("turing_models.jl")
@@ -73,22 +75,22 @@ export
     joint_survey_ssa_telemetry_turing_model,
 
     # Agent-Based Model Alternative
-    CrabAgent,
+    TrackedAgent,
     simulate_agent_trajectories,
 
     # Telemetry & Mark-Recapture Data Structures
     TelemetryData,
     prepare_movement_data,
     validate_telemetry,
-    snowcrab_movement_data,
     haversine_distance,
     lonlat_to_xy_km,
     xy_km_to_lonlat,
     filter_dead_tags,
     summarize_tag_activity,
-    tag_to_study_id,
 
     # Kernel Construction & Transition Probabilities
+    movement_alpha_rho,
+    kstep_transition_cache,
     build_sparse_transition_kernel,
     construct_stochastic_transition_kernel,
     construct_dynamic_transition_kernels,
@@ -173,6 +175,7 @@ export
     leaflet_spacetime_map,
     leaflet_movement_dashboard,
     leaflet_interactive_corridor_dashboard,
+    leaflet_posterior_path_ensemble,
     leaflet_dispersal_kernel,
     leaflet_step_diagnostics,
     leaflet_regional_connectivity,
@@ -187,10 +190,26 @@ export
     MovementAnalysisConfig,
     load_config,
     save_config,
+    create_argparse_settings,
+    effective_model_modes,
+    skipped_modes,
+    wants_diagnostic,
 
     # Pipeline Orchestration
     movement_parameters_default,
     load_movement_data,
+    load_movement_dataset,
+    load_survey_data,
+
+    # Spatial data sources (domain extent, land, regions)
+    resolve_bbox,
+    bbox_of,
+    land_mask_from_global_mask,
+    land_mask_from_polygon_files,
+    read_polygon_file,
+    point_in_ring,
+    region_map_from_polygons,
+    load_region_polygons,
     fit_movement_models,
     extract_transition_kernels,
     reconstruct_paths_and_diagnostics,

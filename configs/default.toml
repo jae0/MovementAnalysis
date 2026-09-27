@@ -1,57 +1,160 @@
-# MovementAnalysis Default Configuration
-# Generic simulation configuration with sensible defaults
+# Default movement analysis configuration
+# =============================================================================
+# Every analysis parameter at its declared default, with the input files left
+# unset. Supply the input files (or edit this file) to analyse a real dataset.
+#
+#   julia --project=. scripts/run_movement.jl --config=configs/default.toml \
+#          --tagging-file=data/tagging.jld2 \
+#          --hsi-file=data/hsi.jld2 --sppoly-file=data/sppoly.jld2
+#
+# Any parameter omitted here keeps the default declared in
+# `MovementAnalysisConfig` (src/config.jl), and any flag given on the command
+# line overrides this file.
+#
+# Four settings are lists, and in each case the list is the complete
+# specification -- there are no aggregate or "everything" sentinels, and no
+# parallel boolean switches:
+#
+#   model_modes    which inference approaches to fit
+#   path_methods   which routing methods to reconstruct paths with
+#   diagnostics    which analyses to run afterwards
 
-# Data & Model
-data_source = "simulate"
-model_mode = "telemetry"
+# -----------------------------------------------------------------------------
+# Approaches to fit
+# -----------------------------------------------------------------------------
+#   telemetry            -- categorical mark-recapture transitions
+#   telemetry_and_survey -- joint NegBin survey density + telemetry
+#   ssa                  -- continuous-time SSA telemetry
+#   ssa_and_survey       -- joint survey + continuous-time SSA
+#   agent                -- agent-based movement simulation
+#
+# The two survey-dependent approaches are skipped unless `surveydata_file` below
+# names a readable file, so listing them here without one is harmless.
+model_modes = ["telemetry", "telemetry_and_survey", "ssa", "ssa_and_survey", "agent"]
 
-# Domain Resharding
-reshard_hex = false
+# -----------------------------------------------------------------------------
+# Input files
+# -----------------------------------------------------------------------------
+# Mark-recapture telemetry, habitat suitability, and spatial unit definitions.
+# With no tagging_file configured the pipeline generates a synthetic dataset.
+# tagging_file = "data/tagging.jld2"
+# hsi_file = "data/hsi.jld2"
+# sppoly_file = "data/sppoly.jld2"
+
+# Optional paired survey density observations. Required by the survey-dependent
+# approaches above; without it those are skipped.
+# surveydata_file = "data/surveydata.jld2"
+
+# -----------------------------------------------------------------------------
+# Spatial domain
+# -----------------------------------------------------------------------------
+# Analysis domain as [west, south, east, north] in degrees. When omitted the
+# extent is derived from the input data and padded by `bbox_padding_deg`, so the
+# mesh is not clipped flush against the outermost detections. Set it explicitly
+# to study a larger area than the animals occupied, or to compare scenarios on a
+# fixed domain.
+# bbox = [-64.0, 43.0, -59.0, 47.0]
+bbox_padding_deg = 0.25
+
+# How land is identified. This is what separates navigable water from barrier,
+# so it should match the study area rather than a hard-coded coastline:
+#   "landmask"  -- query a global land/sea raster (no coastline ships with the
+#                  package; the first run downloads a small mask)
+#   "depth"     -- bathymetry alone: a unit is land where depth <= 0
+#   "polygons"  -- the files named in `land_polygon_files`
+#   "none"      -- no land mask; every unit is treated as water
+land_source = "landmask"
+land_mask_resolution = "l"   # global mask detail: c, l, i, h or f
+land_mask_grid_minutes = 5.0 # global mask cell size, arc minutes
+
+# Land polygons, used only when land_source = "polygons". Same formats as the
+# region files below.
+land_polygon_files = []
+
+# Where the domain is bounded: rebuild on a finer hexagonal lattice.
+reshard_hex = false          # hexagonal cell radius, in kilometres
 hex_radius_km = 10.0
-use_hydrodynamics = false
-depth_range = []
+use_hydrodynamics = false     # ingest 3D currents, temperature, salinity
+depth_barrier_mode = "hsi_only"  # hsi_only | bathy_only | intersection
+# depth_range = [25.0, 400.0]   # metres; unset means unrestricted
+hsi_ood_floor = 0.01            # HSI below which a unit is out-of-domain
 
-# Path Reconstruction
-max_paths = 1000
-path_method = "astar"
-smooth_paths = true
+# -----------------------------------------------------------------------------
+# Path reconstruction
+# -----------------------------------------------------------------------------
+max_paths = 1000                # trajectories to reconstruct
+path_methods = ["astar"]        # astar | viterbi, in any combination
+smooth_paths = true             # marine line-of-sight smoothing
 
-# Validation
-compute_validation = true
-run_bayesian_ensemble = false
-
-# Advanced Routing
-adaptive_mesh = false
+# -----------------------------------------------------------------------------
+# Advanced routing
+# -----------------------------------------------------------------------------
+adaptive_mesh = false           # adaptive multiresolution mesh
 coarse_radius_km = 25.0
 fine_radius_km = 8.0
-dynamic_kernels = false
-hmm_smoothing = false
+dynamic_kernels = false         # time-varying environmental covariates
+hmm_smoothing = false           # global multi-segment HMM Viterbi smoothing
 
+# -----------------------------------------------------------------------------
+# Posterior inference
+# -----------------------------------------------------------------------------
+n_samples = 200                 # posterior draws
+n_warmup = 100                  # warmup iterations
+seed = 42                       # random seed for reproducibility
+n_ensemble = 50
+# Random-walk proposal width, as a fraction of the prior scale. The default
+# Turing MH() draws proposals from the prior and accepts 0% of them on a
+# dataset this size, so the sampler is an explicit prior-scaled random walk.
+mh_proposal_scale = 0.05                 # draws used by the Bayesian path ensemble
+
+# -----------------------------------------------------------------------------
+# Habitat suitability uncertainty
+# -----------------------------------------------------------------------------
+hsi_se = 0.08                   # observation standard error on HSI
+propagate_hsi_error = true      # propagate HSI error into path sampling
+n_stochastic_draws = 10         # Monte Carlo draws per stochastic path
+
+# -----------------------------------------------------------------------------
 # Diagnostics
-compute_circuit = true
-compute_stochastic = true
-compute_bottlenecks = true
+# -----------------------------------------------------------------------------
+#   circuit           -- current density and pinch points
+#   stochastic        -- stochastic least-cost path ensembles
+#   bottlenecks       -- domain-wide bottleneck index
+#   validation        -- path CIs, connectivity, posterior predictive checks
+#   bayesian_ensemble -- full posterior path and corridor ensembles
+diagnostics = ["circuit", "stochastic", "bottlenecks", "validation", "bayesian_ensemble"]
 
-# HSI Error
-hsi_se = 0.08
-propagate_hsi_error = true
-n_stochastic_draws = 10
-
-# MCMC
-n_samples = 200
-n_warmup = 100
-seed = 42
-
-# Output
+# -----------------------------------------------------------------------------
+# Output and reporting
+# -----------------------------------------------------------------------------
+species_name = "Animal"
 render_html = true
 output_dir = "output"
+resume_from_checkpoint = false
+dark_mode = false
+cmap = "viridis"
+font = "Inter, system-ui, sans-serif"
 verbose = true
 
-# Biological Groups
-group_labels = ["All"]
-group_alpha = [0.40]
-group_rho = [0.25]
-group_gamma = [1.00]
-
-# Species
-species_name = "Animal"
+# -----------------------------------------------------------------------------
+# Stock connectivity regions
+# -----------------------------------------------------------------------------
+# Regions of interest. Supplying one polygon file per label is the preferred
+# route: the unit-to-region assignment is then derived from the polygons rather
+# than hand-built. `region_map` is then only needed to place units that fall
+# outside every polygon.
+#
+# Supported formats, chosen by extension:
+#   .csv              long format: one vertex per row with `lon`/`lat` columns and
+#                     an optional `region` column separating one ring from the next
+#   .jld2             a DataFrame in the same long format, or a list of rings
+#   .rds / .RData     read through R, same two shapes
+#   .shp              an ESRI shapefile
+#   .geojson / .json  a FeatureCollection
+#
+# region_labels = ["Gulf", "Cape Breton"]
+# region_polygon_files = ["configs/regions/gulf.geojson", "configs/regions/cape_breton.geojson"]
+region_labels = []
+region_polygon_files = []
+# Optional explicit unit -> region index assignment; fills gaps only.
+# region_map = {1 => 1, 2 => 1, 3 => 2}

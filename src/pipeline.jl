@@ -106,7 +106,7 @@ end
 
 
 """
-    snowcrab_movement_data(;
+    load_movement_dataset(;
         radius_km = 15.0,
         time_interval = :daily,
         crs = nothing,
@@ -117,10 +117,10 @@ end
         data_dir = nothing
     ) -> NamedTuple
 
-High-level convenience pipeline for empirical snow crab (*Chionoecetes opilio*)
+High-level convenience pipeline for empirical mark-recapture datasets
 movement, telemetry, and environmental suitability data across Atlantic Canada.
 Loads empirical mark-recapture encounters from JLD2 storage, constructs a unified
-planar hexagonal domain tessellation covering both the Scotian Shelf and Gulf of
+planar hexagonal domain tessellation covering the full extent of the
 St. Lawrence, classifies and severs terrestrial land barriers, infills unobserved
 marine Habitat Suitability Index (HSI) values via screened graph-Laplacian
 Dirichlet diffusion, snaps telemetry observations to navigable marine units,
@@ -134,7 +134,7 @@ and stratifies event pairs into 4 biological demographic categories.
 - `ref_doy::Int`: Annual survey reference day-of-year (default `182`).
 - `verbose::Bool`: Enable progress and summary console output (default `true`).
 - `pre_mapped`: Optional pre-computed mesh NamedTuple to bypass regeneration.
-- `data_dir`: Directory containing `tagging.jld2`, `hsi.jld2`, and `sppoly.jld2`.
+- `tagging_file`, `hsi_file`, `sppoly_file`, `surveydata_file`: dataset inputs.
   Defaults to the repository directory `docs/movement/data`.
 
 # Returns
@@ -150,7 +150,7 @@ and stratifies event pairs into 4 biological demographic categories.
   - `group_lookup::Dict`: Stratum string to integer ID mapping.
   - `land_mask::Vector{Bool}`: Terrestrial barrier indicator vector.
 """
-function snowcrab_movement_data(;
+function load_movement_dataset(;
     radius_km     :: Real    = 15.0,
     time_interval :: Symbol  = :daily,
     crs                      = nothing,
@@ -190,7 +190,7 @@ function snowcrab_movement_data(;
         end
     end
 
-    isfile(actual_tagging) || error("Snow crab tagging file not found at: $actual_tagging")
+    isfile(actual_tagging) || error("Telemetry file not found: $actual_tagging")
 
     ext = lowercase(splitext(actual_tagging)[2])
     tagging = if ext == ".jld2"
@@ -220,7 +220,7 @@ function snowcrab_movement_data(;
         sppoly_file   = isfile(actual_sppoly) ? actual_sppoly : nothing,
         radius_km     = radius_km,
         time_interval = time_interval,
-        land_polygons = :maritimes,
+        land_polygons = :none,
         crs           = crs,
         datum         = datum,
         ref_doy       = ref_doy,
@@ -229,7 +229,7 @@ function snowcrab_movement_data(;
     )
 end
 
-# sc_data = snowcrab_movement_data(radius_km = 20.0, verbose = true)
+# sc_data = load_movement_dataset(radius_km = 20.0, verbose = true)
 
 # println("Active mark-recapture records: ", nrow(sc_data.obs))
 # println("Domain units: ", sc_data.mesh.n_units, 
@@ -237,153 +237,23 @@ end
 #         ", land: ", sum(sc_data.land_mask), ")")
 
 
-"""
-    movement_parameters_snowcrab() -> NamedTuple
-
-Returns the analysis configuration for Scotian Shelf snow crab
-(*Chionoecetes opilio*), overriding generic defaults with species-specific
-biology and real empirical data settings.
-
-Three demographic groups drive distinct movement strategies:
-
-    Group         | alpha (advection) | rho (fidelity) | gamma (HSI)
-    Mature Female |       0.25        |      0.60      |    0.80
-    Mature Male   |       0.65        |      0.15      |    1.50
-    Immature      |       0.30        |      0.35      |    0.50
-
-Mature females exhibit high site fidelity (rho = 0.60) during multi-year
-egg brooding. Mature males are most dispersive (alpha = 0.65, rho = 0.15)
-during active mating migrations. Immatures show diffusive benthic
-exploration.
-
-Species-specific overrides applied over `movement_parameters_default`:
-- `data_source`: `:snowcrab` (real empirical mark-recapture data).
-- `depth_range`: `(50.0, 500.0)` m -- principal benthic habitat zone.
-- All four optional diagnostics are enabled.
-- `n_stochastic_draws`: 15 -- balanced resolution for real data.
-"""
-function movement_parameters_snowcrab()
-    defaults = movement_parameters_default()
-    return merge(defaults, (
-        data_source         = :snowcrab,
-        model_mode          = "telemetry",
-        depth_range         = (25.0, 400.0),
-        reshard_hex         = false,
-        hex_radius_km       = 5.0,
-        use_hydrodynamics   = true,
-        max_paths           = 25,
-        path_method         = :astar,
-        n_stochastic_draws  = 100,
-        hsi_se              = 0.08,
-        n_samples           = 500,
-        n_warmup            = 100,
-        seed                = 42,
-        render_html         = true,
-        output_dir          = normpath(joinpath(@__DIR__, "..", "..", "output")),
-        group_labels        = String["Mature Female", "Mature Male", "Immature"],
-        group_alpha         = Float64[0.25, 0.65, 0.30],
-        group_rho           = Float64[0.60, 0.15, 0.35],
-        group_gamma         = Float64[0.80, 1.50, 0.50],
-        species_name        = "Snow Crab",
-    ))
-end
-
-
-
-
 # =============================================================================
 # Parameter Functions
 # =============================================================================
 
 """
-    movement_parameters_default() -> NamedTuple
+    movement_parameters_default() -> MovementAnalysisConfig
 
-Returns the default analysis configuration for a generic species.
-All fields can be individually overridden by merging with a
-species-specific parameter function:
-    params = merge(movement_parameters_default(), (max_paths = 50,))
+The single canonical entry point for all analysis parameters.
 
-# Returns
-`NamedTuple` with:
-- `data_source::Symbol`: `:simulate` or `:snowcrab`.
-- `model_mode::String`: `"telemetry"`, `"telemetry_and_survey"`, or `"both"`.
-- `reshard_hex::Bool`: Reshard domain to finer hexagonal lattice.
-- `hex_radius_km::Real`: Cell radius for fine hexagonal lattice (km).
-- `use_hydrodynamics::Bool`: Ingest 3D hydrodynamic diagnostics.
-- `depth_range`: `(min_d, max_d)` traversal barrier in m, or `nothing`.
-- `max_paths::Int`: Maximum individual trajectories to reconstruct.
-- `path_method::Symbol`: `:astar` (default) or `:viterbi`.
-- `smooth_paths::Bool`: Apply marine line-of-sight raycast smoothing.
-- `compute_circuit::Bool`: Compute electrical circuit current density.
-- `compute_stochastic::Bool`: Compute stochastic least-cost path ensembles.
-- `compute_bottlenecks::Bool`: Compute domain-wide bottleneck index B(u).
-- `compute_wavelets::Bool`: Compute Chebyshev spectral graph wavelets.
-- `n_stochastic_draws::Int`: Monte Carlo draws per stochastic path.
-- `hsi_se::Real`: Observation standard error on HSI (sigma).
-- `n_samples::Int`: MCMC posterior draw count.
-- `n_warmup::Int`: MCMC warmup iteration count.
-- `seed::Int`: Random seed for reproducibility.
-- `render_html::Bool`: Export interactive HTML dashboards.
-- `output_dir::String`: Output directory for all artifacts.
-- `verbose::Bool`: Enable progress logging.
-- `group_labels::Vector{String}`: Biological group display names.
-- `group_alpha::Vector{Float64}`: Per-group advection weight alpha_g.
-- `group_rho::Vector{Float64}`: Per-group site fidelity rho_g.
-- `group_gamma::Vector{Float64}`: Per-group HSI gradient strength gamma_g.
-- `species_name::String`: Display name used in dashboard titles.
-- `adaptive_mesh::Bool`: Use adaptive multiresolution hexagonal mesh.
-- `coarse_radius_km::Real`: Cell radius for offshore/coarse units (km).
-- `fine_radius_km::Real`: Cell radius for coastal/refined units (km).
-- `dynamic_kernels::Bool`: Use time-varying dynamic transition kernels.
-- `hmm_smoothing::Bool`: Use global multi-segment HMM Viterbi smoothing.
-- `compute_validation::Bool`: Run validation path uncertainty & connectivity.
-- `run_bayesian_ensemble::Bool`: Reconstruct Bayesian MCMC path ensembles.
-- `resume_from_checkpoint::Bool`: Load intermediate states if checkpoint file exists.
-- `region_labels`: Human-readable labels for stock connectivity regions.
-- `region_map`: Spatial mapping assigning mesh units to regions.
+Every code path -- library call, CLI invocation, or TOML file -- resolves to this
+struct. A TOML file is applied as an overlay on top of these defaults (see
+`load_config`), so a parameter absent from a config file simply keeps the default
+declared in `src/config.jl`. A dataset is selected by its input files, not by a
+separate code path: pass `tagging_file` (and the HSI and spatial-unit files that
+accompany it) to analyse real data, and leave them unset for synthetic data.
 """
-function movement_parameters_default()
-    return (
-        data_source         = :simulate,
-        model_mode          = "telemetry",
-        reshard_hex         = false,
-        hex_radius_km       = 5.0,
-        use_hydrodynamics   = false,
-        depth_range         = nothing,
-        max_paths           = 1000,
-        path_method         = :astar,
-        smooth_paths        = true,
-        compute_circuit     = true,
-        compute_stochastic  = true,
-        compute_bottlenecks = true,
-        compute_wavelets    = true,
-        n_stochastic_draws  = 10,
-        hsi_se              = 0.08,
-        propagate_hsi_error = true,
-        n_samples           = 200,
-        n_warmup            = 100,
-        seed                = 42,
-        render_html         = true,
-        output_dir          = normpath(joinpath(@__DIR__, "..", "..", "output")),
-        verbose             = true,
-        group_labels        = String["All"],
-        group_alpha         = Float64[0.40],
-        group_rho           = Float64[0.25],
-        group_gamma         = Float64[1.00],
-        species_name        = "Animal",
-        adaptive_mesh        = false,
-        coarse_radius_km     = 25.0,
-        fine_radius_km       = 8.0,
-        dynamic_kernels      = false,
-        hmm_smoothing        = false,
-        compute_validation   = true,
-        run_bayesian_ensemble = false,
-        resume_from_checkpoint = false,
-        region_labels        = nothing,
-        region_map           = nothing,
-    )
-end
- 
+movement_parameters_default() = MovementAnalysisConfig()
 
 # =============================================================================
 # Private Helpers
@@ -666,46 +536,108 @@ function load_movement_data(params)::NamedTuple
     verbose && println("  MovementAnalysis Pipeline")
     verbose && println("=" ^ 72)
 
-    # -- 1a. Load or simulate dataset ----------------------------------------
+    # -- 1a. Load or generate the dataset -----------------------------------
+    # The dataset is identified by the input files themselves: when a tagging
+# file is configured, that file -- together with whichever HSI and
+# spatial-unit files accompany it -- *is* the dataset. With no tagging file
+# there is nothing to read, so a synthetic dataset is generated instead.
+# There is no dataset name to match on, and no silent fallback: a configured
+# file that cannot be read is an error, not a reason to swap in simulated
+# data and report a successful run of the wrong analysis.
+data = if isnothing(params.tagging_file)
     verbose && println(
-        "\n[Phase 1] Ingesting dataset (source: :$(params.data_source))..."
+        "\n[Phase 1] No tagging file configured; generating a synthetic dataset"
     )
-    data = if Symbol(params.data_source) == :snowcrab
-        sc_rad = params.hex_radius_km != 10.0 ? params.hex_radius_km : 15.0
-        try
-            kw = Dict{Symbol, Any}(:radius_km => sc_rad, :verbose => verbose)
-            if hasproperty(params, :data_dir) && !isnothing(params.data_dir)
-                kw[:data_dir] = params.data_dir
-            end
-            if hasproperty(params, :tagging_file) && !isnothing(params.tagging_file)
-                kw[:tagging_file] = params.tagging_file
-            end
-            if hasproperty(params, :hsi_file) && !isnothing(params.hsi_file)
-                kw[:hsi_file] = params.hsi_file
-            end
-            if hasproperty(params, :sppoly_file) && !isnothing(params.sppoly_file)
-                kw[:sppoly_file] = params.sppoly_file
-            end
-            snowcrab_movement_data(; kw...)
-        catch err
-            @warn "Could not load snow crab data: $err -- using simulate."
-            generate_movement_data()
-        end
-    elseif Symbol(params.data_source) == :simulate
-        generate_movement_data()
-    else
-        generate_movement_data()
-    end
-
+    generate_movement_data()
+else
+    verbose && println("\n[Phase 1] Ingesting dataset from $(params.tagging_file)")
+    isfile(params.tagging_file) || error(
+        "Configured tagging_file does not exist: $(params.tagging_file)"
+    )
+    load_movement_dataset(
+        radius_km = params.hex_radius_km,
+        verbose = verbose,
+        tagging_file = params.tagging_file,
+        hsi_file = params.hsi_file,
+        sppoly_file = params.sppoly_file,
+    )
+end
     mesh      = data.mesh
     W         = data.W
     hsi_vec   = data.hsi_vec
     obs_df    = data.obs
-    survey_df = hasproperty(data, :survey_df) ? data.survey_df : nothing
+
+    # The analysis domain is an explicit bounding box when configured, and
+    # otherwise the extent of the input data plus a small padding so the mesh
+    # is not clipped flush against the outermost detections.
+    domain_bbox = resolve_bbox(
+        params.bbox, params.bbox_padding_deg,
+        hasproperty(obs_df, :lon) ? Float64[obs_df.lon...] : Float64[],
+        hasproperty(obs_df, :lat) ? Float64[obs_df.lat...] : Float64[],
+    )
+    verbose && println(
+        "  Domain bounding box (W, S, E, N) = " *
+        "($(domain_bbox[1]), $(domain_bbox[2]), $(domain_bbox[3]), $(domain_bbox[4]))"
+    )
+
+    # Land identification is configuration-driven: a global land/sea raster,
+    # user polygons, bathymetry alone, or nothing.
+    land_polys = if params.land_source === :polygons
+        isempty(params.land_polygon_files) && error(
+            "land_source = :polygons requires land_polygon_files"
+        )
+        reduce(vcat, read_polygon_file.(params.land_polygon_files))
+    else
+        nothing
+    end
+    survey_df = if !isnothing(params.surveydata_file)
+    load_survey_data(params.surveydata_file; verbose = verbose)
+elseif hasproperty(data, :survey_df)
+    data.survey_df
+else
+    nothing
+end
     group_map = hasproperty(data, :group_lookup) ?
                 data.group_lookup : Dict(1 => "All")
+
+    # Regions of interest come from polygon files paired with `region_labels`.
+    # Deriving the unit-to-region map from the polygons is preferred over
+    # hand-building it, so an explicit `region_map` only fills the gaps.
+    region_map = if !isempty(params.region_polygon_files)
+        labels = isempty(params.region_labels) ?
+            ["Region $i" for i in eachindex(params.region_polygon_files)] :
+            params.region_labels
+        polys = load_region_polygons(params.region_polygon_files, labels)
+        region_map_from_polygons(mesh.centroids_lonlat, polys)
+    else
+        nothing
+    end
+    conn_region_labels = nothing
+    if region_map !== nothing
+        explicit = isnothing(params.region_map) ? Dict{Int,Int}() : params.region_map
+        for (unit, r) in explicit
+            1 <= unit <= length(region_map) && (region_map[unit] = r)
+        end
+        n_r = maximum(region_map)
+        n_r >= 1 || error(
+            "No mesh unit falls inside any region polygon; check region_polygon_files."
+        )
+        conn_region_labels = isempty(params.region_labels) ?
+            ["Region $i" for i in 1:n_r] : params.region_labels
+        verbose && println(
+            "  Regions: $(length(conn_region_labels)) from polygon files; " *
+            "$(count(>(0), region_map)) / $(length(region_map)) units assigned"
+        )
+    end
     land_mask = hasproperty(data, :land_mask) ? data.land_mask : nothing
     n_spatial = mesh.n_units
+
+    # Time-varying HSI, taken now rather than just before the return, so the
+    # resharding block below can rescale it onto the fine mesh alongside
+    # `hsi_vec` and `W`.
+    monthly_hsi  = hasproperty(data, :monthly_hsi) ? data.monthly_hsi : Matrix{Float64}(undef, 0, 0)
+    month_lookup = hasproperty(data, :month_lookup) ? data.month_lookup : Dict{Tuple{Int,Int}, Int}()
+    years_vec    = hasproperty(data, :years) ? data.years : Int[]
 
     if verbose
         println("  Spatial mesh units : $n_spatial")
@@ -757,11 +689,45 @@ function load_movement_data(params)::NamedTuple
         mesh      = fine_mesh
         W         = fine_mesh.W
         land_mask = identify_land_units(
-            fine_mesh.centroids_lonlat; depth = resharded_depths
+            fine_mesh.centroids_lonlat;
+            depth         = resharded_depths,
+            land_polygons = land_polys,
         )
+        if params.land_source === :landmask
+            # A unit can be shallow enough to read as marine on bathymetry yet
+            # still sit on land; the global raster settles those disagreements.
+            land_mask .|= land_mask_from_global_mask(
+                fine_mesh.centroids_lonlat;
+                resolution   = params.land_mask_resolution,
+                grid_minutes = params.land_mask_grid_minutes,
+            )
+            verbose && println(
+                "  Land units: $(count(land_mask)) / $(fine_mesh.n_units) " *
+                "(global land/sea mask)"
+            )
+        end
         W, hsi_vec = apply_land_barrier(
             fine_mesh.W, resharded_hydro.hsi, land_mask
         )
+
+        # `monthly_hsi` was built on the original mesh, so its rows index a
+        # different set of units than everything resharded above. It needs a
+        # transfer matrix from the *original* mesh -- not from the bathymetry
+        # grid, which is what P_transfer maps -- or every time-varying kernel
+        # lookup would index the wrong units.
+        if !isempty(monthly_hsi) && size(monthly_hsi, 1) != fine_mesh.n_units
+            P_orig_to_fine = compute_network_transfer_matrix(
+                data.mesh, fine_mesh; method = :area_weighted
+            )
+            monthly_hsi = reshard_spatial_field(P_orig_to_fine, monthly_hsi)
+            for col in axes(monthly_hsi, 2)
+                monthly_hsi[land_mask, col] .= 0.0
+            end
+            verbose && println(
+                "  Rescaled monthly HSI to $(size(monthly_hsi, 1)) x " *
+                "$(size(monthly_hsi, 2)) fine-mesh units"
+            )
+        end
         sever_land_crossing_edges!(W, fine_mesh.centroids_lonlat)
         n_spatial  = fine_mesh.n_units
 
@@ -801,14 +767,14 @@ function load_movement_data(params)::NamedTuple
     end
 
     # -- 1b-ii. Adaptive Multiresolution Hexagonal Mesh ----------------------
-    if _get(params, :adaptive_mesh, false)
+    if params.adaptive_mesh
         verbose && println(
             "\n[Phase 1b-ii] Constructing adaptive multiresolution domain..."
         )
         cents_lon = [Float64(c[1]) for c in mesh.centroids_lonlat]
         cents_lat = [Float64(c[2]) for c in mesh.centroids_lonlat]
-        rc = Float64(_get(params, :coarse_radius_km, 25.0))
-        rf = Float64(_get(params, :fine_radius_km, 8.0))
+        rc = params.coarse_radius_km
+        rf = params.fine_radius_km
         mesh = construct_adaptive_multiresolution_domain(
             cents_lon, cents_lat;
             coarse_radius_km = rc,
@@ -873,7 +839,7 @@ function load_movement_data(params)::NamedTuple
         #       edges wherever two in-depth basins share a marine transit
         #       corridor (shallow/deep). Avoids drops but can generate many
         #       extra edges when basins are numerous.
-        depth_mode = Symbol(_get(params, :depth_barrier_mode, :hsi_only))
+        depth_mode = params.depth_barrier_mode
 
         # Land-only W: always needed for reachability checks and :hsi_only mode
         land_only_bv = land_mask !== nothing ?
@@ -884,7 +850,7 @@ function load_movement_data(params)::NamedTuple
             # Structural W: land barrier only
             W, hsi_vec = apply_land_barrier(W, hsi_vec, land_only_bv)
             # Encode depth preference via HSI floor for out-of-depth nodes
-            hsi_floor  = Float64(_get(params, :hsi_ood_floor, 0.01))
+            hsi_floor  = params.hsi_ood_floor
             hsi_vec[out_of_depth .& .!land_only_bv] .= min.(
                 hsi_vec[out_of_depth .& .!land_only_bv], hsi_floor
             )
@@ -1025,11 +991,6 @@ function load_movement_data(params)::NamedTuple
         end
     end
 
-    # Forward monthly HSI and lookup from data for time-varying kernel support
-    monthly_hsi  = hasproperty(data, :monthly_hsi)  ? data.monthly_hsi  : Matrix{Float64}(undef, 0, 0)
-    month_lookup = hasproperty(data, :month_lookup)  ? data.month_lookup  : Dict{Tuple{Int,Int}, Int}()
-    years_vec    = hasproperty(data, :years)         ? data.years         : Int[]
-
     return (
         data               = data,
         mesh               = mesh,
@@ -1041,6 +1002,8 @@ function load_movement_data(params)::NamedTuple
         obs_df             = obs_df,
         survey_df          = survey_df,
         group_map          = group_map,
+        region_labels      = conn_region_labels,
+        region_map         = region_map,
         land_mask          = land_mask,
         n_spatial          = n_spatial,
         resharded_hydro    = resharded_hydro,
@@ -1054,33 +1017,172 @@ end
 # =============================================================================
 
 """
+    movement_sampler(prior_scales, params)
+
+The MCMC sampler for the movement models, as a random walk in linked space with
+diagonal covariance `prior_scales .^ 2 .* params.mh_proposal_scale`.
+
+# Why not plain `MH()`
+`MH()` in Turing 0.49 is documented as drawing proposals **from the model prior**.
+That is unusable here: with 5,294 observations the posterior is far sharper than
+the prior, so once the chain has any likelihood at all, a fresh prior draw almost
+never beats it. Measured on the snow crab data, `MH()` accepts **0.0%** of
+proposals and returns a single distinct value across 200 draws -- the reported
+"posterior" is the initialisation, not a fit. Two different models frozen at the
+same seeded starting point report *identical* parameters, which is how the bug
+surfaced.
+
+# Why a random walk and not NUTS
+`NUTS` works (acc = 1.0, 200/200 distinct draws) and adapts its metric
+automatically, which is the better long-term answer. On this problem it is ~15x
+slower per draw than the random walk, because each of ~2^10 leapfrog steps
+rebuilds the transition kernel. That cost is a tuning question, not a correctness
+one; the proposal scale is exposed as `mh_proposal_scale` so it can be tuned
+without editing code, and convergence diagnostics are tracked in `todo.md`.
+
+`prior_scales` are the priors' standard deviations in linked space, so the proposal
+is a fraction of the prior width rather than an arbitrary number.
+"""
+function movement_sampler(prior_scales::Vector{Float64}, params)
+    s = params.mh_proposal_scale
+    s > 0 || throw(ArgumentError("mh_proposal_scale must be positive, got $s"))
+    return MH(Matrix(Diagonal((s .* prior_scales) .^ 2)))
+end
+
+# The three population parameters and their prior scales, in declaration order:
+# mu_velocity ~ N(0.3, 0.2) truncated, mu_diffusion ~ N(0.1, 0.2) truncated,
+# mu_gamma ~ N(1.0, 1.0). Shared by the discrete and continuous-time models, which
+# differ only in their likelihood.
+const POPULATION_PRIOR_SCALES = [0.2, 0.2, 1.0]
+
+"""
+    report_chain_health(label, chain, params) -> Bool
+
+Print the two numbers that distinguish a chain that moved from one that did not:
+the acceptance rate, and how many distinct values the retained draws actually took.
+
+This exists because the alternative is invisible. `MH()` accepted 0.0% of proposals
+and returned a single distinct value across 200 draws, and the run reported a
+posterior mean as if it meant something. A distinct-value count near 1 is the
+signature of a frozen chain and cannot be mistaken for a tight posterior once
+stated.
+
+Returns `false` when the chain looks frozen, so callers can escalate.
+"""
+function report_chain_health(label::AbstractString, chain, params)::Bool
+    verbose = params.verbose
+
+    n = 0
+    acc = Float64[]
+    for k in keys(chain)
+        nm = string(k)
+        vals = try
+            Array(chain[k])
+        catch
+            continue
+        end
+        occursin("accept", nm) || (n = max(n, length(vals)); continue)
+        m = skipmissing(vec(vals))
+        isempty(m) || push!(acc, mean(m))
+    end
+    n == 0 && return true
+    a = isempty(acc) ? NaN : mean(acc)
+
+    # How many distinct values one sampled parameter actually took. This is the
+    # signal that catches a frozen chain even when the reported acceptance is
+    # misleading, so it is worth computing from whichever parameter is available
+    # rather than assuming a name.
+    n_distinct = 0
+    for k in keys(chain)
+        occursin("Parameter", string(k)) || continue
+        vals = try
+            vec(Array(chain[k]))
+        catch
+            continue
+        end
+        all(isfinite, vals) || continue
+        n_distinct = length(unique(round.(vals; digits = 9)))
+        break
+    end
+
+    healthy = (isnan(a) || a > 0.01) && n_distinct > 1
+    if healthy
+        verbose && println(
+            "  $label: acceptance=$(isnan(a) ? "n/a" : string(round(a; digits = 3))), " *
+            "distinct values=$n_distinct/$n")
+    else
+        @warn "$label chain looks frozen" acceptance = a n_distinct = n_distinct n_draws = n
+    end
+    return healthy
+end
+
+"""
     fit_movement_models(loaded, params) -> NamedTuple
 
 Phase 2 of the pipeline. Fits Bayesian movement models via Turing MCMC.
 
-Supported model modes (set via `params.model_mode`):
+Approaches to fit (set via `params.model_modes`):
 
-- `"telemetry"`: Pure categorical mark-recapture transition likelihood.
-    recapture ~ Categorical(P_g^k[release, :])
-- `"telemetry_and_survey"`: Joint NegBin survey density + telemetry.
-    density ~ NegBin(exp(eta_s), r), where eta_s drives advection A_g(eta).
-- `"both"`: Fits both models.
+- `"telemetry"`: Pure categorical mark-recapture transition likelihood, fitted at
+    the population level. recapture ~ Categorical(P^k[release, :]) for free
+    parameters `mu_velocity`, `mu_diffusion`, `mu_gamma`; `alpha` and `rho` are
+    derived from the first two by `movement_alpha_rho`.
+- `"ssa"`: Continuous-time semigroup over the same three parameters.
+    recapture ~ Categorical(exp(Q * dt)[release, :])
+- `"telemetry_and_survey"` / `"ssa_and_survey"`: **the survey density likelihood
+    is not implemented** — `counts` and `depths` are accepted and ignored, so
+    these reduce to the telemetry and SSA models respectively and emit a warning.
+    See `todo.md` §1.6.
+- `"agent"`: Agent-based movement simulation; no MCMC.
 
 # Arguments
 - `loaded`: Output of `load_movement_data`.
-- `params`: Configuration NamedTuple. Relevant keys: `model_mode`,
+- `params`: Configuration struct. Relevant keys: `model_modes`,
   `n_samples`, `seed`, `verbose`.
 
 # Returns
 `NamedTuple` with `models::Dict` and `chains::Dict`.
+
+# On burn-in
+Every `sample` call passes `num_warmup = params.n_warmup`, which AbstractMCMC
+turns into `discard_initial` -- the first `n_warmup` states of the walk are
+thrown away and only the following `n_samples` are kept.
+
+This was missing, and it mattered more than it looked. Without it the returned
+"posterior" was the *opening segment* of the random walk, dominated by the
+initial draw and therefore by the prior. Two different models, seeded the same
+way, then reported near-identical parameters because both were mostly reporting
+their priors -- which is exactly what the SSA and telemetry runs did before the
+fix. `n_warmup` was a documented, configurable field that nothing read.
+
+# On reporting whether the chain moved
+A frozen chain produces a posterior mean indistinguishable from a converged one, and
+that is how the `MH()` problem stayed hidden for so long: two different models
+reported identical parameters, and nothing in the output said why. `report_chain_health`
+prints acceptance and the number of distinct posterior values, and escalates to a
+warning when the chain barely moved, so the failure is visible in the run log
+rather than only inferable from the results.
 """
 function fit_movement_models(loaded, params)::NamedTuple
     verbose   = params.verbose
-    mode_str  = lowercase(string(params.model_mode))
-    fit_tel   = mode_str in ("telemetry", "both")
-    fit_joint = mode_str in ("telemetry_and_survey", "both")
-    fit_ssa   = mode_str in ("ssa", "ssa_telemetry", "both_ssa")
-    fit_ssa_joint = mode_str in ("ssa_and_survey", "joint_ssa", "both_ssa")
+    params.n_warmup >= 0 || throw(ArgumentError(
+        "n_warmup must be non-negative, got $(params.n_warmup)"))
+    params.n_samples >= 1 || throw(ArgumentError(
+        "n_samples must be at least 1, got $(params.n_samples)"))
+    # `model_modes` is the request; `effective_model_modes` is what survives
+    # contact with the data. Survey-dependent approaches are dropped when no
+    # readable survey file is configured, so asking for one is not an error --
+    # it simply is not run.
+    mode_set = Set(effective_model_modes(params))
+    for m in skipped_modes(params)
+        verbose && println(
+            "  Note: :$(m) not run -- no readable surveydata_file configured."
+        )
+    end
+    fit_tel       = :telemetry in mode_set
+    fit_joint     = :telemetry_and_survey in mode_set
+    fit_ssa       = :ssa in mode_set
+    fit_ssa_joint = :ssa_and_survey in mode_set
     rng       = MersenneTwister(params.seed)
     models    = Dict{Symbol, Any}()
     chains    = Dict{Symbol, Any}()
@@ -1089,24 +1191,24 @@ function fit_movement_models(loaded, params)::NamedTuple
     if fit_ssa
         verbose && println("\n[Phase 2] Fitting Continuous-Time SSA Telemetry model...")
         verbose && println(
-            "  recapture ~ Categorical(exp(Q_g * dt)[release, :])"
+            "  recapture ~ Categorical(exp(Q * dt)[release, :])"
         )
         obs_df     = loaded.obs_df
         releases   = Int.(obs_df.release)
         recaptures = Int.(obs_df.recapture)
         dts        = Float64.(obs_df.k)
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
-
+        tagids     = obs_df.tagid
         m_ssa = ssa_telemetry_turing_model(
-            releases, recaptures, dts, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+            releases, recaptures, dts,
+            loaded.W, loaded.hsi_vec, loaded.land_mask
         )
         models[:ssa_telemetry] = m_ssa
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn_ssa = sample(rng, m_ssa, MH(), params.n_samples; progress = false)
-        chains[:ssa_telemetry] = chn_ssa
+        spl = movement_sampler(POPULATION_PRIOR_SCALES, params)
+        verbose && println("  Sampling $(params.n_samples) draws " *
+                          "(discarding $(params.n_warmup) warmup)...")
+        chn_ssa = sample(rng, m_ssa, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
+                chains[:ssa_telemetry] = chn_ssa
+        report_chain_health("ssa_telemetry", chn_ssa, params)
         verbose && println("  SSA telemetry model complete.")
     end
 
@@ -1118,10 +1220,6 @@ function fit_movement_models(loaded, params)::NamedTuple
         releases   = Int.(obs_df.release)
         recaptures = Int.(obs_df.recapture)
         dts        = Float64.(obs_df.k)
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
-
         survey_df  = loaded.survey_df
         counts     = Int.(round.(survey_df.density))
         depths     = hasproperty(survey_df, :depth) ?
@@ -1129,13 +1227,16 @@ function fit_movement_models(loaded, params)::NamedTuple
 
         m_ssa_j = joint_survey_ssa_telemetry_turing_model(
             counts, depths,
-            releases, recaptures, dts, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+            releases, recaptures, dts,
+                        loaded.W, loaded.hsi_vec, loaded.land_mask
         )
         models[:ssa_and_survey] = m_ssa_j
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn_ssa_j = sample(rng, m_ssa_j, MH(), params.n_samples; progress = false)
-        chains[:ssa_and_survey] = chn_ssa_j
+        spl = movement_sampler(POPULATION_PRIOR_SCALES, params)
+        verbose && println("  Sampling $(params.n_samples) draws " *
+                          " (discarding $(params.n_warmup) warmup)...")
+        chn_ssa_j = sample(rng, m_ssa_j, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
+                chains[:ssa_and_survey] = chn_ssa_j
+        report_chain_health("ssa_and_survey", chn_ssa_j, params)
         verbose && println("  Joint SSA model complete.")
     end
 
@@ -1143,28 +1244,29 @@ function fit_movement_models(loaded, params)::NamedTuple
     if fit_tel
         verbose && println("\n[Phase 2] Fitting Pure Telemetry model...")
         verbose && println(
-            "  recapture ~ Categorical(P_g^k[release, :])"
+            "  population-level: mu_velocity, mu_diffusion, mu_gamma"
         )
+        verbose && println("  recapture ~ Categorical(P^k[release, :])")
         obs_df     = loaded.obs_df
         releases   = Int.(obs_df.release)
         recaptures = Int.(obs_df.recapture)
         ks         = Int.(round.(obs_df.k))
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
-
+        tagids = obs_df.tagid
         m_tel = pure_telemetry_turing_model(
-            releases, recaptures, ks, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+            releases, recaptures, ks,
+            loaded.W, loaded.hsi_vec, loaded.land_mask
         )
         models[:telemetry] = m_tel
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn = sample(rng, m_tel, MH(), params.n_samples; progress = false)
-        chains[:telemetry] = chn
+        spl = movement_sampler(POPULATION_PRIOR_SCALES, params)
+        verbose && println("  Sampling $(params.n_samples) draws " *
+                          " (discarding $(params.n_warmup) warmup)...")
+        chn = sample(rng, m_tel, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
+                chains[:telemetry] = chn
+        report_chain_health("telemetry", chn, params)
         verbose && println("  Pure telemetry model complete.")
     end
 
-    # -- Joint Survey + Telemetry Model --------------------------------------
+# -- Joint Survey + Telemetry Model --------------------------------------
     if fit_joint && !isnothing(loaded.survey_df)
         verbose && println(
             "\n[Phase 3] Fitting Joint Survey + Telemetry model..."
@@ -1175,10 +1277,7 @@ function fit_movement_models(loaded, params)::NamedTuple
         releases   = Int.(obs_df.release)
         recaptures = Int.(obs_df.recapture)
         ks         = Int.(round.(obs_df.k))
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
-
+        tagids = obs_df.tagid
         survey_df  = loaded.survey_df
         counts     = Int.(round.(survey_df.density))
         depths     = hasproperty(survey_df, :depth) ?
@@ -1186,49 +1285,181 @@ function fit_movement_models(loaded, params)::NamedTuple
 
         m_joint = joint_survey_telemetry_turing_model(
             counts, depths,
-            releases, recaptures, ks, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+            releases, recaptures, ks,
+                        loaded.W, loaded.hsi_vec, loaded.land_mask
         )
         models[:telemetry_and_survey] = m_joint
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn_j = sample(rng, m_joint, MH(), params.n_samples; progress = false)
-        chains[:telemetry_and_survey] = chn_j
+        # The joint models declare three survey coefficients in addition to the
+        # population parameters (see todo.md 1.6). They are prior-only, but the
+        # proposal still has to span them or those coordinates cannot move.
+        spl = movement_sampler(
+            vcat([5.0, 2.0, 1.0], POPULATION_PRIOR_SCALES), params)
+        verbose && println("  Sampling $(params.n_samples) draws " *
+                          " (discarding $(params.n_warmup) warmup)...")
+        chn_j = sample(rng, m_joint, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
+                chains[:telemetry_and_survey] = chn_j
+        report_chain_health("telemetry_and_survey", chn_j, params)
         verbose && println("  Joint model complete.")
     end
 
     return (models = models, chains = chains)
 end
 
+"""
+    _error_note(e, limit::Int = 200) -> String
+
+A one-line, length-capped rendering of an exception, for use in the `catch` notes
+that let an optional dashboard panel fail without ending the run.
+
+Interpolating an exception directly is unsafe here. A `FieldError` or
+`MethodError` embeds the full type of every argument, and those types carry the
+entire loaded dataset -- so a single missing field on a 7517-unit mesh produced
+about 200 KB of type signature on one line, burying the actual message and every
+other line of output. Truncating keeps the useful part, which is the exception
+type and the reason it failed.
+"""
+_error_note(e, limit::Int = 200) =
+    (s = first(sprint(showerror, e), limit); length(sprint(showerror, e)) > limit ? s * " …" : s)
+
 # =============================================================================
 # Phase 3: Kernel Construction
 # =============================================================================
 
 """
+    posterior_kernel_draws(chain) -> (velocity, diffusion, gamma)
+
+Reduce a fitted posterior chain to the three per-draw series the transition
+kernel is parameterised by.
+
+The models are population-level, so the kernel parameters are the fitted `mu_*`
+draws with the models' own bounds applied:
+
+    velocity_i  = clamp(mu_velocity[i],  0, 0.95)
+    diffusion_i = max(mu_diffusion[i],   0)
+    gamma_i     = mu_gamma[i]
+
+`sigma_*` and `z_*` are read **if present** and folded in, so a chain from an
+older hierarchical model still reduces correctly, but their absence is an
+ordinary outcome rather than a warning. There is no `alpha`/`rho` derivation
+here: it lives in `movement_alpha_rho`, shared with the models, because a model
+and the code reporting its posterior must not each re-derive the same transform.
+
+Two details of the chain layout are handled here rather than at the call site,
+because both fail silently if missed:
+
+  * Keys are wrapped (`Parameter(mu_velocity)`, `Extra(:accepted)`), so a plain
+    string comparison matches nothing and the bookkeeping columns as well.
+  * A vector-valued parameter reads back as one vector per draw nested in a
+    trailing singleton axis, which needs unwrapping before it is numeric.
+"""
+function posterior_kernel_draws(chain)
+    n_draws = max(1, size(Array(chain), 1))
+
+    # Chain keys are not plain names: the sampler wraps each one as
+    # `Parameter(name)` or `Extra(name)`, so matching on the raw key would both
+    # fail and pick up the internal bookkeeping columns.
+    function parname(key)
+        s = string(key)
+        open = findfirst('(', s)
+        open === nothing && return s
+        close = findlast(')', s)
+        close === nothing && return s
+        return s[(open + 1):(close - 1)]
+    end
+    lookup = Dict{String,Any}(parname(k) => k for k in keys(chain))
+
+    "Posterior draws of a scalar parameter, one per draw, or `nothing` if absent."
+    function scalar_draws(name::String)
+        key = get(lookup, name, nothing)
+        key === nothing && return nothing
+        d = vec(Array(chain[key]))
+        length(d) == n_draws || return nothing
+        return Float64.(d)
+    end
+
+    "Per-individual effects as an n_draws x n_individuals matrix, or nothing."
+    function effect_draws(name::String)
+        key = get(lookup, name, nothing)
+        key === nothing && return nothing
+        a = Array(chain[key])
+        # A vector-valued parameter comes back as one vector per draw inside a
+        # trailing singleton axis; unwrap the individual axis first.
+        if eltype(a) <: AbstractVector
+            cols = [Float64.(collect(v)) for v in a]
+            isempty(cols) && return nothing
+            length(unique(length.(cols))) == 1 || return nothing
+            # One row per draw, one column per individual. `hcat` puts the draws
+            # in columns, so the result is transposed to the layout used below.
+            return permutedims(reduce(hcat, cols))
+        end
+        ndims(a) == 2 || return nothing
+        return Float64.(a)
+    end
+
+    # A missing `mu_*` is a real problem: the kernel cannot be built without it.
+    mu_v = scalar_draws("mu_velocity")
+    mu_d = scalar_draws("mu_diffusion")
+    mu_g = scalar_draws("mu_gamma")
+    missing_mus = String[]
+    mu_v === nothing && push!(missing_mus, "mu_velocity")
+    mu_d === nothing && push!(missing_mus, "mu_diffusion")
+    mu_g === nothing && push!(missing_mus, "mu_gamma")
+    isempty(missing_mus) || error(
+        "posterior_kernel_draws: chain is missing " * join(missing_mus, ", ") *
+        ", so no transition kernel can be built from it. Chain keys were: " *
+        join(sort!(collect(keys(lookup))), ", ")
+    )
+
+    # `sigma_*` and `z_*` are optional: present in a chain from an older
+    # hierarchical model, absent from the current population-level one.
+    sg_v = scalar_draws("sigma_velocity")
+    sg_d = scalar_draws("sigma_diffusion")
+    sg_g = scalar_draws("sigma_gamma")
+    z_v  = effect_draws("z_velocity")
+    z_d  = effect_draws("z_diffusion")
+    z_g  = effect_draws("z_gamma")
+
+    "Fold optional dispersion and individual effects in, then apply the model's clamp."
+    function combine(mu, sigma, z, lo::Float64, hi::Float64)
+        (sigma === nothing || z === nothing || size(z, 1) != length(mu)) && return mu
+        col_m = reshape(mu, :, 1)
+        col_s = reshape(sigma, :, 1)
+        return vec(mean(clamp.(col_m .+ col_s .* z, lo, hi); dims = 2))
+    end
+
+    velocity  = combine(mu_v, sg_v, z_v, 0.0, 0.95)
+    diffusion = combine(mu_d, sg_d, z_d, 0.0, Inf)
+    # Gamma is unbounded in the model, so it is averaged without a clamp.
+    gamma = (sg_g === nothing || z_g === nothing || size(z_g, 1) != length(mu_g)) ?
+        copy(mu_g) :
+        vec(mean(reshape(mu_g, :, 1) .+ reshape(sg_g, :, 1) .* z_g; dims = 2))
+
+    return velocity, diffusion, gamma
+end
+
+"""
     extract_transition_kernels(loaded, fitted, params) -> NamedTuple
 
-Phase 3 of the pipeline. Extracts posterior mean parameters (alpha, rho,
-gamma) from MCMC chains and constructs group-stratified stochastic
-transition kernels:
+Phase 3 of the pipeline. Extracts the posterior transition kernel and parameter
+summaries from the fitted MCMC chains.
 
-    P_g = (1 - rho_g)[(1 - alpha_g) T_diff + alpha_g A_g(eta)] + rho_g I
-
-When MCMC posteriors do not resolve group-level differences, biological
-priors from `params.group_*` are applied directly as informed defaults.
-
-# Arguments
-- `loaded`: Output of `load_movement_data`.
-- `fitted`: Output of `fit_movement_models`.
-- `params`: Configuration NamedTuple. Relevant keys: `group_labels`,
-  `group_alpha`, `group_rho`, `group_gamma`, `verbose`.
+Single-group model: all individuals share one parameter set. To fit group-specific
+movement, call `run_movement_analysis` once per group with that group's data and
+combine the results externally; nothing here borrows parameters across groups.
 
 # Returns
-`NamedTuple` with: `P_kernel`, `grp_name_lookup`, `alpha_hat`,
-`rho_hat`, `gamma_hat`, `G`.
+\$NamedTuple\$ with:
+- \$P_kernel\$: the posterior-mean stochastic transition kernel
+- \$grp_name_lookup\$: Dict mapping group index -> label (empty for single group)
+- \$alpha_hat\$, \$rho_hat\$, \$gamma_hat\$: posterior mean advection, residence, HSI
+- \$alpha_samples\$, \$rho_samples\$, \$gamma_samples\$: posterior draws, one per draw
+- \$active_chain\$: the chain used
 """
 function extract_transition_kernels(loaded, fitted, params)::NamedTuple
     verbose = params.verbose
     chains  = fitted.chains
 
+    # Choose the first available chain (prefer SSA > joint > telemetry)
     active_chain = if haskey(chains, :ssa_telemetry)
         chains[:ssa_telemetry]
     elseif haskey(chains, :ssa_and_survey)
@@ -1243,195 +1474,70 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
         nothing
     end
 
-    # Build integer-keyed group name lookup from the loaded group_map
-    grp_name_lookup = Dict{Int, String}()
-    for (k, v) in loaded.group_map
-        if k isa String && v isa Integer
-            grp_name_lookup[v] = k
-        elseif k isa Integer && v isa String
-            grp_name_lookup[k] = v
-        else
-            grp_name_lookup[Int(v)] = string(k)
-        end
-    end
-    G = isempty(grp_name_lookup) ?
-        length(params.group_labels) : maximum(keys(grp_name_lookup))
+    # Every downstream phase indexes the kernel and reads alpha/rho/gamma as
+    # scalars, so there is no meaningful "empty" result to hand back. Naming the
+    # modes that were requested makes the cause obvious: a survey-dependent mode
+    # with no survey file is skipped, and could be the only one asked for.
+    active_chain === nothing && error(
+        "no fitted model produced a posterior chain; requested modes were " *
+        join(string.(keys(chains)), ", ", " and ") *
+        ". Check that a mode with a readable input was requested -- the " *
+        "survey-dependent approaches need `surveydata_file`."
+    )
 
-    # Extract posterior mean vector for a named parameter prefix
-    function _extract_mean_vec(prefix::String, G_count::Int, defval::Float64)
-        vals     = fill(defval, G_count)
-        if active_chain === nothing
-            return vals
-        end
-        chn_keys = keys(active_chain)
-        found    = false
-        for g in 1:G_count
-            matches = filter(
-                k -> occursin(prefix, string(k)) &&
-                     (G_count == 1 || occursin("[$g]", string(k))),
-                chn_keys
-            )
-            if !isempty(matches)
-                raw = Array(active_chain[first(matches)])
-                m   = raw isa AbstractMatrix{<:Real} ?
-                      vec(mean(raw; dims = 1)) : mean(raw)
-                if m isa AbstractVector && length(m) >= g
-                    vals[g] = Float64(m[g])
-                elseif m isa AbstractVector && !isempty(m)
-                    vals[g] = Float64(m[1])
-                elseif m isa Real
-                    vals[g] = Float64(m)
-                end
-                found = true
-            end
-        end
-        # Fallback: any matching key vectorised across groups
-        if !found || all(v -> v == defval, vals)
-            fall = filter(k -> occursin(prefix, string(k)), chn_keys)
-            if !isempty(fall)
-                raw = Array(active_chain[first(fall)])
-                m   = raw isa AbstractMatrix{<:Real} ?
-                      vec(mean(raw; dims = 1)) : mean(raw)
-                if m isa AbstractVector && length(m) == G_count
-                    vals .= Float64.(m)
-                elseif m isa Real
-                    vals .= fill(Float64(m), G_count)
-                end
-            end
-        end
-        return vals
+    verbose && println("\n[Phase 3] Extracting transition kernels from posterior...")
+
+    verbose && println("  Extracting posterior means and draws from the active chain...")
+
+    active_chain = _get_active_chain(chains)
+    if active_chain === nothing
+        # Every downstream phase indexes the kernel and reads alpha/rho/gamma as
+        # scalars, so there is no meaningful "empty" result to hand back. Naming
+        # the modes that were asked for makes the cause obvious: a survey-dependent
+        # mode with no survey file is skipped, and could be the only one requested.
+        error("no fitted model produced a posterior chain; requested modes were " *
+              join(string.(keys(chains)), ", ", " and ") *
+              " (asked for: " * join(string.(get(loaded, :model_modes, Symbol[])), ", ") * ")")
     end
 
-    v_mean = _extract_mean_vec("velocity",  G, 0.3)
-    d_mean = _extract_mean_vec("diffusion", G, 0.1)
-    g_mean = _extract_mean_vec("gamma",     G, 1.0)
+    v_draws, d_draws, g_draws = posterior_kernel_draws(active_chain)
 
-    tot       = v_mean .+ d_mean .+ 1e-6
-    alpha_hat = clamp.(v_mean ./ tot,        0.0,  1.0)
-    rho_hat   = clamp.(1.0 ./ (1.0 .+ tot), 0.01, 0.95)
+    # `alpha`/`rho` come from the same helper the models use. This line used to
+    # re-derive them and got `rho` wrong -- `1/(v+d)` instead of `1/(1+v+d)` --
+    # so the reported and propagated residence parameter was a different quantity
+    # from the one the likelihood was fitted with. See todo.md 1.1.
+    alpha_samples, rho_samples = movement_alpha_rho(v_draws, d_draws)
+    gamma_samples = g_draws
 
-    # Apply biological priors when MCMC posteriors are uninformative
-    n_groups = min(G, length(params.group_labels))
-    for g in 1:n_groups
-        lbl = lowercase(get(grp_name_lookup, g, params.group_labels[g]))
-        if all(v -> v ≈ 0.3, v_mean)
-            alpha_hat[g] = params.group_alpha[
-                min(g, length(params.group_alpha))
-            ]
-            rho_hat[g]   = params.group_rho[
-                min(g, length(params.group_rho))
-            ]
-            g_mean[g]    = params.group_gamma[
-                min(g, length(params.group_gamma))
-            ]
-        else
-            # Label-based soft overrides for known demographic group names
-            if occursin("female", lbl)
-                alpha_hat[g] = 0.25
-                rho_hat[g]   = 0.60
-                g_mean[g]    = 0.80
-            elseif occursin("male", lbl)
-                alpha_hat[g] = 0.65
-                rho_hat[g]   = 0.15
-                g_mean[g]    = 1.50
-            elseif occursin("immature", lbl)
-                alpha_hat[g] = 0.30
-                rho_hat[g]   = 0.35
-                g_mean[g]    = 0.50
-            end
-        end
-    end
+    g_mean    = mean(g_draws)
+    alpha_hat = mean(alpha_samples)
+    rho_hat   = mean(rho_samples)
 
+    # No label-seeded or config-seeded overrides.
+    # Parameters are reported exactly as fitted.
     if verbose
-        println("\n[Phase 3] Posterior parameters ($G group(s)):")
-        for g in 1:G
-            lbl = get(grp_name_lookup, g, "Group $g")
-            println(
-                "  $lbl: alpha=$(round(alpha_hat[g]; digits=4)), " *
-                "rho=$(round(rho_hat[g]; digits=4)), " *
-                "gamma=$(round(g_mean[g]; digits=4))"
-            )
-        end
+        println("\n[Phase 3] Posterior parameters:")
+        println("  alpha=$(round(alpha_hat; digits=4)), " *
+                "rho=$(round(rho_hat; digits=4)), " *
+                "gamma=$(round(g_mean; digits=4))")
     end
 
+    # Build the single transition kernel from posterior means
     P_kernel = construct_stochastic_transition_kernel(
         loaded.W, loaded.hsi_vec;
         gamma     = g_mean,
         residence = rho_hat,
         advection = alpha_hat,
-        land_mask = loaded.land_mask
+        land_mask = loaded.land_mask,
     )
-
-    # Extract posterior draws across chains for uncertainty quantification
-    chn_keys = keys(active_chain)
-    raw_arr  = Array(active_chain)
-    n_draws  = max(1, size(raw_arr, 1))
-    alpha_samples = zeros(Float64, n_draws, G)
-    rho_samples   = zeros(Float64, n_draws, G)
-    gamma_samples = zeros(Float64, n_draws, G)
-
-    for g in 1:G
-        v_matches = filter(
-            k -> occursin("velocity", string(k)) &&
-                 (G == 1 || occursin("[$g]", string(k))),
-            chn_keys
-        )
-        d_matches = filter(
-            k -> occursin("diffusion", string(k)) &&
-                 (G == 1 || occursin("[$g]", string(k))),
-            chn_keys
-        )
-        g_matches = filter(
-            k -> occursin("gamma", string(k)) &&
-                 (G == 1 || occursin("[$g]", string(k))),
-            chn_keys
-        )
-
-        if !isempty(v_matches) && !isempty(d_matches)
-            v_draws = vec(Array(active_chain[first(v_matches)]))
-            d_draws = vec(Array(active_chain[first(d_matches)]))
-            for s in 1:min(n_draws, length(v_draws), length(d_draws))
-                v_raw = v_draws[s]
-                v_val = v_raw isa AbstractArray ?
-                        (length(v_raw) >= g ? v_raw[g] : v_raw[1]) : v_raw
-                d_raw = d_draws[s]
-                d_val = d_raw isa AbstractArray ?
-                        (length(d_raw) >= g ? d_raw[g] : d_raw[1]) : d_raw
-                tot = Float64(v_val) + Float64(d_val) + 1e-6
-                alpha_samples[s, g] = clamp(Float64(v_val) / tot, 0.0, 1.0)
-                rho_samples[s, g]   = clamp(1.0 / (1.0 + tot), 0.01, 0.95)
-            end
-        else
-            rng_p = MersenneTwister(params.seed + g * 11)
-            alpha_samples[:, g] = clamp.(
-                alpha_hat[g] .+ 0.04 .* randn(rng_p, n_draws), 0.01, 0.99
-            )
-            rho_samples[:, g] = clamp.(
-                rho_hat[g] .+ 0.04 .* randn(rng_p, n_draws), 0.01, 0.99
-            )
-        end
-
-        if !isempty(g_matches)
-            g_draws = vec(Array(active_chain[first(g_matches)]))
-            for s in 1:min(n_draws, length(g_draws))
-                g_raw = g_draws[s]
-                g_val = g_raw isa AbstractArray ?
-                        (length(g_raw) >= g ? g_raw[g] : g_raw[1]) : g_raw
-                gamma_samples[s, g] = Float64(g_val)
-            end
-        else
-            rng_g = MersenneTwister(params.seed + g * 23)
-            gamma_samples[:, g] = g_mean[g] .+ 0.12 .* randn(rng_g, n_draws)
-        end
-    end
 
     return (
         P_kernel        = P_kernel,
-        grp_name_lookup = grp_name_lookup,
+        grp_name_lookup = Dict{Int, String}(),
         alpha_hat       = alpha_hat,
         rho_hat         = rho_hat,
         gamma_hat       = g_mean,
-        G               = G,
+        G               = 1,
         alpha_samples   = alpha_samples,
         rho_samples     = rho_samples,
         gamma_samples   = gamma_samples,
@@ -1458,7 +1564,7 @@ bottleneck detection:
 # Arguments
 - `loaded`: Output of `load_movement_data`.
 - `kernels`: Output of `extract_transition_kernels`.
-- `params`: Relevant keys: `max_paths`, `path_method`, `smooth_paths`,
+- `params`: Relevant keys: `max_paths`, `path_methods`, `smooth_paths`,
   `compute_stochastic`, `compute_bottlenecks`, `n_stochastic_draws`,
   `hsi_se`, `seed`, `verbose`.
 
@@ -1487,12 +1593,12 @@ function reconstruct_paths_and_diagnostics(
     sample_tags = all_tags[1:n_sample]
 
     verbose && println(
-        "\n[Phase 4] Reconstructing $(params.path_method) trajectories " *
+        "\n[Phase 4] Reconstructing $(join(string.(params.path_methods), ", ")) trajectories " *
         "for $n_sample / $(length(all_tags)) individuals..."
     )
 
     max_k_dyn = 0
-if _get(params, :dynamic_kernels, false)
+if params.dynamic_kernels
         for tid in sample_tags
             sub_obs = filter(:tagid => ==(tid), obs_df)
             isempty(sub_obs) && continue
@@ -1527,7 +1633,7 @@ if _get(params, :dynamic_kernels, false)
               P_kernel[clamp(grp, 1, length(P_kernel))] : P_kernel
 
         # Concatenate multi-segment trajectories for this individual
-        full_path = if _get(params, :hmm_smoothing, false) && nrow(sub_obs) > 1
+        full_path = if params.hmm_smoothing && nrow(sub_obs) > 1
             # Global multi-segment Hidden Markov Model Viterbi smoothing
             times = Int[1]
             cum_t = 1
@@ -1584,7 +1690,7 @@ if _get(params, :dynamic_kernels, false)
                     predict_path(
                         P_seg, row.release, row.recapture, row.k;
                         centroids = cents_mesh,
-                        method    = params.path_method,
+                        method    = first(params.path_methods),
                         land_mask = land_mask
                     )
                 end
@@ -1606,7 +1712,7 @@ if _get(params, :dynamic_kernels, false)
         t_rel_first = hasproperty(first_row, :rel_time) ? first_row.rel_time : NaN
         hsi_first   = isnan(t_rel_first) ? hsi_vec :
                       _resolve_hsi_for_time(loaded, t_rel_first)
-        prop_hsi  = _get(params, :propagate_hsi_error, true) && params.hsi_se > 0.0
+        prop_hsi  = params.propagate_hsi_error && params.hsi_se > 0.0
         n_hsi_m   = prop_hsi ? min(params.n_stochastic_draws, 5) : 1
 
         corr_accum = nothing
@@ -1638,7 +1744,7 @@ if _get(params, :dynamic_kernels, false)
             else
                 P_k
             end
-            corr_d = if _get(params, :dynamic_kernels, false)
+            corr_d = if params.dynamic_kernels
                 k_val = max(1, first_row.k)
                 P_dyn_seq = P_dyn_seq_cache[1:k_val]
                 predict_dynamic_corridor(
@@ -1659,7 +1765,7 @@ if _get(params, :dynamic_kernels, false)
         reconstructed_corridors[string(tid)] = corr_accum ./ n_hsi_m
 
         # Optional stochastic least-cost path ensemble
-        if params.compute_stochastic && cents_planar !== nothing
+        if wants_diagnostic(params, :stochastic) && cents_planar !== nothing
             try
                 stoch_res = astar_stochastic_least_cost_path(
                     cents_planar, W,
@@ -1671,6 +1777,8 @@ if _get(params, :dynamic_kernels, false)
                     land_mask        = land_mask,
                     centroids_lonlat = cents_lonlat,
                     smooth           = params.smooth_paths,
+                    structural_uncertainty = params.add_structural_uncertainty,
+                    structural_uncertainty_scale = params.structural_uncertainty_scale,
                     seed             = Int(
                         params.seed + abs(hash(string(tid))) % 10_000
                     )
@@ -1700,7 +1808,7 @@ if _get(params, :dynamic_kernels, false)
     # -- 4b. Domain-Wide Posterior Averaging & Bottleneck Detection ----------
     domain_bottlenecks = nothing
 
-    if params.compute_bottlenecks && cents_planar !== nothing
+    if wants_diagnostic(params, :bottlenecks) && cents_planar !== nothing
         verbose && println("\n[Phase 4b] Domain bottleneck detection...")
         n_obs              = nrow(obs_df)
         tag_sample_indices = Int[]
@@ -1753,6 +1861,8 @@ if _get(params, :dynamic_kernels, false)
                 land_mask        = land_mask,
                 centroids_lonlat = cents_lonlat,
                 smooth           = params.smooth_paths,
+                structural_uncertainty = params.add_structural_uncertainty,
+                structural_uncertainty_scale = params.structural_uncertainty_scale,
                 seed             = params.seed + idx
             )
             C_domain .+= res_i.corridor_prob
@@ -1832,7 +1942,7 @@ if _get(params, :dynamic_kernels, false)
 end
 
 # =============================================================================
-# Phase 5: Advanced Diagnostics (Circuit Theory & Wavelets)
+# Phase 5: Advanced Diagnostics (Circuit Theory)
 # =============================================================================
 
 """
@@ -1840,7 +1950,7 @@ end
 
 Phase 5 of the pipeline. Optionally computes:
 
-**Circuit Theory** (`params.compute_circuit = true`):
+**Circuit Theory** (`:circuit` in `params.diagnostics`):
 - Multi-pair electrical current density I = C nabla V across all
   mark-recapture source-sink pairs.
 - Identifies ecological pinch-points (top 10% current density).
@@ -1848,18 +1958,14 @@ Phase 5 of the pipeline. Optionally computes:
     HSI_draw ~ N(hsi_mean, hsi_se^2)
   over `n_stochastic_draws * 2` replicates.
 
-**Spectral Graph Wavelets** (`params.compute_wavelets = true`):
-- Multi-scale Chebyshev SGWT decomposition on HSI (3 scales, order 25).
-- BayesShrink adaptive soft-threshold spatial denoising.
-
 # Arguments
 - `loaded`: Output of `load_movement_data`.
 - `path_results`: Output of `reconstruct_paths_and_diagnostics`.
-- `params`: Relevant keys: `compute_circuit`, `compute_wavelets`,
+- `params`: Relevant keys: `diagnostics`,
   `n_stochastic_draws`, `hsi_se`, `seed`, `verbose`.
 
 # Returns
-`NamedTuple` with `circuit` and `wavelets` (each `nothing` if not computed).
+`NamedTuple` with `circuit` (or `nothing` if not computed).
 """
 function compute_advanced_diagnostics(
     loaded, path_results, params
@@ -1875,10 +1981,9 @@ function compute_advanced_diagnostics(
     hsi_se_v  = fill(params.hsi_se, n_spatial)
 
     circuit_res::Union{NamedTuple, Nothing} = nothing
-    wavelet_res::Union{NamedTuple, Nothing} = nothing
 
     # -- Circuit Theory ------------------------------------------------------
-    if params.compute_circuit
+    if wants_diagnostic(params, :circuit)
         verbose && println(
             "\n[Phase 5a] Computing Circuit Theory Current Density..."
         )
@@ -1927,44 +2032,14 @@ function compute_advanced_diagnostics(
                 n_robust        = n_robust,
             )
         catch e
-            verbose && println("  (Circuit computation note: $e)")
+            verbose && println("  (Circuit computation note: $(_error_note(e)))")
         end
     end
 
-    # -- Chebyshev Spectral Graph Wavelets -----------------------------------
-    if params.compute_wavelets
-        verbose && println(
-            "\n[Phase 5b] Multi-Scale Chebyshev Spectral Graph Wavelets..."
-        )
-        try
-            res_hsi = spectral_graph_wavelet_transform(
-                W, hsi_vec; num_scales = 3, order = 25
-            )
-            verbose && println(
-                "  SGWT decomposed across 3 scales (Chebyshev order 25)."
-            )
-
-            noisy_hsi = hsi_vec .+ 0.10 .* randn(
-                MersenneTwister(params.seed + 101), n_spatial
-            )
-            hsi_clean, _, sigma_est = denoise_spatial_signal_wavelet(
-                W, noisy_hsi; threshold_rule = :bayesshrink
-            )
-            verbose && println(
-                "  BayesShrink noise sigma: $(round(sigma_est; digits=4))"
-            )
-
-            wavelet_res = (
-                sgwt            = res_hsi,
-                denoised_hsi    = hsi_clean,
-                estimated_noise = sigma_est,
-            )
-        catch e
-            verbose && println("  (Wavelet decomposition note: $e)")
-        end
-    end
-
-    return (circuit = circuit_res, wavelets = wavelet_res)
+    # The trailing comma is required: a one-element parenthesised named tuple
+    # without it collapses to the value itself, so `(circuit = nothing)` would
+    # return a bare `nothing` and `diagnostics.circuit` would be unreachable.
+    return (circuit = circuit_res,)
 end
 
 # =============================================================================
@@ -1991,10 +2066,9 @@ rendering errors so the pipeline is never aborted. Exports:
 - Hydrodynamic stratification dashboard (when domain was resharded).
 - Circuit current density and posterior pinch-point maps.
 - Domain-wide bottleneck conduit heatmap.
-- Multi-scale SGWT wavelet decomposition dashboard.
 """
 function export_dashboards(
-    loaded, kernels, path_results, diagnostics, params
+    loaded, kernels, path_results, diagnostics, params, validation = nothing
 )::Union{NamedTuple, Nothing}
     params.render_html || return nothing
     verbose = params.verbose
@@ -2266,13 +2340,14 @@ function export_dashboards(
             max_paths           = max(100, length(all_paths_rich)),
             max_empirical_paths = max(500, length(emp_tracks)),
             hsi                 = hsi_vec,
+            dark_mode           = params.dark_mode,
             title               = "$spp Movement Trajectories" *
                                   reshard_lbl * depth_lbl
         )
         save_html(map_obj, html_file)
         verbose && println("  Paths dashboard: $html_file")
     catch e
-        verbose && println("  (Leaflet paths note: $e)")
+        verbose && println("  (Leaflet paths note: $(_error_note(e)))")
     end
 
     # -- Movement ecology statistics & phenology ----------------------
@@ -2294,7 +2369,7 @@ function export_dashboards(
         )
         verbose && println("  Summary CSV table: $csv_file")
     catch e
-        verbose && println("  (Summary CSV note: $e)")
+        verbose && println("  (Summary CSV note: $(_error_note(e)))")
     end
 
     # -- Movement summary diagnostics dashboard -----------------------
@@ -2312,7 +2387,7 @@ function export_dashboards(
             )
         catch e
             verbose && println(
-                "  (Summary diagnostics note: $e)"
+                "  (Summary diagnostics note: $(_error_note(e)))"
             )
         end
     end
@@ -2327,7 +2402,7 @@ function export_dashboards(
         )
         verbose && println("  Posterior uncertainty: $post_file")
     catch e
-        verbose && println("  (Posterior uncertainty note: $e)")
+        verbose && println("  (Posterior uncertainty note: $(_error_note(e)))")
     end
 
     # -- Directed flow network dashboard ------------------------------
@@ -2340,7 +2415,7 @@ function export_dashboards(
         )
         verbose && println("  Network flow diagram: $net_file")
     catch e
-        verbose && println("  (Network flow note: $e)")
+        verbose && println("  (Network flow note: $(_error_note(e)))")
     end
 
     # -- Interactive two-click corridor explorer -----------------------------
@@ -2352,13 +2427,36 @@ function export_dashboards(
             hsi             = hsi_vec,
             empirical_paths = emp_tracks,
             group_labels    = grp_labels,
+            dark_mode       = params.dark_mode,
             title           = "$spp Dynamic Migration Corridor" *
                               reshard_lbl * depth_lbl
         )
         save_html(corr_map, corr_file)
         verbose && println("  Corridor dashboard: $corr_file")
     catch e
-        verbose && println("  (Corridor dashboard note: $e)")
+        verbose && println("  (Corridor dashboard note: $(_error_note(e)))")
+    end
+
+    # -- Posterior path ensemble --------------------------------------------
+    # Only produced when the :bayesian_ensemble diagnostic was requested, and
+    # only worth drawing when it actually produced paths for at least one
+    # individual. `validation` is `nothing` when neither it nor :validation ran.
+    ensemble = isnothing(validation) ? nothing :
+               get(validation, :bayesian_ensemble, nothing)
+    if !isnothing(ensemble) && !isempty(ensemble.ensemble_paths)
+        try
+            ens_file = joinpath(out_dir, "movement_posterior_path_ensemble.html")
+            ens_map  = leaflet_posterior_path_ensemble(
+                ensemble, au_mesh;
+                hsi   = hsi_vec,
+                dark_mode = params.dark_mode,
+                title = "$spp Posterior Path Ensemble" * reshard_lbl * depth_lbl
+            )
+            save_html(ens_map, ens_file)
+            verbose && println("  Posterior ensemble dashboard: $ens_file")
+        catch e
+            verbose && println("  (Posterior ensemble note: $(_error_note(e)))")
+        end
     end
 
     # -- Hydrodynamic dashboard (only when resharded) ------------------------
@@ -2367,12 +2465,13 @@ function export_dashboards(
             hydro_file = joinpath(out_dir, "hydrodynamic_hex_dashboard.html")
             dash = leaflet_hydrodynamic_dashboard(
                 loaded.resharded_hydro, au_mesh;
-                title = "Hydrodynamics & Stratification (Fine Hexagons)"
+                title = "Hydrodynamics & Stratification (Fine Hexagons)",
+                dark_mode = params.dark_mode
             )
             save_html(dash, hydro_file)
             verbose && println("  Hydrodynamic dashboard: $hydro_file")
         catch e
-            verbose && println("  (Hydrodynamic dashboard note: $e)")
+            verbose && println("  (Hydrodynamic dashboard note: $(_error_note(e)))")
         end
     end
 
@@ -2387,11 +2486,12 @@ function export_dashboards(
                 pinch_score  = circ.pinch_score,
                 centroids    = path_results.cents_lonlat,
                 output_html  = circ_file,
+                dark_mode    = params.dark_mode,
                 title        = "$spp Migratory Current Density & Pinch-Points"
             )
             verbose && println("  Current density dashboard: $circ_file")
         catch e
-            verbose && println("  (Circuit density note: $e)")
+            verbose && println("  (Circuit density note: $(_error_note(e)))")
         end
 
         try
@@ -2400,11 +2500,12 @@ function export_dashboards(
                 mesh, circ.stochastic;
                 prob_threshold = 0.80,
                 output_html    = stoch_file,
+                dark_mode      = params.dark_mode,
                 title          = "$spp Posterior Migratory Flux & Pinch-Points"
             )
             verbose && println("  Stochastic circuit dashboard: $stoch_file")
         catch e
-            verbose && println("  (Stochastic circuit note: $e)")
+            verbose && println("  (Stochastic circuit note: $(_error_note(e)))")
         end
     end
 
@@ -2420,130 +2521,183 @@ function export_dashboards(
                 centroids    = path_results.cents_lonlat,
                 output_html  = bn_file,
                 title        = "$spp Domain-Wide Pathways & Bottlenecks",
+                dark_mode    = params.dark_mode,
                 legend_title = "Transit Density (C)"
             )
             verbose && println("  Bottleneck dashboard: $bn_file")
         catch e
-            verbose && println("  (Bottleneck rendering note: $e)")
+            verbose && println("  (Bottleneck rendering note: $(_error_note(e)))")
         end
     end
 
-    # -- Multi-scale wavelet dashboard ---------------------------------------
-    if !isnothing(diagnostics.wavelets)
-        wv = diagnostics.wavelets
-        try
-            wv_file = joinpath(out_dir, "movement_wavelet_dashboard.html")
-            leaflet_graph_wavelet_dashboard(
-                mesh, wv.sgwt;
-                reconstruction = wv.denoised_hsi,
-                signal_name    = "Habitat Suitability (HSI)",
-                title          = "$spp Multi-Scale Habitat (HSI) Wavelets",
-                output_html    = wv_file
-            )
-            verbose && println("  Wavelet dashboard: $wv_file")
-        catch e
-            verbose && println("  (Wavelet dashboard note: $e)")
-        end
-    end
+    # -- Speeds, Directions, Home Range, Corridors --------------------------
+    # `loaded` exposes the mesh as `mesh`, suitability as `hsi_vec`, and the
+    # per-unit current fields under `resharded_hydro`. The guards below use
+    # `hasproperty` rather than `isnothing` on a named field, so a dataset
+    # without hydrodynamics simply skips these panels instead of erroring.
+    au_mesh = loaded.mesh
 
-    # -- New Missing Visualizations: Speeds, Directions, Home Range, Corridors --
-    
     # 1. Step Diagnostics (Speeds, Turning Angles)
     if !isempty(path_results.paths)
         try
             step_file = joinpath(out_dir, "movement_step_diagnostics.html")
             map_obj = leaflet_step_diagnostics(
-                path_results.paths, loaded.au_mesh;
+                path_results.paths, au_mesh;
+                dark_mode = params.dark_mode,
                 title = "$spp Speeds and Directions Distributions"
             )
             save_html(map_obj, step_file)
             verbose && println("  Step diagnostics dashboard: $step_file")
         catch e
-            verbose && println("  (Step diagnostics note: $e)")
+            verbose && println("  (Step diagnostics note: $(_error_note(e)))")
         end
     end
-    
+
     # 2. Regional Connectivity & Home Range Estimates
-    try
-        conn_file = joinpath(out_dir, "movement_regional_connectivity.html")
-        map_obj = leaflet_regional_connectivity(
-            loaded.au_mesh, path_results.paths;
-            title = "$spp Regional Connectivity and Home Range Estimates"
+    # The panel is a heatmap of the region-to-region matrix, so it is only
+    # meaningful once management units are configured. Without them the whole
+    # domain collapses to a single region, whose 1x1 matrix describes the mesh
+    # rather than connectivity, so the panel is reported as skipped instead of
+    # being rendered from a placeholder.
+    has_regions = !isnothing(loaded.region_labels) && !isempty(loaded.region_labels)
+    if has_regions
+        try
+            conn_file = joinpath(out_dir, "movement_regional_connectivity.html")
+            map_obj = leaflet_regional_connectivity(
+                kernels.P_kernel;
+                dark_mode = params.dark_mode,
+                title = "$spp Regional Connectivity and Home Range Estimates"
+            )
+            save_html(map_obj, conn_file)
+            verbose && println("  Regional connectivity dashboard: $conn_file")
+        catch e
+            verbose && println("  (Regional connectivity note: $(_error_note(e)))")
+        end
+    elseif verbose
+        println(
+            "  (Regional connectivity skipped: set `region_labels` and " *
+            "`region_polygon_files` in the config file to render this panel)"
         )
-        save_html(map_obj, conn_file)
-        verbose && println("  Regional connectivity dashboard: $conn_file")
-    catch e
-        verbose && println("  (Regional connectivity note: $e)")
     end
 
     # 3. Advection Velocity Field
-    if !isnothing(loaded.advection_x) && !isnothing(loaded.advection_y)
+    # `leaflet_advection_arrows` takes the mesh plus optional fields; the current
+    # components are passed as the Gamma matrix it accepts, and the mesh carries
+    # the polygons it draws arrows over.
+    hydro = get(loaded, :resharded_hydro, nothing)
+    if hydro !== nothing && hasproperty(hydro, :advection_u)
         try
             adv_file = joinpath(out_dir, "movement_advection_velocity.html")
-            map_obj = leaflet_velocity_field(
-                loaded.advection_x, loaded.advection_y, loaded.au_mesh;
-                title = "$spp Advection Drift & Velocity Field Vectors"
+            map_obj = leaflet_advection_arrows(
+                au_mesh;
+                hsi = loaded.hsi_vec,
+                Gamma = hydro.advection_u,
+                cmap    = params.cmap,
+                    title = "$spp Advection Drift & Velocity Field Vectors",
+                dark_mode = params.dark_mode
             )
             save_html(map_obj, adv_file)
             verbose && println("  Advection velocity dashboard: $adv_file")
         catch e
-            verbose && println("  (Advection velocity note: $e)")
+            verbose && println("  (Advection velocity note: $(_error_note(e)))")
         end
-        
-        try
-            ad_file = joinpath(out_dir, "movement_ad_ratio_distribution.html")
-            map_obj = leaflet_ad_ratio_distribution(
-                loaded.advection_x, loaded.advection_y, 0.1;
-                title = "$spp Advection/Diffusion Ratio"
+    end
+
+    if hydro !== nothing &&
+       all(k -> hasproperty(hydro, k), (:advection_u, :kappa_v))
+        A = vec(hydro.advection_u)
+        K = vec(hydro.kappa_v)
+        # The advection/diffusion ratio is only defined where both fields are
+        # actually populated. A resharded mesh can leave diffusivity as NaN off
+        # the original grid, and a ratio against NaN is not a number to plot.
+        if all(isfinite, A) && all(isfinite, K) && any(!iszero, K)
+            try
+                ad_file = joinpath(out_dir, "movement_ad_ratio_distribution.html")
+                map_obj = leaflet_ad_ratio_distribution(
+                    A, K;
+                    dark_mode = params.dark_mode,
+                    title = "$spp Advection/Diffusion Ratio"
+                )
+                save_html(map_obj, ad_file)
+                verbose && println("  Advection ratio dashboard: $ad_file")
+            catch e
+                verbose && println("  (Advection ratio note: $(_error_note(e)))")
+            end
+        elseif verbose
+            println(
+                "  (Advection ratio skipped: diffusivity is not populated on the " *
+                "resharded mesh, so the ratio is undefined)"
             )
-            save_html(map_obj, ad_file)
-            verbose && println("  Advection ratio dashboard: $ad_file")
-        catch e
-            verbose && println("  (Advection ratio note: $e)")
         end
     end
 
     # 4. Residence Time & Diffusion Field
-    if !isnothing(loaded.residence_time)
+    # Both are derived per unit from the fitted kernel, so they are reported only
+    # where the pipeline actually produced them rather than read off `loaded`.
+    if hasproperty(kernels, :residence_by_unit) && !isnothing(kernels.residence_by_unit)
         try
             res_file = joinpath(out_dir, "movement_residence_time.html")
             map_obj = leaflet_residence_time_map(
-                loaded.residence_time, loaded.au_mesh;
-                title = "$spp Residence Time Map"
+                kernels.residence_by_unit, au_mesh;
+                cmap    = params.cmap,
+                    title = "$spp Residence Time Map"
             )
             save_html(map_obj, res_file)
             verbose && println("  Residence time dashboard: $res_file")
         catch e
-            verbose && println("  (Residence time note: $e)")
+            verbose && println("  (Residence time note: $(_error_note(e)))")
         end
     end
 
-    if !isnothing(loaded.diffusion)
-        try
-            diff_file = joinpath(out_dir, "movement_diffusion_field.html")
-            map_obj = leaflet_diffusion_map(
-                loaded.diffusion, loaded.au_mesh;
-                title = "$spp Diffusion Field"
+    # `leaflet_diffusion_map` takes one value per spatial unit, so the
+    # (depth x month) diffusivity field is collapsed to a long-run mean here.
+    #
+    # Diffusivity is not carried onto the resharded mesh (todo.md 1.2), so the
+    # collapse yields NaN for most units. The panel is skipped in that case rather
+    # than rendered: a map that draws successfully from NaN input is worse than no
+    # map, because it reads as a result.
+    if hydro !== nothing && hasproperty(hydro, :diffusivity_v)
+        D_by_unit = vec(mean(Float64.(hydro.diffusivity_v); dims = 2))
+        n_finite = count(isfinite, D_by_unit)
+        if n_finite == 0
+            verbose && println(
+                "  (Diffusion dashboard skipped: no finite diffusivity on the " *
+                "resharded mesh -- see todo.md 1.2)"
             )
-            save_html(map_obj, diff_file)
-            verbose && println("  Diffusion dashboard: $diff_file")
-        catch e
-            verbose && println("  (Diffusion note: $e)")
+        elseif n_finite < length(D_by_unit)
+            verbose && println(
+                "  (Diffusion dashboard skipped: only $n_finite of " *
+                "$(length(D_by_unit)) units carry finite diffusivity)"
+            )
+        else
+            try
+                diff_file = joinpath(out_dir, "movement_diffusion_field.html")
+                map_obj = leaflet_diffusion_map(
+                    D_by_unit, au_mesh;
+                    cmap      = params.cmap,
+                    title = "$spp Diffusion Field"
+                )
+                save_html(map_obj, diff_file)
+                verbose && println("  Diffusion dashboard: $diff_file")
+            catch e
+                verbose && println("  (Diffusion note: $(_error_note(e)))")
+            end
         end
     end
-    
+
     # 5. HSI Map
-    if !isnothing(loaded.hsi)
+    if !isnothing(loaded.hsi_vec)
         try
             hsi_file = joinpath(out_dir, "movement_hsi_map.html")
             map_obj = leaflet_hsi_map(
-                loaded.hsi, loaded.au_mesh;
-                title = "$spp Habitat Suitability Index (HSI)"
+                loaded.hsi_vec, au_mesh;
+                cmap    = params.cmap,
+                    title = "$spp Habitat Suitability Index (HSI)"
             )
             save_html(map_obj, hsi_file)
             verbose && println("  HSI dashboard: $hsi_file")
         catch e
-            verbose && println("  (HSI map note: $e)")
+            verbose && println("  (HSI map note: $(_error_note(e)))")
         end
     end
 
@@ -2552,13 +2706,14 @@ function export_dashboards(
         try
             disp_file = joinpath(out_dir, "movement_dispersal_kernel.html")
             map_obj = leaflet_dispersal_kernel(
-                kernels.P_kernel, loaded.au_mesh;
-                title = "$spp Empirical Dispersal Kernel"
+                kernels.P_kernel,                 au_mesh;
+                title = "$spp Empirical Dispersal Kernel",
+                dark_mode = params.dark_mode
             )
             save_html(map_obj, disp_file)
             verbose && println("  Dispersal kernel dashboard: $disp_file")
         catch e
-            verbose && println("  (Dispersal kernel note: $e)")
+            verbose && println("  (Dispersal kernel note: $(_error_note(e)))")
         end
     end
 
@@ -2593,33 +2748,39 @@ function execute_validation_analyses(
     kernels::NamedTuple,
     params
 )::Union{NamedTuple, Nothing}
-    _get(params, :compute_validation, true) || return nothing
-    verbose = _get(params, :verbose, true)
-    out_dir = get(params, :output_dir,
-                  normpath(joinpath(@__DIR__, "..", "..", "output")))
+    # The ensemble is its own diagnostic and is listed separately in `diagnostics`,
+    # so it must not be gated on `:validation` as well. Gating both on `validation`
+    # meant `--diagnostics=bayesian_ensemble` on its own returned here and did
+    # nothing at all, without a word of output.
+    wants_validation  = wants_diagnostic(params, :validation)
+    wants_ensemble    = wants_diagnostic(params, :bayesian_ensemble)
+    (wants_validation || wants_ensemble) || return nothing
+    verbose = params.verbose
+    out_dir = params.output_dir
     mkpath(out_dir)
 
-    verbose && println(
-        "\n[Phase 5c] Running Validation Mark-Recapture Analyses..."
-    )
+    pa = wants_validation ?
+        (verbose && println("\n[Phase 5c] Running Validation Mark-Recapture Analyses...");
+         run_validation_analyses(loaded, fitted, kernels, params, out_dir)) :
+        nothing
 
-    pa = run_validation_analyses(loaded, fitted, kernels, params, out_dir)
-
-    ensemble_res = if _get(params, :run_bayesian_ensemble, false)
+    ensemble_res = if wants_ensemble
         verbose && println(
-            "  Evaluating Bayesian ensemble path & corridor propagation..."
+            "\n[Phase 5d] Running Bayesian ensemble path & corridor propagation..."
         )
         reconstruct_paths_bayesian_ensemble(loaded, fitted, params)
     else
         nothing
     end
 
+    # `pa` is `nothing` when only the ensemble was requested, so each field is
+    # taken from it only when the validation analyses actually ran.
     return (
-        path_uncertainty         = pa.path_uncertainty,
-        connectivity_matrix      = pa.connectivity_matrix,
-        connectivity_uncertainty = pa.connectivity_uncertainty,
-        posterior_predictive     = pa.posterior_predictive,
-        summary_file             = pa.summary_file,
+        path_uncertainty         = isnothing(pa) ? nothing : pa.path_uncertainty,
+        connectivity_matrix      = isnothing(pa) ? nothing : pa.connectivity_matrix,
+        connectivity_uncertainty = isnothing(pa) ? nothing : pa.connectivity_uncertainty,
+        posterior_predictive     = isnothing(pa) ? nothing : pa.posterior_predictive,
+        summary_file             = isnothing(pa) ? nothing : pa.summary_file,
         bayesian_ensemble        = ensemble_res,
     )
 end
@@ -2638,7 +2799,7 @@ are called in sequence:
 2. `fit_movement_models`                -- Bayesian MCMC model fitting
 3. `extract_transition_kernels`         -- posterior kernel construction
 4. `reconstruct_paths_and_diagnostics` -- paths, corridors, bottlenecks
-5. `compute_advanced_diagnostics`      -- circuit theory & wavelets
+5. `compute_advanced_diagnostics`      -- circuit theory
 6. `export_dashboards`                 -- interactive Leaflet HTML maps
 
 # Arguments
@@ -2656,16 +2817,16 @@ are called in sequence:
 # Returns
 `NamedTuple` with fields: `data`, `models`, `chains`, `P_kernel`,
 `paths`, `corridors`, `stochastic_paths`, `domain_bottlenecks`,
-`circuit`, `wavelets`, `parameters`, `depth_range`.
+`circuit`, `parameters`, `depth_range`.
 """
 function run_movement_analysis(
     params = movement_parameters_default()
 )::NamedTuple
 
-    out_dir = _get(params, :output_dir, normpath(joinpath(@__DIR__, "..", "..", "output")))
+    out_dir = params.output_dir
     mkpath(out_dir)
     checkpoint_file = joinpath(out_dir, "movement_checkpoint.jld2")
-    resume_from_checkpoint = _get(params, :resume_from_checkpoint, false)
+    resume_from_checkpoint = params.resume_from_checkpoint
 
     loaded, fitted, kernels = if resume_from_checkpoint && isfile(checkpoint_file)
         if params.verbose
@@ -2687,7 +2848,7 @@ function run_movement_analysis(
     end
     
     agent_trajectories = nothing
-    if params.model_mode == "agent"
+    if :agent in params.model_modes
         if params.verbose
             println("\n[Phase 2b] Simulating Agent-Based Movement Alternative Model...")
         end
@@ -2715,7 +2876,7 @@ function run_movement_analysis(
     path_res    = reconstruct_paths_and_diagnostics(loaded, kernels, params)
     diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
     validation  = execute_validation_analyses(loaded, fitted, kernels, params)
-    dashboards  = export_dashboards(loaded, kernels, path_res, diagnostics, params)
+    dashboards  = export_dashboards(loaded, kernels, path_res, diagnostics, params, validation)
 
     if params.verbose
         println("\n" * "=" ^ 72)
@@ -2733,7 +2894,6 @@ function run_movement_analysis(
         stochastic_paths   = path_res.stochastic_paths,
         domain_bottlenecks = path_res.domain_bottlenecks,
         circuit            = diagnostics.circuit,
-        wavelets           = diagnostics.wavelets,
         validation_analyses = validation,
         agent_trajectories = agent_trajectories,
         movement_stats     = !isnothing(dashboards) && hasproperty(dashboards, :movement_stats) ?

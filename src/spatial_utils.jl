@@ -736,7 +736,7 @@ end
     ) -> NamedTuple
 
 Ingest or synthesize high-resolution open-sourced bathymetry data for coastal
-shelf environments (e.g., Scotian Shelf, Cabot Strait, and Gulf of St. Lawrence).
+shelf environments of the configured study area).
 
 # Mathematical & Physical Foundation
 Seafloor elevation ``z_{\\text{bottom}}(\\mathbf{s})`` satisfies:
@@ -1178,7 +1178,7 @@ function extract_hydrodynamic_dataset(
                     s_val = 31.2 + 1.9 * (1.0 - y_norm) + 1.3 * x_norm + (abs(z) / 150.0) * 1.4
                     S_mat[i, j, k] = clamp(s_val, 29.8, 35.8)
 
-                    # Advection: Southwestward Nova Scotia Current along coastal shelf
+                    # Advection: a synthetic along-shelf current, direction set by the caller
                     z_atten = exp(z / 80.0)
                     u_mean = (-0.18 - 0.12 * y_norm) * z_atten
                     v_mean = (-0.10 - 0.08 * (1.0 - x_norm)) * z_atten

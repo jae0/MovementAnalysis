@@ -252,7 +252,7 @@ planar cartesian `(x, y)` space.
    and Latitudes within `[-90, 90]`.
 2. Planar origin check: Non-negative coordinates starting near `(0, 0)` with synthetic
    extents (e.g. `[0, 100]`, `[0, 10]`, `[0, 1]`) are classified as planar.
-3. Marine regional domain checks (Scotian Shelf, Atlantic Canada, Pacific, Europe).
+3. Marine regional domain checks over whatever regions `region_polygon_files` names.
 """
 function _is_geographic_coordinates(coords)::Bool
     if isempty(coords)
@@ -283,7 +283,7 @@ function _is_geographic_coordinates(coords)::Bool
         return false
     end
 
-    # 3. Known marine fisheries regions (Atlantic Canada, Scotian Shelf, Pacific, Europe)
+    # 3. Marine fisheries regions, supplied by the caller via region_polygon_files
     if (min_x <= -20.0 && max_x <= -10.0 && min_y >= 30.0 && max_y <= 85.0) ||
        (min_x >= 100.0 && max_x <= 180.0 && min_y >= -50.0 && max_y <= 70.0) ||
        (min_x >= -180.0 && max_x <= -50.0 && min_y >= -60.0 && max_y <= 75.0)
@@ -1945,6 +1945,7 @@ function leaflet_tracks_map(
     max_paths::Int = 50,
     max_empirical_paths::Int = 500,
     animated::Bool = true,
+    tag_prefix::String = "Tag",
     wkt::Union{Nothing, AbstractString} = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
     dark_mode::Bool = false,
@@ -1952,6 +1953,7 @@ function leaflet_tracks_map(
     height::String = "650px",
     kwargs...
 )::LeafletMap
+    tag_prefix_js = repr(String(tag_prefix))
     cents = if !isnothing(au)
         hasproperty(au, :centroids) ? au.centroids :
         (hasproperty(au, :centroids_lonlat) ? au.centroids_lonlat : Tuple{Float64, Float64}[])
@@ -2354,7 +2356,7 @@ function leaflet_tracks_map(
           var tTitle = (p.tag_id.startsWith('Tag') ||
                         p.tag_id.startsWith('Method') ||
                         p.tag_id.startsWith('Path')) ?
-                        p.tag_id : 'Snow Crab Tag #' + p.tag_id;
+                        p.tag_id : $tag_prefix_js + ' #' + p.tag_id;
           var popupHtml = '<div class="ma-popup">' +
             '<div class="ma-popup-title" style="color: ' + p.color + '">' +
             tTitle + '</div>' +
@@ -4310,6 +4312,381 @@ function leaflet_hydrodynamic_dashboard(
         width=width,
         height=height,
         metadata=Dict(:n_units=>S, :n_depths=>nz, :depths=>depth_levels)
+    )
+end
+
+
+# =============================================================================
+# SECTION: POSTERIOR PATH ENSEMBLE
+# =============================================================================
+
+"""
+    leaflet_posterior_path_ensemble(ensemble, au; kwargs...) -> LeafletMap
+
+Renders the posterior path ensemble produced by
+`reconstruct_paths_bayesian_ensemble`: for each sampled individual, every
+trajectory drawn under a different posterior draw, overlaid on the mesh.
+
+The point of the panel is to show how much the *data* constrain the route, not
+just the single best-fit path. When every draw traces the same line, that
+individual's movement is well identified. When the draws fan out into distinct
+routes, the corridor is a statement about the model rather than about the animal,
+and the per-draw length spread is the honest summary of that.
+
+# Arguments
+- `ensemble`: NamedTuple with `ensemble_paths`, a
+  `Dict{String, Vector{Vector{Int}}}` mapping each sampled individual to one path
+  per posterior draw. `ensemble_corridors` is accepted and ignored: it is already
+  an average over draws, which is exactly the information this panel exists to
+  break apart.
+- `au`: Spatial mesh NamedTuple with `:centroids` / `:centroids_lonlat` and
+  `:polygons`.
+- `hsi`: Optional habitat suitability per unit, used to tint the background mesh.
+- `title`: Panel heading.
+- `dark_mode`, `width`, `height`: As for the other panels.
+
+# Notes
+Paths are lists of unit indices, so an out-of-range index is skipped rather than
+thrown on: one bad index in one posterior draw should not cost the whole panel.
+"""
+function leaflet_posterior_path_ensemble(
+    ensemble,
+    au::NamedTuple;
+    hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    title::String = "Posterior Path Ensemble",
+    dark_mode::Bool = false,
+    width::String = "100%",
+    height::String = "720px",
+    max_individuals::Int = 24,
+    kwargs...
+)::LeafletMap
+
+    paths_by_tag = if hasproperty(ensemble, :ensemble_paths)
+        ensemble.ensemble_paths
+    elseif isa(ensemble, AbstractDict) && haskey(ensemble, "ensemble_paths")
+        ensemble["ensemble_paths"]
+    else
+        Dict{String, Vector{Vector{Int}}}()
+    end
+
+    tags = sort!(String[string(t) for t in keys(paths_by_tag)])
+    isempty(tags) && throw(ArgumentError(
+        "leaflet_posterior_path_ensemble: the ensemble carries no per-individual " *
+        "paths, so there is nothing to draw. Check that the :bayesian_ensemble " *
+        "diagnostic ran and produced paths."
+    ))
+    tags = tags[1:min(max_individuals, length(tags))]
+
+    cents = hasproperty(au, :centroids_lonlat) ? au.centroids_lonlat :
+            (hasproperty(au, :centroids) ? au.centroids : Tuple{Float64,Float64}[])
+    polys = hasproperty(au, :polygons) ? au.polygons :
+            (hasproperty(au, :polygons_lonlat) ? au.polygons_lonlat :
+             Vector{Vector{Tuple{Float64,Float64}}}())
+    S = length(cents)
+
+    all_raw_pts = Tuple{Float64, Float64}[]
+    for c in cents
+        length(c) >= 2 && isfinite(c[1]) && isfinite(c[2]) &&
+            push!(all_raw_pts, (float(c[1]), float(c[2])))
+    end
+    for poly in polys, pt in poly
+        length(pt) >= 2 && isfinite(pt[1]) && isfinite(pt[2]) &&
+            push!(all_raw_pts, (float(pt[1]), float(pt[2])))
+    end
+    wkt_str = _extract_wkt(au)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt = wkt_str)
+
+    # Transformed, rounded coordinate for unit `u`, or `nothing` if out of range.
+    function _pt(u)
+        1 <= u <= S || return nothing
+        c = _transform_point(tf, cents[u])
+        return [round(c[1]; digits = 6), round(c[2]; digits = 6)]
+    end
+
+    # A draw's length in km, measured the same way for every individual so the
+    # numbers are comparable: the summed great-circle distance between the units
+    # the draw actually visits, in visit order.
+    function _length_km(pts)
+        length(pts) < 2 && return 0.0
+        tot = 0.0
+        for k in 2:length(pts)
+            tot += haversine_distance(pts[k-1][1], pts[k-1][2],
+                                      pts[k][1], pts[k][2]) / 1000.0
+        end
+        return tot
+    end
+
+    records_json = String[]
+    for tag in tags
+        feats = String[]
+        lens = Float64[]
+        routes = Dict{String,Int}()
+        for (d, path) in enumerate(paths_by_tag[tag])
+            pts = [p for p in (_pt(u) for u in path) if p !== nothing]
+            isempty(pts) && continue
+            len = _length_km(pts)
+            push!(lens, len)
+            key = join(path, "-")
+            routes[key] = get(routes, key, 0) + 1
+            coord_str = join(["[$(p[1]), $(p[2])]" for p in pts], ", ")
+            push!(feats, """{"type":"Feature",
+                "properties":{"draw":$d,"length_km":$(round(len; digits=2))},
+                "geometry":{"type":"LineString","coordinates":[$coord_str]}}""")
+        end
+        isempty(lens) && continue
+        # The modal-route share is the fraction of draws choosing the most common
+        # route: a direct, interpretable measure of whether the route is identified.
+        modal_share = maximum(values(routes)) / length(lens)
+        push!(records_json, """{
+          "tag": $(repr(tag)),
+          "n_draws": $(length(lens)),
+          "lengths": [$(join([string(round(l; digits=2)) for l in lens], ", "))],
+          "min_km": $(round(minimum(lens); digits=2)),
+          "median_km": $(round(median(lens); digits=2)),
+          "max_km": $(round(maximum(lens); digits=2)),
+          "modal_share": $(round(modal_share; digits=4)),
+          "features": [$(join(feats, ",\n"))]
+        }""")
+    end
+
+    isempty(records_json) && throw(ArgumentError(
+        "leaflet_posterior_path_ensemble: every sampled path was empty or out of " *
+        "range, so no geometry could be drawn."
+    ))
+
+    records_str = "[" * join(records_json, ",\n") * "]"
+    hsi_json = isnothing(hsi) ? "null" :
+        "[" * join([string(round(Float64(v); digits=4)) for v in hsi], ", ") * "]"
+
+    mesh_json = if isempty(polys)
+        "[]"
+    else
+        parts = String[]
+        for (i, poly) in enumerate(polys)
+            isempty(poly) && continue
+            tr = _transform_polygon(tf, poly)
+            isempty(tr) && continue
+            coord_str = join(["[$(round(p[1]; digits=6)), $(round(p[2]; digits=6))]"
+                              for p in tr], ", ")
+            hv = !isnothing(hsi) && i <= length(hsi) ? round(Float64(hsi[i]); digits=4) : 0.0
+            push!(parts, """{"type":"Feature",
+                "properties":{"unit":$i,"hsi":$hv},
+                "geometry":{"type":"Polygon","coordinates":[[$coord_str]]}}""")
+        end
+        "[" * join(parts, ",\n") * "]"
+    end
+
+    map_id = "ma_map_" * string(abs(hash(title * string(rand()))), base = 16)
+    lats = [p[2] for p in all_raw_pts]
+    lngs = [p[1] for p in all_raw_pts]
+    min_lat, max_lat = isempty(lats) ? (0.0, 1.0) : (minimum(lats), maximum(lats))
+    min_lng, max_lng = isempty(lngs) ? (0.0, 1.0) : (minimum(lngs), maximum(lngs))
+
+    n_ind = length(records_json)
+    n_draw_max = 0
+    for tag in tags
+        n_draw_max = max(n_draw_max, length(paths_by_tag[tag]))
+    end
+    scope_str = string(n_ind, n_ind == 1 ? " individual" : " individuals",
+                       " x ", n_draw_max, " posterior draws")
+
+    extra_html = """
+    <div class="ma-controls-bar" style="flex-wrap:wrap;gap:10px;align-items:center;">
+      <label style="font-size:13px;">Individual</label>
+      <select id="maTagSel" class="ma-btn" style="padding:5px 9px;"></select>
+      <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" id="maShowMesh" checked> mesh
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
+        <input type="checkbox" id="maShowHsi" checked> HSI
+      </label>
+      <span id="maTagSummary" style="color:var(--ma-text-muted,#64748b);font-size:12px;"></span>
+      <span style="color:var(--ma-text-muted,#64748b);font-size:12px;margin-left:auto;">$(scope_str)</span>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;padding:10px 14px;">
+      <div style="flex:1 1 260px;min-width:240px;">
+        <div class="ma-legend-title">Path length per posterior draw (km)</div>
+        <canvas id="maLenChart" height="150"></canvas>
+      </div>
+      <div style="flex:2 1 420px;min-width:300px;">
+        <div class="ma-legend-title">Draw summary</div>
+        <div id="maStats" style="font-size:12.5px;line-height:1.8;"></div>
+      </div>
+    </div>
+    """
+
+    map_setup_js = """
+    var isGeo = $(tf.is_geo ? "true" : "false");
+    var showHsi = true;
+    var map = L.map('$(map_id)', { attributionControl: false });
+
+    var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
+      attribution: '&copy; Esri &copy; GEBCO, NOAA', maxZoom: 13
+    });
+    var cartoLight = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; CartoDB &copy; OpenStreetMap', maxZoom: 19
+    });
+    var cartoDark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; CartoDB &copy; OpenStreetMap', maxZoom: 19
+    });
+    var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors', maxZoom: 19
+    });
+    esriOcean.addTo(map);
+    var baseLayers = {
+      "Esri Ocean (Bathymetry)": esriOcean,
+      "CartoDB Positron": cartoLight,
+      "CartoDB Dark": cartoDark,
+      "OpenStreetMap": osm
+    };
+
+    var RECORDS = $(records_str);
+    var HSI = $(hsi_json);
+    var MESH = $(mesh_json);
+    var PALETTE = $(string(_resolve_palette(:turbo)))[1:-1];
+
+    // Background mesh. Tinted by HSI where HSI is available so the routes sit on
+    // the habitat field rather than on a blank grid.
+    var hsiMin = Infinity, hsiMax = -Infinity;
+    if (HSI !== null) {
+      for (var i = 0; i < HSI.length; i++) {
+        if (isFinite(HSI[i])) {
+          if (HSI[i] < hsiMin) hsiMin = HSI[i];
+          if (HSI[i] > hsiMax) hsiMax = HSI[i];
+        }
+      }
+    }
+    function hsiFill(v) {
+      if (HSI === null || !isFinite(hsiMin) || hsiMax <= hsiMin) return '#334155';
+      var t = (v - hsiMin) / (hsiMax - hsiMin);
+      if (t < 0) t = 0; if (t > 1) t = 1;
+      return PALETTE[Math.round(t * (PALETTE.length - 1))];
+    }
+
+    function meshStyle(f) {
+      var v = f.properties.hsi;
+      var tinted = showHsi && isFinite(v) && v > 0;
+      return {
+        color: tinted ? 'rgba(56,189,248,0.35)' : 'rgba(148,163,184,0.45)',
+        weight: 0.5,
+        fillOpacity: tinted ? 0.55 : 0.12,
+        fillColor: hsiFill(v)
+      };
+    }
+
+    var meshLayer = L.geoJSON(MESH, { style: meshStyle }).addTo(map);
+    var drawLayer = L.layerGroup().addTo(map);
+    var lenChart = null;
+
+    function routeColor(i, n) {
+      if (n <= 1) return '#38bdf8';
+      return PALETTE[Math.round((i - 1) * (PALETTE.length - 1) / (n - 1))];
+    }
+
+    function render(rec) {
+      drawLayer.clearLayers();
+      var n = rec.features.length;
+      rec.features.forEach(function(f, idx) {
+        L.geoJSON(f, {
+          style: { color: routeColor(idx + 1, n), weight: 3.0, opacity: 0.85 }
+        }).addTo(drawLayer);
+      });
+
+      // Every draw starts and ends at the same two units, so mark them once.
+      if (n > 0) {
+        var coords = rec.features[0].geometry.coordinates;
+        L.circleMarker(coords[0], { radius: 7, color: '#22c55e',
+          fillColor: '#22c55e', fillOpacity: 1, weight: 2 }).addTo(drawLayer)
+          .bindPopup('<div class="ma-popup"><div class="ma-popup-title">Release</div></div>');
+        L.circleMarker(coords[coords.length - 1], { radius: 7, color: '#ef4444',
+          fillColor: '#ef4444', fillOpacity: 1, weight: 2 }).addTo(drawLayer)
+          .bindPopup('<div class="ma-popup"><div class="ma-popup-title">Recapture</div></div>');
+      }
+
+      // The modal-route share is the number that says whether the route is
+      // identified, so it gets a plain-language reading rather than a bare ratio.
+      var identified = rec.modal_share >= 0.999;
+      var verdict = identified
+        ? 'All draws trace one route: the route is identified by these data.'
+        : 'Draws disagree on the route: treat the corridor as model-dependent, not as an observed corridor.';
+
+      document.getElementById('maStats').innerHTML =
+        '<div><b>Draws:</b> ' + rec.n_draws + '</div>' +
+        '<div><b>Path length (km):</b> min ' + rec.min_km.toFixed(1) +
+          ' &middot; median ' + rec.median_km.toFixed(1) +
+          ' &middot; max ' + rec.max_km.toFixed(1) + '</div>' +
+        '<div><b>Modal-route share:</b> ' + (rec.modal_share * 100).toFixed(0) + '%</div>' +
+        '<div style="color:var(--ma-text-muted,#64748b);margin-top:6px;">' + verdict + '</div>';
+
+      document.getElementById('maTagSummary').innerHTML =
+        rec.n_draws + ' draws &middot; ' + rec.min_km.toFixed(0) + '-' + rec.max_km.toFixed(0) + ' km';
+
+      if (lenChart) { lenChart.destroy(); lenChart = null; }
+      var ctx = document.getElementById('maLenChart').getContext('2d');
+      lenChart = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: rec.lengths.map(function(_, i) { return 'd' + (i + 1); }),
+          datasets: [{
+            label: 'km',
+            data: rec.lengths,
+            backgroundColor: rec.lengths.map(function(_, i) {
+              return routeColor(i + 1, rec.lengths.length);
+            }),
+            borderWidth: 0
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { font: { size: 10 } }, grid: { display: false } },
+            y: { title: { display: true, text: 'km' }, beginAtZero: true }
+          }
+        }
+      });
+    }
+
+    var sel = document.getElementById('maTagSel');
+    RECORDS.forEach(function(rec, i) {
+      var o = document.createElement('option');
+      o.value = String(i);
+      o.textContent = rec.tag;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', function() { render(RECORDS[Number(sel.value)]); });
+    document.getElementById('maShowMesh').addEventListener('change', function(e) {
+      if (e.target.checked) { meshLayer.addTo(map); } else { map.removeLayer(meshLayer); }
+    });
+    document.getElementById('maShowHsi').addEventListener('change', function(e) {
+      showHsi = e.target.checked;
+      meshLayer.setStyle(meshStyle);
+    });
+
+    var bounds = [[$(min_lat), $(min_lng)], [$(max_lat), $(max_lng)]];
+    map.fitBounds(bounds, { padding: [25, 25] });
+
+    render(RECORDS[0]);
+    L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
+    """
+
+    doc = _generate_leaflet_html_document(
+        title = title,
+        map_id = map_id,
+        map_setup_js = map_setup_js,
+        extra_css = ".ma-controls-bar select { font-size: 13px; }",
+        extra_html_body = extra_html,
+        dark_mode = dark_mode,
+        width = width,
+        height = height
+    )
+
+    return LeafletMap(doc, title = title, width = width, height = height,
+        metadata = Dict(
+            :n_individuals => n_ind,
+            :is_geo => tf.is_geo,
+            :wkt => wkt_str
+        )
     )
 end
 

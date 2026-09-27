@@ -38,7 +38,6 @@ The framework is organized into six cohesive phases:
    ▼
 [Phase 5] Advanced Physical & Spectral Diagnostics
    │      - Circuit theory electrical current density & pinch-points
-   │      - Chebyshev Spectral Graph Wavelets (SGWT) with BayesShrink
    ▼
 [Phase 6] Export & Leaflet Dashboards
           - Interactive HTML/SVG maps, animated tracks, and CSV summaries
@@ -264,9 +263,9 @@ Function: `compute_advanced_diagnostics(loaded, path_res, params)`
 - **Circuit Theory**: models the spatial graph as a resistor grid with
   conductances $C_{ij} = W_{ij} \sqrt{H_i H_j}$. Solves Poisson system
   $L v = I_{\text{ext}}$ to identify migratory pinch-points.
-- **Spectral Graph Wavelets (SGWT)**: Chebyshev polynomial expansions of the
-  graph Laplacian across multiple spatial scales, with BayesShrink adaptive
-  soft thresholding.
+
+Spectral Graph Wavelets were part of earlier versions of this pipeline and have
+been removed; none of the associated functions or outputs remain.
 
 ---
 
@@ -390,17 +389,14 @@ julia --project=. scripts/run_movement.jl \
 | `--depth-barrier-mode <mode>` | `depth_barrier_mode` (`:hsi_only`, `:bridge`, `:hard`) |
 | `--hsi-ood-floor <v>` | `hsi_ood_floor` |
 | `--max-paths <N>` | `max_paths` |
-| `--astar` / `--viterbi` | `path_method` |
-| `--smooth-paths` | `smooth_paths = true` |
-| `--bayesian-ensemble` | `run_bayesian_ensemble = true` |
-| `--adaptive-mesh` | `adaptive_mesh = true` |
-| `--dynamic-kernels` | `dynamic_kernels = true` |
-| `--hmm-smoothing` | `hmm_smoothing = true` |
-| `--circuit` | `compute_circuit = true` |
-| `--stochastic` | `compute_stochastic = true` |
-| `--bottlenecks` | `compute_bottlenecks = true` |
-| `--wavelets` / `--sgwt` | `compute_wavelets = true` |
-| `--all-diagnostics` | Enables circuit, stochastic, bottlenecks, wavelets |
+| `--path-methods <list>` | `path_methods` (comma-separated: `astar`, `viterbi`) |
+| `--smooth-paths <bool>` | `smooth_paths` |
+| `--adaptive-mesh <bool>` | `adaptive_mesh` |
+| `--dynamic-kernels <bool>` | `dynamic_kernels` |
+| `--hmm-smoothing <bool>` | `hmm_smoothing` |
+| `--model-modes <list>` | `model_modes` (comma-separated, e.g. `telemetry,ssa`) |
+| `--diagnostics <list>` | `diagnostics` (comma-separated: `circuit`, `stochastic`, `bottlenecks`, `validation`, `bayesian_ensemble`) |
+| `--mh-proposal-scale <v>` | `mh_proposal_scale` |
 | `--samples <N>` | `n_samples` |
 | `--warmup <N>` | `n_warmup` |
 | `--output-dir <path>` | `output_dir` |
@@ -505,8 +501,8 @@ output/
 ├── movement_domain_bottlenecks.html          # Pinch-points and bottleneck index
 ├── movement_current_density.html             # Circuit theory current flux
 ├── movement_stochastic_circuit.html          # Posterior current density with HSI error
-├── movement_wavelet_dashboard.html           # Multi-scale Chebyshev SGWT wavelets
 ├── movement_posterior_uncertainty.html       # MCMC parameter KDEs & correlations
+├── movement_posterior_path_ensemble.html     # Per-individual posterior path ensemble
 ├── movement_network_flow.html                # Directed network flow graph
 └── movement_summary_diagnostics.html         # Comprehensive diagnostics overview
 ```

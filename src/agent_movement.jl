@@ -11,7 +11,7 @@ using Random
 using Distributions
 using DataFrames
 
-mutable struct CrabAgent
+mutable struct TrackedAgent
     id::Int
     pos::Int
     group::Int
@@ -41,7 +41,7 @@ function simulate_agent_trajectories(
 )
     rng = MersenneTwister(seed)
     
-    agents = [CrabAgent(i, start_nodes[i], groups[i]) for i in 1:n_agents]
+    agents = [TrackedAgent(i, start_nodes[i], groups[i]) for i in 1:n_agents]
     
     # Transpose kernels to CSC format for fast row-slice access
     # (Since original is row-stochastic CSC, transposing gives fast access to outgoing edges from node i as a column)

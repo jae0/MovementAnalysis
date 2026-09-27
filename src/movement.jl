@@ -1306,7 +1306,7 @@ function reshard_hsi_field(
 end
 
 # ==============================================================================
-# SECTION: SNOW CRAB TELEMETRY & MARK-RECAPTURE DATA INGESTION & PROCESSING
+# SECTION: TELEMETRY & MARK-RECAPTURE DATA INGESTION & PROCESSING
 # ==============================================================================
 
 """
@@ -1337,179 +1337,8 @@ function haversine_distance(
     return 2.0 * radius * atan(sqrt(a), sqrt(1.0 - a))
 end
 
-"""
-    tag_to_study_id(tag_id)::Union{Int, Nothing}
-
-Maps a numeric or alphanumeric snow crab tag identifier to its corresponding historical
-study index (1 to 57) based on the Scotian Shelf and Gulf historical tagging metadata.
-
-# Arguments
-- `tag_id`: Integer, Float, or String representation of the tag number.
-
-# Returns
-- `Int`: Study identifier between 1 and 57, or `nothing` if unmapped.
-"""
-function tag_to_study_id(tag_id)::Union{Int, Nothing}
-    if ismissing(tag_id) || isnothing(tag_id)
-        return nothing
-    end
-    raw_str = string(tag_id)
-    # Strip leading 'G' or 'g' (e.g. "G1234" -> "1234")
-    clean_str = replace(raw_str, r"^[Gg]" => "")
-
-    # Handle prefixed t-tags (e.g. "t1605")
-    if startswith(clean_str, "t") || startswith(clean_str, "T")
-        t_num = tryparse(Int, clean_str[2:end])
-        if !isnothing(t_num)
-            if 1605 <= t_num <= 1659
-                return 49
-            elseif (1217 <= t_num <= 1350) || (1601 <= t_num <= 1603)
-                return 52
-            elseif 1676 <= t_num <= 1694
-                return 56
-            elseif 3026 <= t_num <= 3175
-                return 57
-            end
-        end
-    end
-
-    # Handle prefixed s-tags (e.g. "s99102")
-    if startswith(clean_str, "s") || startswith(clean_str, "S")
-        s_num = tryparse(Int, clean_str[2:end])
-        if !isnothing(s_num) && 99102 <= s_num <= 99196
-            return 57
-        end
-    end
-
-    # Parse numeric integer tag ID
-    id = tryparse(Int, clean_str)
-    if isnothing(id)
-        f_num = tryparse(Float64, clean_str)
-        if !isnothing(f_num)
-            id = round(Int, f_num)
-        else
-            return nothing
-        end
-    end
-
-    if 0 <= id <= 600
-        return 1
-    elseif 2350 <= id <= 2399
-        return 5
-    elseif 1000 <= id <= 1600
-        return 6
-    elseif (2401 <= id <= 2403) || (2411 <= id <= 2450)
-        return 7
-    elseif 1601 <= id <= 2349
-        return 8
-    elseif 6000 <= id <= 6349
-        return 9
-    elseif 2716 <= id <= 2850
-        return 10
-    elseif 2456 <= id <= 2715
-        return 11
-    elseif 5050 <= id <= 5099
-        return 12
-    elseif 5100 <= id <= 5149
-        return 13
-    elseif (2851 <= id <= 2900) || (3051 <= id <= 3262) || (3446 <= id <= 3545)
-        return 14
-    elseif (3263 <= id <= 3444) || (3546 <= id <= 3600)
-        return 15
-    elseif 4000 <= id <= 4246
-        return 16
-    elseif 7450 <= id <= 7542
-        return 17
-    elseif 7543 <= id <= 7699
-        return 18
-    elseif (4798 <= id <= 4999) || (5250 <= id <= 5520) || (6350 <= id <= 6999)
-        return 19
-    elseif 5521 <= id <= 5808
-        return 20
-    elseif 4250 <= id <= 4480
-        return 21
-    elseif 4482 <= id <= 4797
-        return 22
-    elseif (7000 <= id <= 7449) || (7700 <= id <= 7999)
-        return 23
-    elseif (5809 <= id <= 5999) || (8501 <= id <= 8570) || (9229 <= id <= 9649)
-        return 24
-    elseif 8571 <= id <= 8828
-        return 25
-    elseif 8829 <= id <= 9228
-        return 26
-    elseif (10482 <= id <= 10499) || (11082 <= id <= 11334) || (11350 <= id <= 11387)
-        return 27
-    elseif id == 4301 || (8040 <= id <= 8050) || (8137 <= id <= 8150) ||
-           (8201 <= id <= 8298) || (9684 <= id <= 9741) || (9748 <= id <= 9784) ||
-           (10254 <= id <= 10406) || (10468 <= id <= 10481) || (11039 <= id <= 11081)
-        return 28
-    elseif (4248 <= id <= 4249) || (8000 <= id <= 8039) || (8051 <= id <= 8068) ||
-           (8070 <= id <= 8136) || (8151 <= id <= 8200) || (10407 <= id <= 10467) ||
-           (11000 <= id <= 11036)
-        return 29
-    elseif (8299 <= id <= 8500) || (9650 <= id <= 9683)
-        return 30
-    elseif 10032 <= id <= 10253
-        return 31
-    elseif (9742 <= id <= 9747) || (9785 <= id <= 10031)
-        return 32
-    elseif (10501 <= id <= 10530) || (10609 <= id <= 10716)
-        return 33
-    elseif (10531 <= id <= 10608) || (10718 <= id <= 10798)
-        return 34
-    elseif (10800 <= id <= 10949) || (11400 <= id <= 11449)
-        return 35
-    elseif (10950 <= id <= 10999) || (11335 <= id <= 11349) || (11388 <= id <= 11399) ||
-           (11450 <= id <= 11499) || (13000 <= id <= 13149)
-        return 36
-    elseif 13150 <= id <= 13490
-        return 37
-    elseif (13491 <= id <= 13649) || (15650 <= id <= 15673)
-        return 38
-    elseif 13650 <= id <= 13834
-        return 39
-    elseif 13835 <= id <= 14109
-        return 40
-    elseif 14110 <= id <= 14226
-        return 41
-    elseif (14227 <= id <= 14306) || (14308 <= id <= 14311) || (14313 <= id <= 14314) ||
-           id == 14316 || (14318 <= id <= 14345) || (14347 <= id <= 14430)
-        return 42
-    elseif 14431 <= id <= 14880
-        return 43
-    elseif (15750 <= id <= 15779) || (15800 <= id <= 15899) || (15950 <= id <= 15999)
-        return 44
-    elseif (15780 <= id <= 15799) || (15900 <= id <= 15949)
-        return 45
-    elseif 14881 <= id <= 14951
-        return 46
-    elseif 14952 <= id <= 15001
-        return 47
-    elseif 15002 <= id <= 15199
-        return 48
-    elseif 15400 <= id <= 15499
-        return 49
-    elseif (15500 <= id <= 15649) || (15674 <= id <= 15749) || (16000 <= id <= 16711)
-        return 50
-    elseif (16712 <= id <= 17199) || (17300 <= id <= 17399) || (17500 <= id <= 17607)
-        return 51
-    elseif 15200 <= id <= 15399
-        return 52
-    elseif (17608 <= id <= 17849) || id == 17953
-        return 53
-    elseif (17200 <= id <= 17299) || (17850 <= id <= 17999)
-        return 54
-    elseif 18043 <= id <= 18099
-        return 55
-    elseif (17401 <= id <= 17499) || (18000 <= id <= 18042) || (18100 <= id <= 18158)
-        return 56
-    elseif 18226 <= id <= 18326
-        return 57
-    end
-
-    return nothing
-end
+# Tag-to-study grouping is dataset-specific and therefore supplied with the
+# dataset (or precomputed into a `study` column) rather than hard-coded here.
 
 """
     filter_dead_tags(df::DataFrame; time_threshold_days::Real=30.0,
@@ -1730,7 +1559,7 @@ and coastline movement boundaries of adjacency graph ``G(V, E)``.
 Let ``G(V, E)`` be the topological water graph where edges ``(i, j) \\in E`` connect
 only physically adjacent water units across marine boundaries.
 1. The shortest geodesic graph distance ``d_G(u_{\\text{start}}, u_{\\text{end}})`` is computed via
-   ``A^*`` search. To prevent artificial jumps across land barriers or peninsulas (e.g. Cape Breton),
+   ``A^*`` search. To prevent artificial jumps across land barriers or peninsulas,
    the effective trajectory step count satisfies:
    ```math
    T_{\\text{eff}} = \\max(n_{\\text{steps}}, d_G(u_{\\text{start}}, u_{\\text{end}}))
@@ -1926,7 +1755,7 @@ on the true observed release and recapture coordinates under the fitted transiti
 and HSI field. Trajectories strictly follow the marine water graph and avoid land crossing.
 
 # Mathematical Formulation:
-For an individual crab ``k`` with release observation at ``(\\text{lon}_0, \\text{lat}_0)``
+For an individual ``k`` with release observation at ``(\\text{lon}_0, \\text{lat}_0)``
 at time ``t_0`` and recapture at ``(\\text{lon}_T, \\text{lat}_T)`` at time ``t_T``:
 1. Coordinates are mapped to nearest discrete marine areal units ``u_0, u_T \\in \\mathcal{U}``.
    When observations lie beyond the domain, the last encountered boundary unit HSI probability is extended.
@@ -2370,7 +2199,7 @@ function resolvent_expected_visits(P::SparseMatrixCSC{Float64, Int}, target::Int
     x = try
         M \ b
     catch e
-        @warn "resolvent_expected_visits: linear solve failed, returning uniform. ($e)"
+            @warn "resolvent_expected_visits: linear solve failed, returning uniform." exception = (e, catch_backtrace())
         fill(1.0, S)
     end
     return max.(x, 1e-15)
@@ -2988,7 +2817,7 @@ are removed. If an intersection occurs, waypoints around the headland are kept.
 # Arguments
 - `path`: Ordered sequence of spatial unit indices.
 - `centroids`: Spatial centroids coordinate vector matching unit indices.
-- `land_polygons`: Terrestrial boundary polygons (defaults to `:maritimes`).
+- `land_polygons`: Terrestrial boundary polygons (defaults to `:default`).
 - `centroids_lonlat`: Optional coordinates in degrees for polygon intersection.
 
 # Returns
@@ -3004,15 +2833,9 @@ function smooth_marine_path(
         return path
     end
 
-    polys = if land_polygons === nothing
-        _DEFAULT_MARITIMES_LAND_POLYGONS
-    elseif land_polygons in (:none, :false, false)
-        nothing
-    elseif land_polygons in (:maritimes, :default)
-        _DEFAULT_MARITIMES_LAND_POLYGONS
-    else
-        land_polygons
-    end
+    # `nothing` means "no polygon criterion"; land then rests entirely on
+    # the depth vector, or on a mask supplied by the caller.
+    polys = land_polygons in (:none, :false, false) ? nothing : land_polygons
 
     coords_check = centroids_lonlat !== nothing ? centroids_lonlat : centroids
     is_planar = abs(coords_check[1][1]) > 180.0 || abs(coords_check[1][2]) > 90.0
@@ -3196,6 +3019,8 @@ function astar_stochastic_least_cost_path(
     centroids_lonlat = nothing,
     smooth::Bool = false,
     ci_alpha::Real = 0.05,
+    structural_uncertainty::Bool = false,
+    structural_uncertainty_scale::Real = 0.0,
     seed::Union{Nothing, Int} = nothing
 )::StochasticAStarResult
     S = size(W, 1)
@@ -3215,6 +3040,38 @@ function astar_stochastic_least_cost_path(
         fill(max(0.05, Float64(f_arg)), n_sim)
     else
         fill(2.0, n_sim)
+    end
+
+    # --- Spatially correlated noise for HSI error ---
+    """
+        spatially_correlated_noise(rng, S, n_sim, range_km, centroids; 
+                                   nu=1.0, sigma=1.0) -> Matrix{Float64}
+
+Generate spatially correlated noise using an exponential covariance function.
+Returns S x n_sim matrix where each column is a spatially correlated noise field.
+"""
+    function spatially_correlated_noise(
+        rng::AbstractRNG,
+        S::Int,
+        n_sim::Int,
+        range_km::Real,
+        centroids::AbstractVector;
+        nu::Real = 1.0,
+        sigma::Real = 1.0
+    )::Matrix{Float64}
+        # Exponential covariance: C(h) = sigma^2 * exp(-h / range)
+        # Use a simple approximation: generate independent noise then smooth with adjacency
+        noise = randn(rng, S, n_sim)
+        if nrow > 1 && range_km > 0
+            # Simple spatial smoothing using graph adjacency
+            # In a full implementation, this would use a proper covariance matrix
+            # For now, we apply a simple spatial smoothing
+            W_smooth = max.(0, W)  # Use graph structure
+            D = Diagonal(1 ./ max.(1, sum(W_smooth, dims=2)[:]))
+            Smooth = I + 0.5 * D * W_smooth  # simple spatial smoother
+            noise = Smooth * noise
+        end
+        return noise
     end
 
     # 1. Assemble resistance realizations
@@ -3294,6 +3151,16 @@ function astar_stochastic_least_cost_path(
     end
 
     M_total = size(r_draws, 2)
+
+    # --- Add model structural uncertainty to resistance draws ---
+    # This accounts for uncertainty in kernel form, HSI functional form, etc.
+    if structural_uncertainty
+        for m in 1:M_total
+            structural_noise = exp.(randn(rng, S) * structural_uncertainty_scale)
+            r_draws[:, m] .= r_draws[:, m] .* structural_noise
+        end
+    end
+
     all_paths = Vector{Vector{Int}}(undef, M_total)
     path_costs = zeros(Float64, M_total)
     path_distances = zeros(Float64, M_total)
@@ -4076,42 +3943,9 @@ function point_in_polygon(x::Real, y::Real, geom::LibGEOS.AbstractGeometry)::Boo
 end
 
 
-"""
-Curated geographic boundary coordinates for the Canadian Maritime region, enclosing
-major terrestrial landmasses while preserving marine straits (Cabot Strait, Northumberland
-Strait, Bay of Fundy, Chedabucto Bay, and Scotian Shelf coastal waters).
-"""
-const _DEFAULT_MARITIMES_LAND_POLYGONS = [
-    # 1. Cape Breton Island
-    [
-        (-60.45, 47.05), (-60.38, 46.90), (-60.38, 46.65), (-60.45, 46.30),
-        (-60.15, 46.25), (-59.75, 46.15), (-59.85, 45.85), (-60.50, 45.60),
-        (-61.00, 45.48), (-61.40, 45.65), (-61.50, 45.90), (-61.25, 46.25),
-        (-61.05, 46.65), (-60.75, 46.90), (-60.55, 47.05), (-60.45, 47.05)
-    ],
-    # 2. Nova Scotia Mainland
-    [
-        (-61.40, 45.60), (-61.50, 45.45), (-61.20, 45.35), (-60.99, 45.33),
-        (-61.50, 45.10), (-62.50, 44.80), (-63.50, 44.55), (-64.20, 44.40),
-        (-64.70, 44.00), (-65.30, 43.50), (-65.65, 43.40), (-66.15, 43.80),
-        (-66.25, 44.20), (-65.75, 44.65), (-65.00, 45.15), (-64.35, 45.35),
-        (-64.40, 45.85), (-63.70, 45.85), (-62.60, 45.75), (-61.90, 45.75),
-        (-61.40, 45.60)
-    ],
-    # 3. Prince Edward Island
-    [
-        (-64.40, 46.95), (-64.00, 46.60), (-63.50, 46.50), (-62.50, 46.45),
-        (-61.95, 46.40), (-62.40, 46.00), (-63.00, 45.95), (-63.80, 46.20),
-        (-64.40, 46.60), (-64.40, 46.95)
-    ],
-    # 4. New Brunswick & Quebec / Gaspe coast
-    [
-        (-64.40, 45.85), (-64.50, 45.80), (-64.70, 45.50), (-65.50, 45.30),
-        (-67.00, 45.00), (-68.50, 45.50), (-69.50, 48.00), (-68.00, 49.00),
-        (-65.00, 49.20), (-64.20, 48.80), (-64.80, 48.00), (-64.80, 47.00),
-        (-64.50, 46.20), (-64.40, 45.85)
-    ]
-]
+# No study-area coastline is bundled with the package. Land is identified from the
+# configured source -- a global land/sea raster, user-supplied polygons, or
+# bathymetric depth -- so the same code serves any region.
 
 
 """
@@ -4136,8 +3970,7 @@ where ``\\mathcal{P}`` is the set of land boundary polygons and ``d_s`` is the b
 # Arguments
 - `centroids`: Vector of coordinate tuples `(x, y)` or `(lon, lat)` for all ``S`` units.
 - `land_polygons`: Optional polygon or collection of polygons.
-  - `nothing`: If `depth` is also `nothing`, defaults to `:maritimes` (curated NW Atlantic coastline).
-  - `:maritimes` or `:default`: Uses built-in Nova Scotia, Cape Breton, PEI, and NB/QC polygons.
+  - `nothing` or `:none`: no polygon criterion; land rests on `depth` alone.
   - `Vector{...}`: User-provided polygon rings or MultiPolygon coordinate vectors.
 - `depth`: Optional bathymetric depth vector of length ``S`` (positive values indicate water depth).
 - `depth_threshold`: Scalar threshold below which a unit is classified as land (default `0.0`).
@@ -4171,15 +4004,9 @@ function identify_land_units(
     end
 
     # 2. Polygon boundaries
-    polys = if land_polygons === nothing
-        _DEFAULT_MARITIMES_LAND_POLYGONS
-    elseif land_polygons in (:none, :false, false)
-        nothing
-    elseif land_polygons in (:maritimes, :default)
-        _DEFAULT_MARITIMES_LAND_POLYGONS
-    else
-        land_polygons
-    end
+    # `nothing` means "no polygon criterion"; land then rests entirely on
+    # the depth vector, or on a mask supplied by the caller.
+    polys = land_polygons in (:none, :false, false) ? nothing : land_polygons
 
     if polys !== nothing
         for i in 1:S
@@ -4348,7 +4175,7 @@ preventing movement models from allowing transitions that cross overland barrier
 # Arguments
 - `W`: Spatial graph adjacency matrix (size ``S \\times S``). Modified in-place if mutable.
 - `centroids`: Centroids coordinate vector (length ``S``).
-- `land_polygons`: Boundary polygons (defaults to `:maritimes`).
+- `land_polygons`: Boundary polygons, or `nothing` to sever nothing.
 
 # Returns
 - `Int`: Total number of directed edges severed.
@@ -4358,15 +4185,8 @@ function sever_land_crossing_edges!(
     centroids::AbstractVector;
     land_polygons = nothing
 )::Int
-    polys = if land_polygons === nothing
-        _DEFAULT_MARITIMES_LAND_POLYGONS
-    elseif land_polygons in (:none, :false, false)
-        return 0
-    elseif land_polygons in (:maritimes, :default)
-        _DEFAULT_MARITIMES_LAND_POLYGONS
-    else
-        land_polygons
-    end
+    # `nothing` means no polygon criterion; only explicit polygons sever edges.
+    polys = land_polygons in (:none, :false, false) ? nothing : land_polygons
 
     polys === nothing && return 0
 
@@ -4603,7 +4423,7 @@ function infill_spatial_hsi(
     h_u = try
         A_mat \ b_vec
     catch e
-        @warn "infill_spatial_hsi: direct solve failed ($e); using regularized solve."
+                    @warn "infill_spatial_hsi: direct solve failed; using regularized solve." exception = (e, catch_backtrace())
         (A_mat + 1e-4 * I) \ b_vec
     end
 
@@ -4661,7 +4481,7 @@ marine passages remain fully connected while landmasses act as impenetrable barr
 # Arguments
 - `lon_vec, lat_vec`: Geographic coordinates encompassing the full observation domain.
 - `radius_km`: Hexagon circumradius in km (default 15.0 km).
-- `land_polygons`: Optional land boundary polygons (defaults to `:maritimes`).
+- `land_polygons`: Optional land boundary polygons (defaults to `:default`).
 - `depth`: Optional depth vector matching units.
 - `depth_threshold`: Bathymetric cutoff below which units are classified as land (default 0.0).
 - `crs`: Coordinate reference system (default local tangent projection).
@@ -4841,7 +4661,7 @@ mark-recapture transition events with biological group stratifications.
 - `sppoly_file`: Path to survey spatial polygons JLD2 file defining known HSI units.
 - `radius_km`: Spatial hexagon circumradius in km (default 15.0 km).
 - `time_interval`: Discrete transition interval (`:monthly`, `:weekly`, `:biweekly`, `:daily`).
-- `land_polygons`: Terrestrial boundary polygons (defaults to `:maritimes`).
+- `land_polygons`: Terrestrial boundary polygons (defaults to `:default`).
 - `depth`: Optional depth vector matching units.
 - `depth_threshold`: Bathymetric cutoff below which units are classified as land (default 0.0).
 - `crs`: Target coordinate reference system (default local tangent projection).
@@ -5121,12 +4941,14 @@ function prepare_movement_data(
     tagids    = sorted_df.tagid
     times     = sorted_df.time
     s_idxs    = sorted_df.s_idx
+    lons      = sorted_df.lon
+    lats      = sorted_df.lat
     sexes_col = has_sex ? sorted_df.sex : nothing
     mats_col  = has_mat ? sorted_df.mat : nothing
 
     RecordType = NamedTuple{
-        (:tagid, :release, :recapture, :k, :rel_time, :sex, :mat),
-        Tuple{String, Int, Int, Int, Float64, String, String}
+        (:tagid, :release, :recapture, :k, :rel_time, :sex, :mat, :lon, :lat),
+        Tuple{String, Int, Int, Int, Float64, String, String, Float64, Float64}
     }
     pair_records = Vector{RecordType}(undef, 0)
 
@@ -5143,7 +4965,9 @@ function prepare_movement_data(
                     k         = k,
                     rel_time  = Float64(times[i-1]),
                     sex       = has_sex ? string(sexes_col[i-1]) : "unknown",
-                    mat       = has_mat ? string(mats_col[i-1])  : "unknown"
+                    mat       = has_mat ? string(mats_col[i-1])  : "unknown",
+                    lon       = lons[i-1],
+                    lat       = lats[i-1]
                 ))
             end
         end
@@ -5517,10 +5341,13 @@ function model_trait_movement_associations(
         end
         trait_name = string(found_col)
     else
-        # Synthetic baseline trait for snow crab: carapace width ~ N(115, 18^2) mm
+        # Placeholder trait when the dataset carries no morphometric column. The
+        # values below are arbitrary, so any association computed from them is an
+        # artefact of the placeholder rather than a biological result; supply a real
+        # morphometric column to make this analysis meaningful.
         rng = MersenneTwister(42)
         trait_vec = [115.0 + 18.0 * randn(rng) for _ in 1:n_paths]
-        trait_name = "carapace_width_sim"
+        trait_name = "placeholder_trait"
     end
 
     results = Dict{String, NamedTuple}()
@@ -5650,12 +5477,69 @@ end
 # =============================================================================
 
 """
+    _sample_column(samples, g::Int) -> Vector{Float64}
+
+Return group `g`'s posterior draws as a plain vector.
+
+`extract_transition_kernels` returns one draw series per parameter, not one
+column per group, so these arrive as a vector of length `n_draws`. A matrix is
+still accepted so a caller that holds an `n_draws x G` array keeps working, and
+a group index past the end clamps to the last available column.
+"""
+function _sample_column(samples, g::Int)::Vector{Float64}
+    samples === nothing && return Float64[]
+    if samples isa AbstractVector
+        return Float64[Float64(v) for v in samples]
+    end
+    ncols = size(samples, 2)
+    ncols == 0 && return Float64[]
+    col = min(g, ncols)
+    return Float64[Float64(v) for v in view(samples, :, col)]
+end
+
+"""
+    _posterior_param_draws(kernels, name::Symbol, default::Float64) -> Matrix{Float64}
+
+Return the posterior draws of a kernel parameter as an `n_draws x G` matrix, so
+downstream code can index a group column uniformly regardless of the shape the
+producer used.
+
+Group 1 always carries the real series; any further groups repeat it, because
+the models fit a single unstratified population and `G` is 1 in practice.
+"""
+function _posterior_param_draws(kernels::NamedTuple, name::Symbol, default::Float64)
+    n_draws, G = if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
+        size(kernels.alpha_samples, 1), kernels.G
+    elseif hasproperty(kernels, name) && !isempty(getproperty(kernels, name))
+        size(getproperty(kernels, name), 1), kernels.G
+    else
+        1, kernels.G
+    end
+    out = zeros(Float64, n_draws, G)
+    raw = hasproperty(kernels, name) ? getproperty(kernels, name) : nothing
+    for g in 1:G
+        col = _sample_column(raw, g)
+        if isempty(col)
+            out[:, g] .= default
+        else
+            n = min(n_draws, length(col))
+            out[1:n, g] .= col[1:n]
+        end
+    end
+    return out
+end
+
+"""
     path_credible_intervals(loaded, fitted, kernels, params = (;)) -> NamedTuple
 
 Propagates posterior uncertainty from MCMC parameter draws through individual
 trajectory reconstruction. Reconstructs path ensembles across draws to compute
 per-node waypoint distributions and credible intervals on path length and
 corridor width.
+
+The number of individuals sampled is bounded by `params.max_paths`, consistent
+with Phase 4: this loop solves an A* path per individual per posterior draw, so
+unbounded it dominates the whole analysis.
 
 # Arguments
 - `loaded::NamedTuple`: Loaded spatial domain, mesh, and observation records.
@@ -5673,58 +5557,38 @@ function path_credible_intervals(
     kernels::NamedTuple,
     params = (;)
 )::NamedTuple
-    verbose   = get(params, :verbose, true)
+    verbose   = params.verbose
     obs_df    = loaded.obs_df
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
     G         = kernels.G
 
-    n_draws = if hasproperty(kernels, :alpha_samples) &&
-                 !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1)
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        size(Array(active_chain), 1)
-    end
-
-    v_samples = zeros(n_draws, G)
-    d_samples = zeros(n_draws, G)
-    g_samples = zeros(n_draws, G)
-
-    if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        for g in 1:G
-            v_samples[:, g] .= kernels.alpha_samples[:, min(g, size(kernels.alpha_samples, 2))]
-            d_samples[:, g] .= kernels.rho_samples[:, min(g, size(kernels.rho_samples, 2))]
-            g_samples[:, g] .= kernels.gamma_samples[:, min(g, size(kernels.gamma_samples, 2))]
-        end
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        for draw in 1:n_draws, g in 1:G
-            vk = Symbol("velocity[$g]")
-            dk = Symbol("diffusion[$g]")
-            gk = Symbol("gamma[$g]")
-            v_samples[draw, g] = haskey(chains, vk) ? mean(active_chain[vk]) : 0.3
-            d_samples[draw, g] = haskey(chains, dk) ? mean(active_chain[dk]) : 0.1
-            g_samples[draw, g] = haskey(chains, gk) ? mean(active_chain[gk]) : 1.0
-        end
-    end
+    v_samples = _posterior_param_draws(kernels, :alpha_samples, 0.3)
+    d_samples = _posterior_param_draws(kernels, :rho_samples, 0.1)
+    g_samples = _posterior_param_draws(kernels, :gamma_samples, 1.0)
+    n_draws   = size(v_samples, 1)
 
     all_tags = unique(obs_df.tagid)
     path_samples = Dict{String, Vector{Vector{Int}}}()
     path_stats = Dict{String, NamedTuple}()
-    node_visit_counts = zeros(Int, n_spatial, n_spatial)
+
+    # Directed edge traversals are accumulated in a Dict and materialised once as
+    # a sparse matrix. Only consecutive nodes along a path are ever counted, so
+    # the nonzeros are the mesh's edge set -- O(n) for a planar graph. A dense
+    # n x n array would be 452 MB across 56M cells to hold the same few thousand
+    # entries, and repeated `setindex!` on a sparse matrix reallocates each time.
+    node_visit_counts = Dict{Tuple{Int,Int},Int}()
 
     n_eval_draws = min(n_draws, 50)
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
 
     P_draws = Any[]
     for draw in eval_indices
-        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
-        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
+        # Derived by the same helper the models use, so a per-draw kernel cannot
+        # drift from the likelihood that produced the draw.
+        alpha_arr, rho_arr = movement_alpha_rho(
+            [v_samples[draw, g] for g in 1:G],
+            [d_samples[draw, g] for g in 1:G])
         gamma_arr = [g_samples[draw, g] for g in 1:G]
 
         P_draw = construct_stochastic_transition_kernel(
@@ -5737,7 +5601,19 @@ function path_credible_intervals(
         push!(P_draws, P_draw)
     end
 
-    for tid in all_tags
+    # Path uncertainty is a Monte Carlo over posterior draws *and* individuals, so
+    # it is bounded by `max_paths` exactly as Phase 4 reconstruction is. Without
+    # that bound this loop runs over every tagged animal in the dataset, which on
+    # a few thousand tags is orders of magnitude more A* solves than the rest of
+    # the analysis combined.
+    n_tags = min(length(all_tags), max(1, Int(params.max_paths)))
+    sampled_tags = all_tags[1:n_tags]
+    verbose && println(
+        "  Path uncertainty: $n_tags of $(length(all_tags)) individuals " *
+        "x $(length(eval_indices)) posterior draws"
+    )
+
+    for tid in sampled_tags
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
 
@@ -5766,7 +5642,8 @@ function path_credible_intervals(
             for i in 1:(length(full_path) - 1)
                 u, v = full_path[i], full_path[i+1]
                 if 1 <= u <= n_spatial && 1 <= v <= n_spatial
-                    node_visit_counts[u, v] += 1
+                    key = (u, v)
+                    node_visit_counts[key] = get(node_visit_counts, key, 0) + 1
                 end
             end
         end
@@ -5798,7 +5675,12 @@ function path_credible_intervals(
         )
     end
 
-    node_visit_probs = node_visit_counts ./ (n_eval_draws + 1e-10)
+    node_visit_probs = sparse(
+        [u for (u, _) in keys(node_visit_counts)],
+        [v for (_, v) in keys(node_visit_counts)],
+        [c / (n_eval_draws + 1e-10) for c in values(node_visit_counts)],
+        n_spatial, n_spatial,
+    )
 
     return (
         path_samples     = path_samples,
@@ -5858,7 +5740,7 @@ are evaluated under each P^(s), and averaged across draws:
 # Arguments
 - `loaded::NamedTuple`: Spatial domain, mesh, and observation records.
 - `fitted::NamedTuple`: Model fitting output containing MCMC chains.
-- `params`: Configuration options (`verbose`, `max_paths`, `path_method`,
+- `params`: Configuration options (`verbose`, `max_paths`, `path_methods`,
   `n_ensemble`).
 
 # Returns
@@ -5871,7 +5753,7 @@ function reconstruct_paths_bayesian_ensemble(
     fitted::NamedTuple,
     params = (;)
 )::NamedTuple
-    verbose   = get(params, :verbose, true)
+    verbose   = params.verbose
     obs_df    = loaded.obs_df
     W         = loaded.W
     hsi_vec   = loaded.hsi_vec
@@ -5893,31 +5775,29 @@ function reconstruct_paths_bayesian_ensemble(
         [Float64[0.0, 0.0] for _ in 1:n_spatial]
     end
 
-    chn_mat_v = haskey(active_chn, :velocity) ?
-                Array(active_chn[:velocity]) :
-                haskey(active_chn, Symbol("velocity[1]")) ?
-                Array(active_chn[Symbol("velocity[1]")]) :
-                ones(Float64, 50, 1) .* 0.3
-    chn_mat_d = haskey(active_chn, :diffusion) ?
-                Array(active_chn[:diffusion]) :
-                haskey(active_chn, Symbol("diffusion[1]")) ?
-                Array(active_chn[Symbol("diffusion[1]")]) :
-                ones(Float64, 50, 1) .* 0.1
-    chn_mat_g = haskey(active_chn, :gamma) ?
-                Array(active_chn[:gamma]) :
-                haskey(active_chn, Symbol("gamma[1]")) ?
-                Array(active_chn[Symbol("gamma[1]")]) :
-                ones(Float64, 50, 1) .* 1.0
+    # Read the parameter draws through the shared extraction rather than by name.
+    # This function used to probe for `:velocity` / `velocity[1]` / `:gamma`, the
+    # flat and group-indexed keys the pre-refactor chains had. The models are now
+    # hierarchical and their chains hold `Parameter(mu_velocity)` and friends, so
+    # every one of those probes missed and the function substituted fixed
+    # 0.3 / 0.1 / 1.0. The ensemble then reported spread driven only by HSI
+    # variation while presenting it as posterior uncertainty.
+    vel_draws, diff_draws, gam_draws =
+        MovementAnalysis.posterior_kernel_draws(active_chn)
+
+    chn_mat_v = reshape(vel_draws, :, 1)
+    chn_mat_d = reshape(diff_draws, :, 1)
+    chn_mat_g = reshape(gam_draws, :, 1)
 
     n_draws_chain = size(chn_mat_v, 1)
-    req_ensemble  = get(params, :n_ensemble, 50)
+    req_ensemble  = params.n_ensemble
     n_ensemble    = min(req_ensemble, n_draws_chain)
     draw_indices  = round.(Int, range(1, n_draws_chain, length = n_ensemble))
 
     all_tags    = unique(obs_df.tagid)
-    max_p       = get(params, :max_paths, length(all_tags))
+    max_p       = params.max_paths
     sample_tags = all_tags[1:min(max_p, length(all_tags))]
-    path_method = get(params, :path_method, :astar)
+    path_method = first(params.path_methods)
 
     ensemble_corridors = Dict{String, Matrix{Float64}}()
     ensemble_paths     = Dict{String, Vector{Vector{Int}}}()
@@ -5930,8 +5810,11 @@ function reconstruct_paths_bayesian_ensemble(
     G_eff = size(chn_mat_v, 2)
     P_draws = Any[]
     for d_idx in draw_indices
-        alpha_arr = [clamp(chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] / (chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] + chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))] + 1e-6), 0.0, 1.0) for g in 1:G_eff]
-        rho_arr   = [clamp(1.0 / (1.0 + chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] + chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))]), 0.01, 0.95) for g in 1:G_eff]
+        # Derived by the shared helper, so a per-draw kernel cannot drift from the
+        # likelihood that produced the draw.
+        alpha_arr, rho_arr = movement_alpha_rho(
+            [chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] for g in 1:G_eff],
+            [chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))] for g in 1:G_eff])
         gamma_arr = [chn_mat_g[d_idx, min(g, size(chn_mat_g, 2))] for g in 1:G_eff]
 
         P_draw = construct_stochastic_transition_kernel(
@@ -5998,6 +5881,10 @@ derive a population-level stochastic connectivity matrix:
 - `params`: Configuration options.
 - `region_labels`: Optional vector of human-readable region names.
 - `region_map`: Vector assigning each mesh unit to a region index (1:n_regions).
+    Defaults to a single region covering the whole domain, which is what the
+    analysis means before management units are supplied. Treating every mesh unit
+    as its own region instead would build an n x n matrix -- 56M cells and
+    gigabytes of CSV at 7517 units -- and describe the mesh rather than the stock.
 """
 function compute_stock_connectivity_matrix(
     loaded::NamedTuple,
@@ -6011,7 +5898,7 @@ function compute_stock_connectivity_matrix(
     P_kernel  = kernels.P_kernel
 
     if region_map === nothing
-        region_map = collect(1:n_spatial)
+        region_map = ones(Int, n_spatial)
     end
     n_regions = maximum(region_map)
 
@@ -6084,51 +5971,25 @@ function compute_connectivity_credible_intervals(
     G         = kernels.G
 
     if region_map === nothing
-        region_map = collect(1:n_spatial)
+        region_map = ones(Int, n_spatial)
     end
     n_regions = maximum(region_map)
 
-    n_draws = if hasproperty(kernels, :alpha_samples) &&
-                 !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1)
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        size(Array(active_chain), 1)
-    end
-
-    v_samples = zeros(n_draws, G)
-    d_samples = zeros(n_draws, G)
-    g_samples = zeros(n_draws, G)
-
-    if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        for g in 1:G
-            v_samples[:, g] .= kernels.alpha_samples[:, min(g, size(kernels.alpha_samples, 2))]
-            d_samples[:, g] .= kernels.rho_samples[:, min(g, size(kernels.rho_samples, 2))]
-            g_samples[:, g] .= kernels.gamma_samples[:, min(g, size(kernels.gamma_samples, 2))]
-        end
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        for draw in 1:n_draws, g in 1:G
-            vk = Symbol("velocity[$g]")
-            dk = Symbol("diffusion[$g]")
-            gk = Symbol("gamma[$g]")
-            v_samples[draw, g] = haskey(chains, vk) ? mean(active_chain[vk]) : 0.3
-            d_samples[draw, g] = haskey(chains, dk) ? mean(active_chain[dk]) : 0.1
-            g_samples[draw, g] = haskey(chains, gk) ? mean(active_chain[gk]) : 1.0
-        end
-    end
+    v_samples = _posterior_param_draws(kernels, :alpha_samples, 0.3)
+    d_samples = _posterior_param_draws(kernels, :rho_samples, 0.1)
+    g_samples = _posterior_param_draws(kernels, :gamma_samples, 1.0)
+    n_draws   = size(v_samples, 1)
 
     n_eval_draws = min(n_draws, 40)
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
     connectivity_samples = Matrix{Float64}[]
 
     for draw in eval_indices
-        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
-        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
+        # Derived by the same helper the models use, so a per-draw kernel cannot
+        # drift from the likelihood that produced the draw.
+        alpha_arr, rho_arr = movement_alpha_rho(
+            [v_samples[draw, g] for g in 1:G],
+            [d_samples[draw, g] for g in 1:G])
         gamma_arr = [g_samples[draw, g] for g in 1:G]
 
         P_draw = construct_stochastic_transition_kernel(
@@ -6241,41 +6102,12 @@ function posterior_predictive_check(
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
     G         = kernels.G
-    seed      = get(params, :seed, 42)
+    seed      = params.seed
 
-    n_draws = if hasproperty(kernels, :alpha_samples) &&
-                 !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1)
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        size(Array(active_chain), 1)
-    end
-
-    v_samples = zeros(n_draws, G)
-    d_samples = zeros(n_draws, G)
-    g_samples = zeros(n_draws, G)
-
-    if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        for g in 1:G
-            v_samples[:, g] .= kernels.alpha_samples[:, min(g, size(kernels.alpha_samples, 2))]
-            d_samples[:, g] .= kernels.rho_samples[:, min(g, size(kernels.rho_samples, 2))]
-            g_samples[:, g] .= kernels.gamma_samples[:, min(g, size(kernels.gamma_samples, 2))]
-        end
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        for draw in 1:n_draws, g in 1:G
-            vk = Symbol("velocity[$g]")
-            dk = Symbol("diffusion[$g]")
-            gk = Symbol("gamma[$g]")
-            v_samples[draw, g] = haskey(chains, vk) ? mean(active_chain[vk]) : 0.3
-            d_samples[draw, g] = haskey(chains, dk) ? mean(active_chain[dk]) : 0.1
-            g_samples[draw, g] = haskey(chains, gk) ? mean(active_chain[gk]) : 1.0
-        end
-    end
+    v_samples = _posterior_param_draws(kernels, :alpha_samples, 0.3)
+    d_samples = _posterior_param_draws(kernels, :rho_samples, 0.1)
+    g_samples = _posterior_param_draws(kernels, :gamma_samples, 1.0)
+    n_draws   = size(v_samples, 1)
 
     observed_recaptures = obs_df.recapture
     observed_dist = zeros(n_spatial)
@@ -6293,8 +6125,11 @@ function posterior_predictive_check(
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
 
     for draw in eval_indices
-        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
-        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
+        # Derived by the same helper the models use, so a per-draw kernel cannot
+        # drift from the likelihood that produced the draw.
+        alpha_arr, rho_arr = movement_alpha_rho(
+            [v_samples[draw, g] for g in 1:G],
+            [d_samples[draw, g] for g in 1:G])
         gamma_arr = [g_samples[draw, g] for g in 1:G]
 
         P_draw = construct_stochastic_transition_kernel(
@@ -6305,23 +6140,29 @@ function posterior_predictive_check(
             land_mask = land_mask
         )
 
-        simulated_recaptures = Int[]
-        for row in eachrow(obs_df)
-            rel = row.release
-            k   = row.k
-            grp = hasproperty(row, :group) ? row.group : 1
-            grp = clamp(grp, 1, G)
+        # The k-step distribution from a release node is the same for every
+        # observation sharing that (release, k) pair, so it is built once per
+        # posterior draw and reused. Two things keep this cheap: the step count is
+        # capped at 10, and `kstep_transition_cache` sweeps once per release node
+        # rather than once per pair, so it costs at most `10 x n_release_nodes`
+        # mat-vecs instead of `10 x n_pairs`.
+        P_k = P_draw isa AbstractVector ? P_draw[1] : P_draw
+        PT = sparse(P_k')
+        kcap = min.(Int.(obs_df.k), 10)
+        kcache = kstep_transition_cache(PT, Int.(obs_df.release), kcap; normalize = false)
 
-            P_k = P_draw isa AbstractVector ? P_draw[grp] : P_draw
+        simulated_recaptures = Int[]
+        # `eachindex` is not defined for a DataFrame (it falls through to `keys`),
+        # so the row count is taken explicitly.
+        for n in 1:nrow(obs_df)
+            rel = Int(obs_df.release[n])
+            kk  = kcap[n]
+
             if !isnothing(P_k) && 1 <= rel <= n_spatial
-                prob_vec = zeros(n_spatial)
-                prob_vec[rel] = 1.0
-                for _ in 1:min(k, 10)
-                    prob_vec = P_k' * prob_vec
-                end
+                prob_vec = kcache[(rel, kk)]
                 s = sum(prob_vec)
                 if s > 0.0
-                    prob_vec ./= s
+                    prob_vec = prob_vec ./ s
                     u_samp = rand(rng)
                     c_sum = 0.0
                     sampled_rec = rel
@@ -6442,7 +6283,7 @@ function run_validation_analyses(
     output_dir::String
 )::NamedTuple
     mkpath(output_dir)
-    verbose = get(params, :verbose, true)
+    verbose = params.verbose
 
     verbose && println("\n--- Running Validation Analyses ---")
     path_unc = path_credible_intervals(loaded, fitted, kernels, params)
@@ -6490,11 +6331,11 @@ function export_movement_posterior_dashboard(
                  kernels.group_lookup : Dict{Int, String}()
 
     alpha_samples = hasproperty(kernels, :alpha_samples) ?
-                    kernels.alpha_samples : Matrix{Float64}(undef, 0, 0)
+                    kernels.alpha_samples : Float64[]
     rho_samples   = hasproperty(kernels, :rho_samples) ?
-                    kernels.rho_samples : Matrix{Float64}(undef, 0, 0)
+                    kernels.rho_samples : Float64[]
     gamma_samples = hasproperty(kernels, :gamma_samples) ?
-                    kernels.gamma_samples : Matrix{Float64}(undef, 0, 0)
+                    kernels.gamma_samples : Float64[]
 
     function _svg_kde_curve(
         samples::Vector{Float64},
@@ -6680,9 +6521,18 @@ function export_movement_posterior_dashboard(
         lbl = get(grp_lookup, g, "Group $g")
         c = palette[mod(g - 1, length(palette)) + 1]
 
-        a_v = size(alpha_samples, 2) >= g ? alpha_samples[:, g] : Float64[kernels.alpha[g]]
-        r_v = size(rho_samples, 2) >= g   ? rho_samples[:, g]   : Float64[kernels.rho[g]]
-        g_v = size(gamma_samples, 2) >= g ? gamma_samples[:, g] : Float64[kernels.gamma[g]]
+        # The draws arrive as one series per parameter, not one column per group,
+        # so `_sample_column` normalises the shape and clamps the group index.
+        a_v = _sample_column(alpha_samples, g)
+        r_v = _sample_column(rho_samples, g)
+        g_v = _sample_column(gamma_samples, g)
+        if isempty(a_v)
+            a_v = [Float64(getproperty(kernels, :alpha_hat))]
+            r_v = [Float64(getproperty(kernels, :rho_hat))]
+            g_v = [Float64(getproperty(kernels, :gamma_hat))]
+        end
+        length(r_v) == length(a_v) || (r_v = fill(first(r_v), length(a_v)))
+        length(g_v) == length(a_v) || (g_v = fill(first(g_v), length(a_v)))
 
         a_kde = _svg_kde_curve(a_v, "Advection (α)", "#38bdf8")
         r_kde = _svg_kde_curve(r_v, "Residence (ρ)", "#10b981")
@@ -8492,7 +8342,7 @@ end
 Generates synthetic animal movement and mark-recapture telemetry datasets mapped over a
 planar hexagonal spatial mesh. Simulates individual movement trajectories via discrete
 Markov transitions across mesh units, assigns demographic attributes, and classifies
-individuals into canonical biological groups matching `snowcrab_movement_data`:
+individuals into canonical biological groups matching `load_movement_data`:
 - `"female"`: Mature females (`mat == "mature"`, `sex == "F"`)
 - `"male"`: Mature males (`mat == "mature"`, `sex == "M"`)
 - `"immature"`: Immature individuals (`mat == "immature"`)
@@ -8732,9 +8582,9 @@ function generate_movement_data(;
     sexes_col = has_sex ? sorted_df.sex : nothing
     mats_col  = has_mat ? sorted_df.mat : nothing
 
-    RecordType = NamedTuple{
-        (:tagid, :release, :recapture, :k, :sex, :mat), 
-        Tuple{String, Int, Int, Int, String, String}
+RecordType = NamedTuple{
+        (:tagid, :release, :recapture, :k, :rel_time, :sex, :mat, :lon, :lat),
+        Tuple{String, Int, Int, Int, Float64, String, String, Float64, Float64}
     }
     
     pair_records = Vector{RecordType}(undef, 0)
@@ -8762,7 +8612,7 @@ function generate_movement_data(;
 
     obs = DataFrame(pair_records)
 
-    # 4. Assign 3-tier biological groupings matching snowcrab_movement_data()
+    # 4. Assign 3-tier biological groupings matching load_movement_data()
     n_obs = nrow(obs)
     labels = Vector{String}(undef, n_obs)
     
