@@ -2068,7 +2068,9 @@ rendering errors so the pipeline is never aborted. Exports:
 - Domain-wide bottleneck conduit heatmap.
 """
 function export_dashboards(
-    loaded, kernels, path_results, diagnostics, params, validation = nothing
+    loaded, kernels, path_results, diagnostics, params,
+    validation = nothing,
+    agent_trajectories = nothing
 )::Union{NamedTuple, Nothing}
     params.render_html || return nothing
     verbose = params.verbose
@@ -2717,11 +2719,401 @@ function export_dashboards(
         end
     end
 
+    # -- Agent-Based Model trajectory dashboard ----------------------------
+    # agent_trajectories is a DataFrame with columns: tagid, step, mesh_unit,
+    # group.  Convert to lightweight NamedTuples compatible with leaflet_tracks_map
+    # and export, then write a companion CSV.
+    if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
+        try
+            # Build per-agent coordinate sequences grouped by tagid
+            agent_rich = NamedTuple[]
+            for gdf in groupby(agent_trajectories, :tagid)
+                sorted = sort(gdf, :step)
+                nodes  = sorted.mesh_unit
+                grp    = first(sorted.group)
+                coords = Tuple{Float64, Float64}[
+                    (Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
+                    for u in nodes
+                    if 1 <= u <= n_units
+                ]
+                length(coords) < 2 && continue
+                color = palette_colors[(grp - 1) % length(palette_colors) + 1]
+                push!(agent_rich, (
+                    tagid           = string("agent", first(sorted.tagid)),
+                    path            = nodes,
+                    coords          = coords,
+                    n_steps         = length(coords) - 1,
+                    total_dist_km   = sum(
+                        haversine_distance(
+                            coords[h-1][1], coords[h-1][2],
+                            coords[h][1],   coords[h][2]
+                        ) / 1_000.0
+                        for h in 2:length(coords)
+                    ),
+                    displacement_km = haversine_distance(
+                        coords[1][1], coords[1][2],
+                        coords[end][1], coords[end][2]
+                    ) / 1_000.0,
+                    tortuosity      = 1.0,
+                    mean_hsi        = mean(
+                        (1 <= u <= length(hsi_vec)) ? hsi_vec[u] : 0.5
+                        for u in nodes
+                    ),
+                    color           = color,
+                    duration_days   = Float64(length(coords) - 1),
+                    group           = grp,
+                    group_label     = get(grp_nlookup, grp, "Group $grp"),
+                ))
+            end
+            if !isempty(agent_rich)
+                agent_file = joinpath(out_dir, "movement_agent_trajectories.html")
+                agent_map  = leaflet_tracks_map(
+                    agent_rich, au_mesh;
+                    max_paths = length(agent_rich),
+                    hsi       = hsi_vec,
+                    dark_mode = params.dark_mode,
+                    title     = "$spp Agent-Based Model Trajectories"
+                )
+                save_html(agent_map, agent_file)
+                verbose && println("  Agent trajectory dashboard: $agent_file")
+
+                # Companion CSV: mean visit frequency per mesh unit
+                visit_freq = zeros(Float64, n_units)
+                for row in eachrow(agent_trajectories)
+                    u = row.mesh_unit
+                    1 <= u <= n_units && (visit_freq[u] += 1)
+                end
+                n_agents = length(unique(agent_trajectories.tagid))
+                visit_freq ./= max(1, n_agents)
+                csv_agent = joinpath(out_dir, "movement_agent_visit_frequency.csv")
+                open(csv_agent, "w") do io
+                    write(io, "mesh_unit,mean_visit_frequency\n")
+                    for (u, f) in enumerate(visit_freq)
+                        write(io, "$u,$(round(f; digits=6))\n")
+                    end
+                end
+                verbose && println("  Agent visit-frequency CSV: $csv_agent")
+            end
+        catch e
+            verbose && println("  (Agent trajectory note: $(_error_note(e)))")
+        end
+    end
+
+    # -- Corridor aggregate heatmap -----------------------------------------
+    # Sum Markov-bridge corridor matrices across all individuals, normalise to
+    # [0, 1] visitation probability, and render as a choropleth.
+    if !isempty(path_results.corridors)
+        try
+            n_sp = loaded.n_spatial
+            corr_agg = zeros(Float64, n_sp)
+            for (_, C) in path_results.corridors
+                if C isa AbstractMatrix
+                    corr_agg .+= vec(sum(C; dims = 2))
+                elseif C isa AbstractVector
+                    corr_agg .+= Float64.(C)
+                end
+            end
+            cmax = maximum(corr_agg)
+            cmax > 0 && (corr_agg ./= cmax)
+            corr_file = joinpath(out_dir, "movement_corridors_heatmap.html")
+            corr_map  = leaflet_choropleth(
+                polys_ll, corr_agg;
+                title     = "$spp Markov-Bridge Corridor Visitation (Aggregate)",
+                cmap      = params.cmap,
+                dark_mode = params.dark_mode
+            )
+            save_html(corr_map, corr_file)
+            verbose && println("  Corridor heatmap: $corr_file")
+        catch e
+            verbose && println("  (Corridor heatmap note: $(_error_note(e)))")
+        end
+    end
+
+    # -- Bottleneck uncertainty heatmap -------------------------------------
+    # The bottleneck SE field quantifies cross-event variability in the
+    # structural bottleneck index; render it alongside the existing density map.
+    if !isnothing(path_results.domain_bottlenecks)
+        bn = path_results.domain_bottlenecks
+        if hasproperty(bn, :bottleneck_se) && any(>(0.0), bn.bottleneck_se)
+            try
+                bse_file = joinpath(out_dir, "movement_bottleneck_uncertainty.html")
+                bse_map  = leaflet_choropleth(
+                    polys_ll, bn.bottleneck_se;
+                    title     = "$spp Bottleneck Index Uncertainty (SE)",
+                    cmap      = params.cmap,
+                    dark_mode = params.dark_mode
+                )
+                save_html(bse_map, bse_file)
+                verbose && println("  Bottleneck SE dashboard: $bse_file")
+            catch e
+                verbose && println("  (Bottleneck SE note: $(_error_note(e)))")
+            end
+        end
+    end
+
+    # -- Stock connectivity HTML dashboard ----------------------------------
+    # The validation connectivity matrix is a small region-to-region table;
+    # render it as an interactive heatmap when regions are configured.
+    if !isnothing(validation) &&
+       !isnothing(get(validation, :connectivity_matrix, nothing))
+        conn = get(validation, :connectivity_matrix, nothing)
+        if !isnothing(conn) && hasproperty(conn, :connectivity_matrix) &&
+           size(conn.connectivity_matrix, 1) > 1
+            try
+                conn_html = joinpath(out_dir, "movement_stock_connectivity.html")
+                conn_map  = leaflet_regional_connectivity(
+                    conn.connectivity_matrix;
+                    dark_mode = params.dark_mode,
+                    title     = "$spp Stock Connectivity Matrix"
+                )
+                save_html(conn_map, conn_html)
+                verbose && println("  Stock connectivity HTML: $conn_html")
+            catch e
+                verbose && println("  (Stock connectivity HTML note: $(_error_note(e)))")
+            end
+        end
+    end
+
+    # -- Posterior Predictive Check HTML ------------------------------------
+    # The existing export writes a plain-text summary; render a richer
+    # SVG/HTML panel matching the style of the posterior parameter dashboard.
+    if !isnothing(validation) &&
+       !isnothing(get(validation, :posterior_predictive, nothing))
+        ppc = get(validation, :posterior_predictive, nothing)
+        if !isnothing(ppc) && hasproperty(ppc, :brier_scores) &&
+           !isempty(ppc.brier_scores)
+            try
+                ppc_file = joinpath(out_dir, "movement_ppc_summary.html")
+                _export_ppc_html(ppc_file, ppc; species = spp)
+                verbose && println("  PPC summary dashboard: $ppc_file")
+            catch e
+                verbose && println("  (PPC dashboard note: $(_error_note(e)))")
+            end
+        end
+    end
+
     return (
         movement_stats = mov_stats,
         phenology      = pheno_res,
         trait_models   = trait_res,
     )
+end
+
+
+# =============================================================================
+# Helper: Posterior Predictive Check HTML
+# =============================================================================
+
+"""
+    _export_ppc_html(filepath, ppc; species = "generic") -> String
+
+Renders a self-contained SVG/HTML posterior predictive check dashboard.
+Includes:
+- Brier score trace and KL divergence trace across MCMC draws
+- Observed vs predicted recapture probability distribution
+- Summary statistics (mean, 95% CI)
+"""
+function _export_ppc_html(filepath::String, ppc::NamedTuple;
+                          species::String = "generic")::String
+    mkpath(dirname(filepath))
+
+    # Build SVG trace for a vector of per-draw values.
+    function _trace_svg(
+        vals::Vector{Float64},
+        label::String,
+        color::String;
+        width::Int = 360, height::Int = 160
+    )::String
+        N = length(vals)
+        N < 2 && return "<p>Insufficient draws</p>"
+        vmin, vmax = minimum(vals), maximum(vals)
+        abs(vmax - vmin) < 1e-14 && (vmax = vmin + 1.0)
+        pad_l, pad_r, pad_t, pad_b = 48, 12, 18, 28
+        pw = width  - pad_l - pad_r
+        ph = height - pad_t - pad_b
+        y_ax = height - pad_b
+
+        io = IOBuffer()
+        write(io, "<svg width=\"$width\" height=\"$height\" " *
+                  "xmlns=\"http://www.w3.org/2000/svg\">")
+        write(io, "<line x1=\"$pad_l\" y1=\"$y_ax\" x2=\"$(width - pad_r)\" " *
+                  "y2=\"$y_ax\" stroke=\"#475569\" stroke-width=\"1\"/>")
+        write(io, "<line x1=\"$pad_l\" y1=\"$pad_t\" x2=\"$pad_l\" " *
+                  "y2=\"$y_ax\" stroke=\"#475569\" stroke-width=\"1\"/>")
+        pts = String[]
+        for i in 1:N
+            px = pad_l + ((i - 1) / (N - 1)) * pw
+            py = y_ax  - ((vals[i] - vmin) / (vmax - vmin)) * ph
+            push!(pts, (i == 1 ? "M" : "L") *
+                       " $(round(px; digits=1)) $(round(py; digits=1))")
+        end
+        write(io, "<path d=\"$(join(pts, " "))\" fill=\"none\" stroke=\"$color\" " *
+                  "stroke-width=\"1.8\"/>")
+        mid_x = pad_l + pw ÷ 2
+        write(io, "<text x=\"$mid_x\" y=\"$(height - 6)\" " *
+                  "text-anchor=\"middle\" fill=\"#94a3b8\" font-size=\"11\" " *
+                  "font-family=\"Outfit, sans-serif\">$label</text>")
+        # y-axis tick labels
+        for (frac, lab) in ((0.0, round(vmin; digits = 4)),
+                            (1.0, round(vmax; digits = 4)))
+            py_t = round(Int, y_ax - frac * ph)
+            write(io, "<text x=\"$(pad_l - 4)\" y=\"$py_t\" " *
+                      "text-anchor=\"end\" fill=\"#64748b\" font-size=\"9\" " *
+                      "font-family=\"JetBrains Mono, monospace\">$lab</text>")
+        end
+        write(io, "</svg>")
+        String(take!(io))
+    end
+
+    # Observed vs mean predicted distribution bar chart.
+    function _dist_svg(
+        obs::Vector{Float64},
+        pred::Vector{Float64};
+        width::Int = 720, height::Int = 160
+    )::String
+        N = length(obs)
+        N < 1 && return "<p>No distribution</p>"
+        n_show = min(N, 120)  # show first 120 units for readability
+        obs_s  = obs[1:n_show]
+        pred_s = length(pred) >= n_show ? pred[1:n_show] : fill(0.0, n_show)
+        vmax   = max(maximum(obs_s), maximum(pred_s), 1e-14)
+        pad_l, pad_r, pad_t, pad_b = 8, 8, 14, 22
+        bw = max(1, (width - pad_l - pad_r) ÷ n_show)
+        ph = height - pad_t - pad_b
+        y_ax = height - pad_b
+        io = IOBuffer()
+        write(io, "<svg width=\"$width\" height=\"$height\" " *
+                  "xmlns=\"http://www.w3.org/2000/svg\">")
+        for i in 1:n_show
+            x0  = pad_l + (i - 1) * bw
+            h_o = round(Int, (obs_s[i]  / vmax) * ph)
+            h_p = round(Int, (pred_s[i] / vmax) * ph)
+            write(io, "<rect x=\"$x0\" y=\"$(y_ax - h_o)\" " *
+                      "width=\"$(max(1, bw - 1))\" height=\"$h_o\" " *
+                      "fill=\"#38bdf8\" opacity=\"0.75\"/>")
+            write(io, "<rect x=\"$x0\" y=\"$(y_ax - h_p)\" " *
+                      "width=\"$(max(1, bw - 1))\" height=\"$h_p\" " *
+                      "fill=\"#f43f5e\" opacity=\"0.45\"/>")
+        end
+        mid_x = width ÷ 2
+        write(io, "<text x=\"$mid_x\" y=\"$(height - 6)\" " *
+                  "text-anchor=\"middle\" fill=\"#94a3b8\" font-size=\"11\" " *
+                  "font-family=\"Outfit, sans-serif\">" *
+                  "Spatial Unit (first $n_show of $N shown) \u2014 " *
+                  "<tspan fill=\"#38bdf8\">\u25a0 Observed</tspan> " *
+                  "<tspan fill=\"#f43f5e\">\u25a0 Predicted</tspan></text>")
+        write(io, "</svg>")
+        String(take!(io))
+    end
+
+
+    brier  = Float64.(ppc.brier_scores)
+    kl     = Float64.(ppc.kl_divergences)
+    obs_d  = Float64.(ppc.observed_dist)
+    pred_d = hasproperty(ppc, :predicted_dist_mean) ?
+             Float64.(ppc.predicted_dist_mean) : Float64[]
+
+    sm = ppc.summary
+    brier_m  = round(sm.brier_mean;     digits = 6)
+    brier_lo = round(sm.brier_lower_ci; digits = 6)
+    brier_hi = round(sm.brier_upper_ci; digits = 6)
+    kl_m     = round(sm.kl_mean;        digits = 6)
+    kl_lo    = round(sm.kl_lower_ci;    digits = 6)
+    kl_hi    = round(sm.kl_upper_ci;    digits = 6)
+    n_obs    = sm.n_observations
+    n_draws  = sm.n_draws
+
+    svg_brier = _trace_svg(brier, "Brier Score (draw)",    "#38bdf8")
+    svg_kl    = _trace_svg(kl,    "KL Divergence (draw)",  "#f43f5e")
+    svg_dist  = _dist_svg(obs_d, pred_d)
+
+    html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>$species — Posterior Predictive Check</title>
+<style>
+  :root {
+    --bg:          #0f172a;
+    --surface:     #1e293b;
+    --border:      #334155;
+    --text:        #f1f5f9;
+    --muted:       #94a3b8;
+    --accent:      #38bdf8;
+    --font-main:   'Outfit', system-ui, sans-serif;
+    --font-mono:   'JetBrains Mono', monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font-main);
+    padding: 28px 36px;
+  }
+  h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; }
+  .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 24px; }
+  .kpi-row {
+    display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 28px;
+  }
+  .kpi {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 20px; min-width: 180px;
+  }
+  .kpi-label { font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
+  .kpi-value {
+    font-size: 1.25rem; font-weight: 700;
+    font-family: var(--font-mono); color: var(--accent);
+  }
+  .kpi-ci {
+    font-size: 0.72rem; color: var(--muted);
+    font-family: var(--font-mono); margin-top: 2px;
+  }
+  .section-title {
+    font-size: 0.85rem; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 0.07em; color: var(--muted); margin: 22px 0 10px;
+  }
+  .traces { display: flex; gap: 20px; flex-wrap: wrap; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .dist-panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px; margin-top: 20px;
+  }
+</style>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&family=JetBrains+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+<h1>$species — Posterior Predictive Check</h1>
+<div class="subtitle">$n_obs observations · $n_draws MCMC draws evaluated</div>
+
+<div class="kpi-row">
+  <div class="kpi">
+    <div class="kpi-label">Brier Score (MSE)</div>
+    <div class="kpi-value">$brier_m</div>
+    <div class="kpi-ci">95% CI [$brier_lo, $brier_hi]</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">KL Divergence</div>
+    <div class="kpi-value">$kl_m</div>
+    <div class="kpi-ci">95% CI [$kl_lo, $kl_hi]</div>
+  </div>
+</div>
+
+<div class="section-title">Per-Draw Traces</div>
+<div class="traces">
+  <div class="panel">$svg_brier</div>
+  <div class="panel">$svg_kl</div>
+</div>
+
+<div class="section-title">Recapture Probability Distribution</div>
+<div class="dist-panel">$svg_dist</div>
+</body></html>
+"""
+    write(filepath, html)
+    return filepath
 end
 
 
@@ -2825,6 +3217,61 @@ function run_movement_analysis(
 
     out_dir = params.output_dir
     mkpath(out_dir)
+
+    results_checkpoint = joinpath(out_dir, "movement_results_checkpoint.jld2")
+
+    # --figures-only: load the full results checkpoint and re-render dashboards
+    # without re-running any computation.
+    if params.figures_only
+        isfile(results_checkpoint) || error(
+            "[figures-only] Full results checkpoint not found: $results_checkpoint\n" *
+            "Run the pipeline at least once without --figures-only to create it."
+        )
+        params.verbose && println(
+            "\n[figures-only] Loading results checkpoint: $results_checkpoint"
+        )
+        rc = JLD2.load(results_checkpoint)
+        loaded_r             = rc["loaded"]
+        kernels_r            = rc["kernels"]
+        path_res_r           = rc["path_res"]
+        diagnostics_r        = rc["diagnostics"]
+        validation_r         = rc["validation"]
+        agent_trajectories_r = rc["agent_trajectories"]
+
+        # Force render_html on so figures are actually written.
+        params_render = merge(params, (render_html = true,))
+
+        params_render.verbose && println("\n[figures-only] Regenerating dashboards...")
+        export_dashboards(
+            loaded_r, kernels_r, path_res_r, diagnostics_r,
+            params_render, validation_r, agent_trajectories_r
+        )
+        params_render.verbose && println("\n[figures-only] Done.")
+
+        return (
+            data               = loaded_r.data,
+            models             = nothing,
+            chains             = nothing,
+            P_kernel           = kernels_r.P_kernel,
+            paths              = path_res_r.paths,
+            corridors          = path_res_r.corridors,
+            stochastic_paths   = path_res_r.stochastic_paths,
+            domain_bottlenecks = path_res_r.domain_bottlenecks,
+            circuit            = diagnostics_r.circuit,
+            validation_analyses = validation_r,
+            agent_trajectories = agent_trajectories_r,
+            movement_stats     = nothing,
+            phenology          = nothing,
+            trait_models       = nothing,
+            parameters         = (
+                alpha     = kernels_r.alpha_hat,
+                residence = kernels_r.rho_hat,
+                gamma     = kernels_r.gamma_hat,
+            ),
+            depth_range        = loaded_r.parsed_depth_range,
+        )
+    end
+
     checkpoint_file = joinpath(out_dir, "movement_checkpoint.jld2")
     resume_from_checkpoint = params.resume_from_checkpoint
 
@@ -2865,8 +3312,21 @@ function run_movement_analysis(
             [get(loaded.group_map, string(g), 1) for g in obs_groups]
         end
 
+        # Normalise P_kernel to Vector{SparseMatrixCSC{Float64,Int}} as required by
+        # simulate_agent_trajectories.  construct_stochastic_transition_kernel returns
+        # Matrix{Float64} for scalar parameters (G=1) or Vector{Matrix{Float64}} for
+        # group-vector parameters.
+        agent_kernels = if kernels.P_kernel isa AbstractMatrix
+            [sparse(kernels.P_kernel)]
+        else
+            [sparse(M) for M in kernels.P_kernel]
+        end
+        n_kernels = length(agent_kernels)
+        # Clamp group indices so they always index into agent_kernels.
+        groups_clamped = clamp.(groups, 1, n_kernels)
+
         agent_trajectories = simulate_agent_trajectories(
-            n_sim_agents, start_nodes, groups, kernels.P_kernel, 50; seed=params.seed
+            n_sim_agents, start_nodes, groups_clamped, agent_kernels, 50; seed=params.seed
         )
         if params.verbose
             println("  Simulated $(n_sim_agents) agents for 50 steps.")
@@ -2876,7 +3336,31 @@ function run_movement_analysis(
     path_res    = reconstruct_paths_and_diagnostics(loaded, kernels, params)
     diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
     validation  = execute_validation_analyses(loaded, fitted, kernels, params)
-    dashboards  = export_dashboards(loaded, kernels, path_res, diagnostics, params, validation)
+    dashboards  = export_dashboards(
+        loaded, kernels, path_res, diagnostics, params, validation, agent_trajectories
+    )
+
+    # Write a full results checkpoint so --figures-only can regenerate dashboards
+    # without re-running any computation.  Written after every successful run so
+    # it always reflects the most recent results.
+    try
+        params.verbose && println(
+            "\n[Checkpoint] Saving full results to: $results_checkpoint"
+        )
+        JLD2.save(
+            results_checkpoint,
+            "loaded",             loaded,
+            "kernels",            kernels,
+            "path_res",           path_res,
+            "diagnostics",        diagnostics,
+            "validation",         validation,
+            "agent_trajectories", agent_trajectories,
+        )
+    catch e
+        params.verbose && println(
+            "  (Results checkpoint write skipped: $(_error_note(e)))"
+        )
+    end
 
     if params.verbose
         println("\n" * "=" ^ 72)

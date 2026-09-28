@@ -165,7 +165,10 @@ or zero-rate boundaries.
 - `land_mask`: Optional boolean mask (`true` for land/barrier units).
 
 # Returns
-- `SparseMatrixCSC{Float64, Int}`: Conservative infinitesimal generator \$Q\$.
+- `SparseMatrixCSC{T, Int}`: Conservative infinitesimal generator \$Q\$, where
+    \$T\$ follows the element type of the parameters. Under automatic
+    differentiation that is a `ForwardDiff.Dual`, so the generator stays on the
+    gradient tape; with concrete parameters it is `Float64`.
 """
 function construct_ssa_generator(
     W::SparseMatrixCSC{Float64, Int},
@@ -174,7 +177,7 @@ function construct_ssa_generator(
     diffusion::Real = 0.15,
     gamma::Real = 1.00,
     land_mask::Union{Nothing, BitVector, Vector{Bool}} = nothing
-)::SparseMatrixCSC{Float64, Int}
+)
     S = size(W, 1)
     length(utility) == S ||
         throw(DimensionMismatch("utility length must match size(W, 1)"))
@@ -182,13 +185,21 @@ function construct_ssa_generator(
     rows = rowvals(W)
     vals = nonzeros(W)
 
-    v = max(0.0, Float64(velocity))
-    D = max(0.0, Float64(diffusion))
-    gam = Float64(gamma)
+    # The working element type follows the parameters, not `Float64`. Under
+    # automatic differentiation those are `ForwardDiff.Dual`, and casting them to
+    # `Float64` would sever the parameters from the tape: `MH(cov)` and `NUTS` both
+    # failed with `Float64(::ForwardDiff.Dual)` at the first such cast. With
+    # concrete parameters `T` is `Float64` and the result is unchanged.
+    T = promote_type(typeof(velocity), typeof(diffusion), typeof(gamma),
+                     eltype(utility), Float64)
+    v = max(zero(T), convert(T, velocity))
+    D = max(zero(T), convert(T, diffusion))
+    gam = convert(T, gamma)
+    z0 = zero(T)
 
     I_idx = Int[]
     J_idx = Int[]
-    V_val = Float64[]
+    V_val = T[]
 
     # Pre-allocate for sparse matrix assembly
     sizehint!(I_idx, nnz(W) + S)
@@ -200,11 +211,11 @@ function construct_ssa_generator(
             # Land node has zero transition rates
             push!(I_idx, i)
             push!(J_idx, i)
-            push!(V_val, 0.0)
+            push!(V_val, z0)
             continue
         end
 
-        u_i = Float64(utility[i])
+        u_i = utility[i]
         nbrs = Int[]
         nbr_w = Float64[]
 
@@ -222,7 +233,7 @@ function construct_ssa_generator(
         if isempty(nbrs)
             push!(I_idx, i)
             push!(J_idx, i)
-            push!(V_val, 0.0)
+            push!(V_val, z0)
             continue
         end
 
@@ -231,13 +242,13 @@ function construct_ssa_generator(
         diff_weights = nbr_w ./ max(1e-12, sum_diff_w)
 
         # 2. Directed taxis weights
-        taxis_raw = [w * exp(clamp(gam * (Float64(utility[j]) - u_i), -20.0, 20.0))
+        taxis_raw = [w * exp(clamp(gam * (utility[j] - u_i), -20.0, 20.0))
                      for (j, w) in zip(nbrs, nbr_w)]
         sum_taxis = sum(taxis_raw)
         taxis_weights = taxis_raw ./ max(1e-12, sum_taxis)
 
         # 3. Combined transition rate Q_ij
-        total_exit_rate = 0.0
+        total_exit_rate = z0
         for (k, j) in enumerate(nbrs)
             rate_ij = D * diff_weights[k] + v * taxis_weights[k]
             if rate_ij > 1e-12

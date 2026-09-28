@@ -481,7 +481,12 @@ transform: the generator is built from the two parameters themselves.
         land_mask = land_mask,
     )
 
-    cache = Dict{Tuple{Int, Float64}, Vector{Float64}}()
+    # The cache is typed from the generator, not from `Float64`. A hard
+    # `Vector{Float64}` here forced a conversion of the `ForwardDiff.Dual` rows and
+    # threw `Float64(::Dual)` -- the same class of bug as a cast anywhere else on
+    # the path, because it severs the parameters from the gradient tape.
+    RT = eltype(Q)
+    cache = Dict{Tuple{Int,Float64},Vector{RT}}()
     for (rel, dt_val) in unique(zip(releases, dts))
         cache[(rel, dt_val)] = _rel_probs(calculate_ssa_transition_row(Q, dt_val, rel))
     end
@@ -598,7 +603,12 @@ and ignored, and this currently reduces to
         land_mask = land_mask,
     )
 
-    cache = Dict{Tuple{Int, Float64}, Vector{Float64}}()
+    # The cache is typed from the generator, not from `Float64`. A hard
+    # `Vector{Float64}` here forced a conversion of the `ForwardDiff.Dual` rows and
+    # threw `Float64(::Dual)` -- the same class of bug as a cast anywhere else on
+    # the path, because it severs the parameters from the gradient tape.
+    RT = eltype(Q)
+    cache = Dict{Tuple{Int,Float64},Vector{RT}}()
     for (rel, dt_val) in unique(zip(releases, dts))
         cache[(rel, dt_val)] = _rel_probs(calculate_ssa_transition_row(Q, dt_val, rel))
     end

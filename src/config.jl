@@ -139,6 +139,10 @@ Base.@kwdef struct MovementAnalysisConfig
     # --- CLI-only ------------------------------------------------------------
     # Not part of the analysis; set by the parser and never read by the pipeline.
     show_help::Bool = false
+    # When true, skip all computation and regenerate dashboards from the saved
+    # full results checkpoint (movement_results_checkpoint.jld2).  Implies
+    # render_html=true.  Requires a prior successful run.
+    figures_only::Bool = false
 end
 
 # =============================================================================
@@ -622,6 +626,13 @@ function create_argparse_settings()::ArgParseSettings
             help = "Comma-separated polygon files, one per region label."
             arg_type = String
             metavar = "PATHS"
+        "--figures-only"
+            dest_name = "figures_only"
+            help = "Regenerate all HTML dashboards from a saved results " *
+                   "checkpoint (movement_results_checkpoint.jld2) without " *
+                   "re-running MCMC, path reconstruction, or diagnostics. " *
+                   "Implies --render-html=true. Requires a prior successful run."
+            arg_type = Bool
         "--quiet"
             dest_name = "verbose"
             help = "Suppress progress output. Takes an explicit value: --quiet=true."
