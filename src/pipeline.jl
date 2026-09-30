@@ -706,8 +706,21 @@ end
                 "(global land/sea mask)"
             )
         end
+
+        P_orig_to_fine = compute_network_transfer_matrix(
+            data.mesh, fine_mesh; method = :area_weighted
+        )
+        hsi_fine = if hasproperty(data, :hsi_vec) && !isnothing(data.hsi_vec) &&
+                      length(data.hsi_vec) == data.mesh.n_units
+            reshard_spatial_field(P_orig_to_fine, data.hsi_vec)
+        elseif resharded_hydro !== nothing && hasproperty(resharded_hydro, :hsi)
+            resharded_hydro.hsi
+        else
+            fill(0.5, fine_mesh.n_units)
+        end
+
         W, hsi_vec = apply_land_barrier(
-            fine_mesh.W, resharded_hydro.hsi, land_mask
+            fine_mesh.W, hsi_fine, land_mask
         )
 
         # `monthly_hsi` was built on the original mesh, so its rows index a
@@ -716,9 +729,6 @@ end
         # grid, which is what P_transfer maps -- or every time-varying kernel
         # lookup would index the wrong units.
         if !isempty(monthly_hsi) && size(monthly_hsi, 1) != fine_mesh.n_units
-            P_orig_to_fine = compute_network_transfer_matrix(
-                data.mesh, fine_mesh; method = :area_weighted
-            )
             monthly_hsi = reshard_spatial_field(P_orig_to_fine, monthly_hsi)
             for col in axes(monthly_hsi, 2)
                 monthly_hsi[land_mask, col] .= 0.0
@@ -884,7 +894,7 @@ end
         # In :hsi_only mode valid = marine (land_mask = land-only)
         # In :hard/:bridge mode valid = in-depth marine
         valid_units = if depth_mode == :hsi_only
-            findall(.!out_of_depth .& .!land_only_bv)   # prefer in-depth
+            findall(.!land_only_bv)
         else
             findall(.!land_mask)
         end
@@ -903,7 +913,7 @@ end
                 valid_cents = cents_raw[valid_units]
 
                 # Combined barrier for endpoint-out-of-range check
-                out_bv = depth_mode == :hsi_only ? out_of_depth : land_mask
+                out_bv = depth_mode == :hsi_only ? land_only_bv : land_mask
 
                 bad_rel_mask = [out_bv[r] for r in obs_df.release]
                 bad_rec_mask = [out_bv[r] for r in obs_df.recapture]
@@ -2340,8 +2350,9 @@ function export_dashboards(
             all_paths_rich, au_mesh;
             empirical_paths     = emp_tracks,
             max_paths           = max(100, length(all_paths_rich)),
-            max_empirical_paths = max(500, length(emp_tracks)),
-            hsi                 = hsi_vec,
+            max_empirical_paths = length(emp_tracks),
+            hsi                 = nothing,
+            overlay_hsi         = false,
             dark_mode           = params.dark_mode,
             title               = "$spp Movement Trajectories" *
                                   reshard_lbl * depth_lbl
@@ -2423,10 +2434,12 @@ function export_dashboards(
     # -- Interactive two-click corridor explorer -----------------------------
     try
         corr_file  = joinpath(out_dir, "movement_interactive_corridor.html")
+        corr_file_pl = joinpath(out_dir, "movement_interactive_corridors.html")
         grp_labels = [get(grp_nlookup, g, "Group $g") for g in 1:G]
         corr_map   = leaflet_interactive_corridor_dashboard(
             P_kernel, au_mesh;
-            hsi             = hsi_vec,
+            hsi             = params.overlay_hsi ? hsi_vec : nothing,
+            overlay_hsi     = params.overlay_hsi,
             empirical_paths = emp_tracks,
             group_labels    = grp_labels,
             dark_mode       = params.dark_mode,
@@ -2434,6 +2447,7 @@ function export_dashboards(
                               reshard_lbl * depth_lbl
         )
         save_html(corr_map, corr_file)
+        save_html(corr_map, corr_file_pl)
         verbose && println("  Corridor dashboard: $corr_file")
     catch e
         verbose && println("  (Corridor dashboard note: $(_error_note(e)))")
@@ -2450,9 +2464,10 @@ function export_dashboards(
             ens_file = joinpath(out_dir, "movement_posterior_path_ensemble.html")
             ens_map  = leaflet_posterior_path_ensemble(
                 ensemble, au_mesh;
-                hsi   = hsi_vec,
-                dark_mode = params.dark_mode,
-                title = "$spp Posterior Path Ensemble" * reshard_lbl * depth_lbl
+                hsi         = params.overlay_hsi ? hsi_vec : nothing,
+                overlay_hsi = params.overlay_hsi,
+                dark_mode   = params.dark_mode,
+                title       = "$spp Posterior Path Ensemble" * reshard_lbl * depth_lbl
             )
             save_html(ens_map, ens_file)
             verbose && println("  Posterior ensemble dashboard: $ens_file")
@@ -2484,12 +2499,14 @@ function export_dashboards(
             circ_file = joinpath(out_dir, "movement_current_density.html")
             leaflet_current_density_map(
                 mesh, circ.current_density;
-                pinch_mask   = circ.pinch_mask,
-                pinch_score  = circ.pinch_score,
-                centroids    = path_results.cents_lonlat,
-                output_html  = circ_file,
-                dark_mode    = params.dark_mode,
-                title        = "$spp Migratory Current Density & Pinch-Points"
+                pinch_mask        = circ.pinch_mask,
+                pinch_score       = circ.pinch_score,
+                centroids         = path_results.cents_lonlat,
+                output_html       = circ_file,
+                dark_mode         = params.dark_mode,
+                title             = "$spp Migratory Current Density & Pinch-Points",
+                transparent_zeros = true,
+                badge             = nothing
             )
             verbose && println("  Current density dashboard: $circ_file")
         catch e
@@ -2500,10 +2517,12 @@ function export_dashboards(
             stoch_file = joinpath(out_dir, "movement_stochastic_circuit.html")
             leaflet_current_density_map(
                 mesh, circ.stochastic;
-                prob_threshold = 0.80,
-                output_html    = stoch_file,
-                dark_mode      = params.dark_mode,
-                title          = "$spp Posterior Migratory Flux & Pinch-Points"
+                prob_threshold    = 0.80,
+                output_html       = stoch_file,
+                dark_mode         = params.dark_mode,
+                title             = "$spp Posterior Migratory Flux & Pinch-Points",
+                transparent_zeros = true,
+                badge             = nothing
             )
             verbose && println("  Stochastic circuit dashboard: $stoch_file")
         catch e
@@ -2518,13 +2537,15 @@ function export_dashboards(
             bn_file = joinpath(out_dir, "movement_domain_bottlenecks.html")
             leaflet_current_density_map(
                 mesh, bn.transit_density;
-                pinch_mask   = bn.bottleneck_mask,
-                pinch_score  = bn.bottleneck_score,
-                centroids    = path_results.cents_lonlat,
-                output_html  = bn_file,
-                title        = "$spp Domain-Wide Pathways & Bottlenecks",
-                dark_mode    = params.dark_mode,
-                legend_title = "Transit Density (C)"
+                pinch_mask        = bn.bottleneck_mask,
+                pinch_score       = bn.bottleneck_score,
+                centroids         = path_results.cents_lonlat,
+                output_html       = bn_file,
+                title             = "$spp Domain-Wide Pathways & Bottlenecks",
+                dark_mode         = params.dark_mode,
+                legend_title      = "Transit Density (C)",
+                transparent_zeros = true,
+                badge             = nothing
             )
             verbose && println("  Bottleneck dashboard: $bn_file")
         catch e
@@ -2583,20 +2604,27 @@ function export_dashboards(
     end
 
     # 3. Advection Velocity Field
-    # `leaflet_advection_arrows` takes the mesh plus optional fields; the current
-    # components are passed as the Gamma matrix it accepts, and the mesh carries
-    # the polygons it draws arrows over.
-    hydro = get(loaded, :resharded_hydro, nothing)
-    if hydro !== nothing && hasproperty(hydro, :advection_u)
+    # When advection or transition kernels are available, render directional drift arrows.
+    # Drift vectors are derived from the model-fitted transition kernel (P_kernel)
+    # or hydrodynamic current fields, strictly masked against land units.
+    if !isnothing(kernels.P_kernel) || (hydro !== nothing && hasproperty(hydro, :advection_u))
         try
             adv_file = joinpath(out_dir, "movement_advection_velocity.html")
+            u_vel = (hydro !== nothing && hasproperty(hydro, :u) && !isempty(hydro.u)) ?
+                    vec(hydro.u[:, 1]) : nothing
+            v_vel = (hydro !== nothing && hasproperty(hydro, :v) && !isempty(hydro.v)) ?
+                    vec(hydro.v[:, 1]) : nothing
             map_obj = leaflet_advection_arrows(
                 au_mesh;
-                hsi = loaded.hsi_vec,
-                Gamma = hydro.advection_u,
-                cmap    = params.cmap,
-                    title = "$spp Advection Drift & Velocity Field Vectors",
-                dark_mode = params.dark_mode
+                hsi        = params.overlay_hsi ? loaded.hsi_vec : nothing,
+                background = params.overlay_hsi ? :hsi : :mesh,
+                Gamma      = kernels.P_kernel,
+                u_velocity = u_vel,
+                v_velocity = v_vel,
+                land_mask  = loaded.land_mask,
+                cmap       = params.cmap,
+                title      = "$spp Advection Drift & Velocity Field Vectors",
+                dark_mode  = params.dark_mode
             )
             save_html(map_obj, adv_file)
             verbose && println("  Advection velocity dashboard: $adv_file")
@@ -2769,10 +2797,11 @@ function export_dashboards(
                 agent_file = joinpath(out_dir, "movement_agent_trajectories.html")
                 agent_map  = leaflet_tracks_map(
                     agent_rich, au_mesh;
-                    max_paths = length(agent_rich),
-                    hsi       = hsi_vec,
-                    dark_mode = params.dark_mode,
-                    title     = "$spp Agent-Based Model Trajectories"
+                    max_paths   = length(agent_rich),
+                    hsi         = params.overlay_hsi ? hsi_vec : nothing,
+                    overlay_hsi = params.overlay_hsi,
+                    dark_mode   = params.dark_mode,
+                    title       = "$spp Agent-Based Model Trajectories"
                 )
                 save_html(agent_map, agent_file)
                 verbose && println("  Agent trajectory dashboard: $agent_file")
@@ -2818,9 +2847,10 @@ function export_dashboards(
             corr_file = joinpath(out_dir, "movement_corridors_heatmap.html")
             corr_map  = leaflet_choropleth(
                 polys_ll, corr_agg;
-                title     = "$spp Markov-Bridge Corridor Visitation (Aggregate)",
-                cmap      = params.cmap,
-                dark_mode = params.dark_mode
+                title             = "$spp Markov-Bridge Corridor Visitation (Aggregate)",
+                cmap              = params.cmap,
+                dark_mode         = params.dark_mode,
+                transparent_zeros = true
             )
             save_html(corr_map, corr_file)
             verbose && println("  Corridor heatmap: $corr_file")
@@ -2830,24 +2860,52 @@ function export_dashboards(
     end
 
     # -- Bottleneck uncertainty heatmap -------------------------------------
-    # The bottleneck SE field quantifies cross-event variability in the
-    # structural bottleneck index; render it alongside the existing density map.
-    if !isnothing(path_results.domain_bottlenecks)
+    # The bottleneck SE field quantifies cross-individual variability in the
+    # structural bottleneck index. Compute SE across individual Markov-bridge
+    # corridors when available, or fall back to stochastic domain bottlenecks.
+    bse_vec = nothing
+    if !isempty(path_results.corridors)
+        n_sp = loaded.n_spatial
+        W_mat = hasproperty(loaded, :W) ? loaded.W : nothing
+        l_mask = hasproperty(loaded, :land_mask) ? loaded.land_mask : nothing
+        deg_marine = ones(Float64, n_sp)
+        if W_mat !== nothing
+            deg_marine = [
+                count(j -> W_mat[i, j] > 0 && (l_mask === nothing || !l_mask[j]), 1:n_sp)
+                for i in 1:n_sp
+            ]
+            replace!(deg_marine, 0 => 1)
+        end
+        n_ind = length(path_results.corridors)
+        if n_ind > 1
+            scores_matrix = zeros(Float64, n_ind, n_sp)
+            for (idx_k, (_, C_k)) in enumerate(path_results.corridors)
+                c_vec = C_k isa AbstractMatrix ? vec(sum(C_k; dims = 2)) : Float64.(C_k)
+                scores_matrix[idx_k, :] .= c_vec ./ deg_marine
+            end
+            bse_vec = [std(scores_matrix[:, u]) / sqrt(n_ind) for u in 1:n_sp]
+        end
+    end
+    if (bse_vec === nothing || !any(>(0.0), bse_vec)) && !isnothing(path_results.domain_bottlenecks)
         bn = path_results.domain_bottlenecks
         if hasproperty(bn, :bottleneck_se) && any(>(0.0), bn.bottleneck_se)
-            try
-                bse_file = joinpath(out_dir, "movement_bottleneck_uncertainty.html")
-                bse_map  = leaflet_choropleth(
-                    polys_ll, bn.bottleneck_se;
-                    title     = "$spp Bottleneck Index Uncertainty (SE)",
-                    cmap      = params.cmap,
-                    dark_mode = params.dark_mode
-                )
-                save_html(bse_map, bse_file)
-                verbose && println("  Bottleneck SE dashboard: $bse_file")
-            catch e
-                verbose && println("  (Bottleneck SE note: $(_error_note(e)))")
-            end
+            bse_vec = bn.bottleneck_se
+        end
+    end
+    if bse_vec !== nothing && any(>(0.0), bse_vec)
+        try
+            bse_file = joinpath(out_dir, "movement_bottleneck_uncertainty.html")
+            bse_map  = leaflet_choropleth(
+                polys_ll, bse_vec;
+                title             = "$spp Bottleneck Index Uncertainty (SE)",
+                cmap              = params.cmap,
+                dark_mode         = params.dark_mode,
+                transparent_zeros = true
+            )
+            save_html(bse_map, bse_file)
+            verbose && println("  Bottleneck SE dashboard: $bse_file")
+        catch e
+            verbose && println("  (Bottleneck SE note: $(_error_note(e)))")
         end
     end
 
@@ -2973,9 +3031,15 @@ function _export_ppc_html(filepath::String, ppc::NamedTuple;
     )::String
         N = length(obs)
         N < 1 && return "<p>No distribution</p>"
-        n_show = min(N, 120)  # show first 120 units for readability
-        obs_s  = obs[1:n_show]
-        pred_s = length(pred) >= n_show ? pred[1:n_show] : fill(0.0, n_show)
+        active_units = findall(i -> obs[i] > 0.0 || (i <= length(pred) && pred[i] > 1e-6), 1:N)
+        if isempty(active_units)
+            active_units = collect(1:min(N, 60))
+        end
+        sort!(active_units, by = u -> (obs[u], u <= length(pred) ? pred[u] : 0.0), rev = true)
+        n_show = min(length(active_units), 60)
+        u_sel  = active_units[1:n_show]
+        obs_s  = obs[u_sel]
+        pred_s = [u <= length(pred) ? pred[u] : 0.0 for u in u_sel]
         vmax   = max(maximum(obs_s), maximum(pred_s), 1e-14)
         pad_l, pad_r, pad_t, pad_b = 8, 8, 14, 22
         bw = max(1, (width - pad_l - pad_r) ÷ n_show)
@@ -2999,7 +3063,7 @@ function _export_ppc_html(filepath::String, ppc::NamedTuple;
         write(io, "<text x=\"$mid_x\" y=\"$(height - 6)\" " *
                   "text-anchor=\"middle\" fill=\"#94a3b8\" font-size=\"11\" " *
                   "font-family=\"Outfit, sans-serif\">" *
-                  "Spatial Unit (first $n_show of $N shown) \u2014 " *
+                  "Active Spatial Units ($n_show ranked by density) \u2014 " *
                   "<tspan fill=\"#38bdf8\">\u25a0 Observed</tspan> " *
                   "<tspan fill=\"#f43f5e\">\u25a0 Predicted</tspan></text>")
         write(io, "</svg>")
@@ -3299,11 +3363,11 @@ function run_movement_analysis(
         if params.verbose
             println("\n[Phase 2b] Simulating Agent-Based Movement Alternative Model...")
         end
-        n_sim_agents = min(100, nrow(loaded.obs_df))
+        n_sim_agents = nrow(loaded.obs_df)
         # Use observed release sites to start agents (column is :release, not :release_unit)
-        start_nodes = loaded.obs_df.release[1:n_sim_agents]
+        start_nodes = loaded.obs_df.release
         # group_map maps String -> Int; obs_df.group may already be Int group indices
-        obs_groups  = loaded.obs_df.group[1:n_sim_agents]
+        obs_groups  = loaded.obs_df.group
         groups = if eltype(obs_groups) <: Integer
             # Already integer group indices; use directly
             Int.(obs_groups)

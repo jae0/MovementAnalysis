@@ -123,6 +123,7 @@ Base.@kwdef struct MovementAnalysisConfig
     resume_from_checkpoint::Bool = false
     dark_mode::Bool = false
     cmap::Symbol = :viridis
+    overlay_hsi::Bool = false
     # NOT YET APPLIED. The dashboard CSS sets `--font-main` to a hardcoded stack
     # inside `_generate_leaflet_html_document`, and no panel forwards this value
     # there, so setting it has no effect. Wiring it means adding a keyword to all
@@ -610,6 +611,10 @@ function create_argparse_settings()::ArgParseSettings
             help = "Colour palette for maps (e.g. viridis, plasma, turbo)."
             arg_type = String
             metavar = "NAME"
+        "--overlay-hsi"
+            dest_name = "overlay_hsi"
+            help = "Overlay Habitat Suitability Index on maps (default: false)."
+            arg_type = Bool
         "--font"
             dest_name = "font"
             help = "NOT YET APPLIED: main font stack for dashboards. The dashboard " *

@@ -861,18 +861,19 @@ function load_open_bathymetry(;
             for i in 1:nx
                 x_norm = (lons[i] - min_lon) / (max_lon - min_lon)
 
-                # Distance from shelf-edge line (roughly southwest to northeast)
-                # Shelf edge runs from (0.0, 0.35) to (1.0, 0.70)
-                shelf_edge_y = 0.35 + 0.35 * x_norm
+                # Realistic continental shelf break line across NW Atlantic:
+                # Shelf edge runs from ~42.3°N in southwest to ~44.3°N in east
+                lat_shelf_break = 42.3 + 2.0 * x_norm
+                shelf_edge_y = clamp((lat_shelf_break - min_lat) / (max_lat - min_lat), 0.05, 0.70)
                 dist_to_slope = y_norm - shelf_edge_y
 
                 base_elev = if dist_to_slope < -0.05
                     # Continental Slope and Abyss (deep ocean)
-                    slope_t = clamp((-dist_to_slope - 0.05) / 0.35, 0.0, 1.0)
+                    slope_t = min(1.0, max(0.0, (-dist_to_slope - 0.05) / 0.35))
                     -200.0 - 2200.0 * (slope_t ^ 1.8)
                 else
                     # Continental Shelf Platform: depth typically 50m to 220m
-                    shelf_t = clamp(dist_to_slope / 0.6, 0.0, 1.0)
+                    shelf_t = min(1.0, max(0.0, dist_to_slope / 0.6))
                     # Outer shelf banks (shallow offshore features)
                     bank_signal = 55.0 * sin(3.0 * π * x_norm) * cos(2.5 * π * y_norm)
                     # Central shelf basins / troughs

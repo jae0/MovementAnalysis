@@ -6639,6 +6639,62 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
   <div class="subtitle">MCMC Parameter Posteriors for Species: """ *
   """$(uppercase(species)) • 95% Bayesian Credible Intervals</div>
 
+  <div class="card" style="border-left: 4px solid #38bdf8;">
+    <h2>Mathematical Framework & Parameter Biophysics</h2>
+    <div style="font-size: 0.92rem; color: #cbd5e1; line-height: 1.6;">
+      <p style="margin-bottom: 12px;">
+        Movement dynamics across the discrete spatial graph are parameterized via a
+        stochastic advection-diffusion-retention Markov transition kernel. Transition
+        probabilities between spatial units <em>i</em> and <em>j</em> over time interval
+        &Delta;t are formulated as:
+      </p>
+      <div style="background: rgba(0,0,0,0.3); padding: 12px 18px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 0.88rem; margin-bottom: 14px; border: 1px solid rgba(255,255,255,0.06);">
+        P(i &rarr; j | &theta;) &prop; exp(&alpha; &middot; &Delta;HSI<sub>ij</sub> - &gamma; &middot; d<sub>ij</sub>) &middot; [1 + &rho; &middot; &delta;<sub>ij</sub>]
+      </div>
+      <p style="margin-bottom: 14px;">
+        The posterior distributions below quantify parameter uncertainty and covariance
+        from Markov Chain Monte Carlo (MCMC) sampling conditioned on empirical mark-recapture
+        trajectories. Shaded density ribbons indicate 95% Bayesian Credible Intervals (CIs).
+      </p>
+      <div class="grid-3" style="margin-bottom: 14px;">
+        <div style="background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.2); border-radius: 8px; padding: 14px;">
+          <div style="font-weight: 700; color: #38bdf8; margin-bottom: 6px;">Advection Sensitivity (&alpha;)</div>
+          <p style="font-size: 0.85rem; color: #94a3b8;">
+            Governs directional taxis along the environmental suitability gradient
+            &Delta;HSI<sub>ij</sub> = HSI<sub>j</sub> - HSI<sub>i</sub>. Positive values
+            quantify preferential movement toward optimal habitat (thermal refugia, preferred
+            substrates). As &alpha; &rarr; 0, movement collapses to isotropic diffusion
+            independent of habitat quality.
+          </p>
+        </div>
+        <div style="background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.2); border-radius: 8px; padding: 14px;">
+          <div style="font-weight: 700; color: #10b981; margin-bottom: 6px;">Patch Residence / Retention (&rho;)</div>
+          <p style="font-size: 0.85rem; color: #94a3b8;">
+            Controls local site fidelity and self-transition probability (i = j).
+            Elevated &rho; reflects behavioral dormancy, foraging residency, or demographic
+            philopatry, inflating the diagonal of the transition matrix relative to adjacent
+            dispersal corridors.
+          </p>
+        </div>
+        <div style="background: rgba(251,191,36,0.06); border: 1px solid rgba(251,191,36,0.2); border-radius: 8px; padding: 14px;">
+          <div style="font-weight: 700; color: #fbbf24; margin-bottom: 6px;">Dispersal Friction / Decay (&gamma;)</div>
+          <p style="font-size: 0.85rem; color: #94a3b8;">
+            Determines spatial distance decay as a function of Euclidean or geodesic
+            distance d<sub>ij</sub> (km). Higher &gamma; penalizes long-distance displacements,
+            confining transitions to immediate neighbors, whereas lower &gamma; permits
+            broad exploratory leaps across the spatial lattice.
+          </p>
+        </div>
+      </div>
+      <p style="font-size: 0.85rem; color: #64748b;">
+        <strong>Bivariate Correlations:</strong> Pairwise scatter plots and Pearson <em>r</em>
+        metrics illustrate posterior parameter dependencies. Negative covariance between
+        &alpha; and &gamma; often denotes compensatory trade-offs between habitat taxis and
+        spatial friction, identifiable via joint MCMC posterior sampling.
+      </p>
+    </div>
+  </div>
+
   $(join(group_sections, "\n"))
 
   <div class="card">
@@ -6681,81 +6737,222 @@ function export_movement_flow_dashboard(
     paths = path_results.paths
     n_spatial = loaded.n_spatial
 
+    cents = if hasproperty(loaded.mesh, :centroids_lonlat) && !isempty(loaded.mesh.centroids_lonlat)
+        loaded.mesh.centroids_lonlat
+    elseif hasproperty(loaded.mesh, :centroids) && !isempty(loaded.mesh.centroids)
+        loaded.mesh.centroids
+    else
+        fill((-60.0, 45.0), n_spatial)
+    end
+
+    function _get_zone_name(u::Int)::String
+        (u < 1 || u > length(cents)) && return "Unknown"
+        c = cents[u]
+        lon, lat = Float64(c[1]), Float64(c[2])
+        if lat >= 46.5 && lon < -61.0
+            return "Gulf of St. Lawrence"
+        elseif lat >= 45.6 && lon >= -61.5 && lon <= -58.5
+            return "Cape Breton & Laurentian"
+        elseif lon >= -60.5 && lat < 45.6
+            return "Eastern Scotian Shelf"
+        elseif lon >= -63.5 && lon < -60.5 && lat < 45.6
+            return "Central Scotian Shelf"
+        else
+            return "Southwest Shelf & Sambro"
+        end
+    end
+
+    # Aggregate flows across all mark-recapture pairs and reconstructed paths
+    obs_df = loaded.obs_df
     flow_pairs = Dict{Tuple{Int, Int}, Int}()
-    for p in values(paths)
-        length(p) < 2 && continue
-        u, v = p[1], p[end]
-        flow_pairs[(u, v)] = get(flow_pairs, (u, v), 0) + 1
+    regional_matrix = Dict{Tuple{String, String}, Int}()
+
+    macro_zones = [
+        "Gulf of St. Lawrence",
+        "Cape Breton & Laurentian",
+        "Eastern Scotian Shelf",
+        "Central Scotian Shelf",
+        "Southwest Shelf & Sambro"
+    ]
+    for z1 in macro_zones, z2 in macro_zones
+        regional_matrix[(z1, z2)] = 0
     end
 
-    all_nodes = Set{Int}()
-    for (u, v) in keys(flow_pairs)
-        push!(all_nodes, u)
-        push!(all_nodes, v)
+    # Prioritize empirical obs if available, supplemented by paths
+    if nrow(obs_df) > 0
+        for r in eachrow(obs_df)
+            u, v = Int(r.release), Int(r.recapture)
+            flow_pairs[(u, v)] = get(flow_pairs, (u, v), 0) + 1
+            z_u = _get_zone_name(u)
+            z_v = _get_zone_name(v)
+            if haskey(regional_matrix, (z_u, z_v))
+                regional_matrix[(z_u, z_v)] += 1
+            end
+        end
+    elseif !isempty(paths)
+        for p in values(paths)
+            length(p) < 2 && continue
+            u, v = p[1], p[end]
+            flow_pairs[(u, v)] = get(flow_pairs, (u, v), 0) + 1
+            z_u = _get_zone_name(u)
+            z_v = _get_zone_name(v)
+            if haskey(regional_matrix, (z_u, z_v))
+                regional_matrix[(z_u, z_v)] += 1
+            end
+        end
     end
-    node_list = sort(collect(all_nodes))
-    N_nodes = max(1, length(node_list))
 
-    width, height = 800, 520
-    cx, cy, r_layout = width ÷ 2, height ÷ 2, 210
+    total_transit = sum(values(flow_pairs))
 
-    node_pos = Dict{Int, Tuple{Float64, Float64}}()
-    for (i, node) in enumerate(node_list)
-        ang = 2.0 * π * (i - 1) / N_nodes - π / 2.0
-        x = cx + r_layout * cos(ang)
-        y = cy + r_layout * sin(ang)
-        node_pos[node] = (round(x; digits=1), round(y; digits=1))
+    # Regional layout positions (reflecting actual geographic orientations)
+    # Gulf (NW), Laurentian (NE), Eastern (SE), Central (S), SW (SW)
+    zone_coords = Dict(
+        "Gulf of St. Lawrence"     => (190, 130),
+        "Cape Breton & Laurentian" => (580, 130),
+        "Eastern Scotian Shelf"    => (620, 360),
+        "Central Scotian Shelf"    => (380, 380),
+        "Southwest Shelf & Sambro" => (170, 380)
+    )
+
+    zone_colors = Dict(
+        "Gulf of St. Lawrence"     => "#06b6d4",
+        "Cape Breton & Laurentian" => "#3b82f6",
+        "Eastern Scotian Shelf"    => "#8b5cf6",
+        "Central Scotian Shelf"    => "#10b981",
+        "Southwest Shelf & Sambro" => "#f59e0b"
+    )
+
+    # Compute Regional Balance Metrics
+    reg_outflow = Dict(z => 0 for z in macro_zones)
+    reg_inflow  = Dict(z => 0 for z in macro_zones)
+    reg_retain  = Dict(z => 0 for z in macro_zones)
+    reg_total   = Dict(z => 0 for z in macro_zones)
+
+    for ((z1, z2), cnt) in regional_matrix
+        if z1 == z2
+            reg_retain[z1] += cnt
+        else
+            reg_outflow[z1] += cnt
+            reg_inflow[z2] += cnt
+        end
+        reg_total[z1] += cnt
     end
 
-    max_count = isempty(flow_pairs) ? 1 : maximum(values(flow_pairs))
-    sorted_flows = sort(collect(flow_pairs); by = x -> x[2], rev = true)
-
+    # Build SVG Regional Arrows and Loops
+    width, height = 820, 520
     edge_svgs = String[]
-    for ((u, v), count) in sorted_flows
-        !haskey(node_pos, u) || !haskey(node_pos, v) && continue
-        x1, y1 = node_pos[u]
-        x2, y2 = node_pos[v]
-        mx = (x1 + x2) / 2.0 + (cy - (y1 + y2) / 2.0) * 0.25
-        my = (y1 + y2) / 2.0 + ((x1 + x2) / 2.0 - cx) * 0.25
+    max_reg_cnt = maximum(values(regional_matrix); init = 1)
+    max_reg_cnt == 0 && (max_reg_cnt = 1)
 
-        w_stroke = clamp(1.2 + 4.5 * (count / max_count), 1.0, 6.0)
-        opacity = clamp(0.35 + 0.55 * (count / max_count), 0.2, 0.95)
+    for z1 in macro_zones, z2 in macro_zones
+        cnt = regional_matrix[(z1, z2)]
+        cnt == 0 && continue
+        c1 = zone_coords[z1]
+        c2 = zone_coords[z2]
 
-        push!(edge_svgs, string(
-            """<path class="flow-edge" data-count="$count" """,
-            """d="M $(round(x1; digits=1)) $(round(y1; digits=1)) """,
-            """Q $(round(mx; digits=1)) $(round(my; digits=1)) """,
-            """$(round(x2; digits=1)) $(round(y2; digits=1))" """,
-            """fill="none" stroke="#38bdf8" stroke-width="$w_stroke" """,
-            """opacity="$(round(opacity; digits=2))" marker-end="url(#arrow)">""",
-            """<title>Flow $u → $v: $count individuals</title></path>"""
-        ))
+        if z1 == z2
+            # Self-retention loop
+            r_loop = clamp(14.0 + 16.0 * (cnt / max_reg_cnt), 14.0, 32.0)
+            lx = c1[1]
+            ly = c1[2] - 32
+            push!(edge_svgs, """<circle cx="$lx" cy="$ly" r="$r_loop" fill="none" """ *
+                             """stroke="$(zone_colors[z1])" stroke-width="2.5" opacity="0.6" stroke-dasharray="4,2"/>""")
+            push!(edge_svgs, """<text x="$lx" y="$(ly - 4)" text-anchor="middle" fill="#f8fafc" """ *
+                             """font-size="10" font-family="JetBrains Mono, monospace">Retain: $cnt</text>""")
+        else
+            # Directed inter-regional arrow with curvature
+            x1, y1 = c1[1], c1[2]
+            x2, y2 = c2[1], c2[2]
+            dx, dy = x2 - x1, y2 - y1
+            d_len = sqrt(dx * dx + dy * dy)
+            d_len < 1e-4 && continue
+            nx, ny = -dy / d_len, dx / d_len
+
+            # Offset control point to curve arrow
+            curve_offset = 28.0
+            mx = (x1 + x2) / 2.0 + nx * curve_offset
+            my = (y1 + y2) / 2.0 + ny * curve_offset
+
+            w_stroke = clamp(1.5 + 6.0 * (cnt / max_reg_cnt), 1.5, 8.0)
+            opacity = clamp(0.40 + 0.55 * (cnt / max_reg_cnt), 0.35, 0.95)
+
+            push!(edge_svgs, string(
+                """<path class="flow-edge" data-count="$cnt" """,
+                """d="M $x1 $y1 Q $mx $my $x2 $y2" """,
+                """fill="none" stroke="$(zone_colors[z1])" stroke-width="$w_stroke" """,
+                """opacity="$(round(opacity; digits=2))" marker-end="url(#arrow)">""",
+                """<title>Flux $z1 → $z2: $cnt individuals</title></path>"""
+            ))
+            # Flux label at midpoint
+            push!(edge_svgs, """<text x="$(round(mx; digits=1))" y="$(round(my; digits=1))" """ *
+                             """text-anchor="middle" fill="#cbd5e1" font-size="10" font-weight="600" """ *
+                             """font-family="JetBrains Mono, monospace" style="text-shadow: 0 1px 4px #000;">$cnt</text>""")
+        end
     end
 
+    # Zone Nodes
     node_svgs = String[]
-    for node in node_list
-        x, y = node_pos[node]
+    for z in macro_zones
+        pos = zone_coords[z]
+        col = zone_colors[z]
+        n_obs_z = reg_total[z]
+        r_node = clamp(20.0 + 12.0 * (n_obs_z / max(1, total_transit)), 20.0, 36.0)
+
         push!(node_svgs, string(
             """<g class="flow-node">""",
-            """<circle cx="$x" cy="$y" r="8" fill="#1e293b" """ *
-            """stroke="#38bdf8" stroke-width="2"/>""",
-            """<text x="$x" y="$(y - 12)" text-anchor="middle" fill="#94a3b8" """ *
-            """font-size="10" font-family="JetBrains Mono, monospace">#$node</text>""",
+            """<circle cx="$(pos[1])" cy="$(pos[2])" r="$r_node" fill="#0f172a" """,
+            """stroke="$col" stroke-width="3"/>""",
+            """<circle cx="$(pos[1])" cy="$(pos[2])" r="$(r_node - 6)" fill="$col" opacity="0.25"/>""",
+            """<text x="$(pos[1])" y="$(pos[2] + 4)" text-anchor="middle" fill="#f8fafc" """,
+            """font-size="11" font-weight="700" font-family="JetBrains Mono, monospace">$n_obs_z</text>""",
+            """<text x="$(pos[1])" y="$(pos[2] + r_node + 16)" text-anchor="middle" fill="#cbd5e1" """,
+            """font-size="11" font-weight="600" font-family="Outfit, sans-serif">$z</text>""",
             """</g>"""
         ))
     end
 
-    table_rows = String[]
-    total_transit = sum(values(flow_pairs))
-    for (((u, v), count), rank) in zip(sorted_flows, 1:min(12, length(sorted_flows)))
+    # Regional connectivity summary table
+    matrix_rows = String[]
+    for z in macro_zones
+        tot = max(1, reg_total[z])
+        ret = reg_retain[z]
+        ret_pct = round((ret / tot) * 100.0; digits = 1)
+        em = reg_outflow[z]
+        im = reg_inflow[z]
+        net = im - em
+        net_str = net >= 0 ? "+$net (Net Sink)" : "$net (Net Donor)"
+        net_col = net >= 0 ? "#10b981" : "#f59e0b"
+
+        push!(matrix_rows, """
+        <tr>
+          <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:$(zone_colors[z]);margin-right:8px;"></span>$z</td>
+          <td>$tot</td>
+          <td>$ret ($(ret_pct)%)</td>
+          <td>$em</td>
+          <td>$im</td>
+          <td style="color:$net_col;font-weight:600;">$net_str</td>
+        </tr>
+        """)
+    end
+
+    # Top inter-patch corridor flows
+    sorted_flows = sort(collect(flow_pairs); by = x -> x[2], rev = true)
+    corridor_rows = String[]
+    for (((u, v), count), rank) in zip(sorted_flows, 1:min(15, length(sorted_flows)))
         pct = total_transit > 0 ? (count / total_transit) * 100.0 : 0.0
-        push!(table_rows, """
+        z1 = _get_zone_name(u)
+        z2 = _get_zone_name(v)
+        c1 = cents[min(u, length(cents))]
+        c2 = cents[min(v, length(cents))]
+        coord_txt = "($(round(c1[1]; digits=2)), $(round(c1[2]; digits=2))) → ($(round(c2[1]; digits=2)), $(round(c2[2]; digits=2)))"
+        push!(corridor_rows, """
         <tr>
           <td>#$rank</td>
-          <td>Spatial Node $u</td>
-          <td>Spatial Node $v</td>
-          <td>$count</td>
-          <td>$(round(pct; digits=1))%</td>
+          <td><b>$z1</b> (Unit #$u)</td>
+          <td><b>$z2</b> (Unit #$v)</td>
+          <td style="font-size:0.75rem;color:#94a3b8;">$coord_txt</td>
+          <td style="font-weight:700;color:#38bdf8;">$count</td>
+          <td>$(round(pct; digits=2))%</td>
         </tr>
         """)
     end
@@ -6764,15 +6961,13 @@ function export_movement_flow_dashboard(
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>MovementAnalysis Stock Connectivity & Network Flow Diagram</title>
+  <title>MovementAnalysis Macro-Regional Stock Connectivity & Flow Diagram</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?\
-family=Outfit:wght@300;400;600;700&\
-family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #0b0f19; --surface: #131b2e; --border: #1e293b;
-      --text: #f1f5f9; --muted: #64748b;
+      --text: #f1f5f9; --muted: #64748b; --accent: #38bdf8;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -6789,46 +6984,37 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
     .card h2 { font-size: 1.15rem; font-weight: 600; margin-bottom: 14px; color: #38bdf8; }
     .graph-container {
       background: #080c14; border: 1px solid rgba(255, 255, 255, 0.04);
-      border-radius: 8px; display: flex; justify-content: center;
+      border-radius: 10px; display: flex; justify-content: center;
       padding: 16px; position: relative;
     }
-    .controls {
-      display: flex; gap: 20px; align-items: center;
-      margin-top: 14px; font-size: 0.85rem; color: var(--muted);
-    }
-    .dot { width: 10px; height: 10px; border-radius: 50%;
-           display: inline-block; margin-right: 6px; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 10px; }
     th { text-align: left; color: var(--muted);
-         border-bottom: 1px solid var(--border); padding: 8px; }
-    td { padding: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-         font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; }
+         border-bottom: 1px solid var(--border); padding: 10px 8px; font-weight: 600; }
+    td { padding: 9px 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+         font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
     tr:hover td { background: rgba(56, 189, 248, 0.05); }
-    .slider-row {
-      display: flex; align-items: center; gap: 14px; margin-bottom: 16px;
-      font-size: 0.9rem; color: var(--muted);
+    .explanation-box {
+      background: rgba(56, 189, 248, 0.06); border-left: 3px solid #38bdf8;
+      border-radius: 6px; padding: 12px 16px; margin-bottom: 20px; font-size: 0.85rem;
+      color: #cbd5e1; line-height: 1.5;
     }
-    input[type=range] { accent-color: #38bdf8; cursor: pointer; }
   </style>
 </head>
 <body>
-  <h1>Directed Movement Flow & Stock Connectivity Diagram</h1>
-  <div class="subtitle">Inter-Patch Dispersal Corridors for """ *
-"""$(uppercase(species)) • Reconstructed Mark-Recapture Trajectories</div>
+  <h1>Macro-Regional Movement Flow & Stock Connectivity Diagram</h1>
+  <div class="subtitle">Geographic Inter-Zone Dispersal & Demophoric Flux for $(uppercase(species)) • Reconstructed Mark-Recapture Corridors</div>
+
+  <div class="explanation-box">
+    <b>Ecological Connectivity Interpretation:</b> This network diagram maps macro-regional dispersal fluxes between the 5 principal biophysical sub-areas of the Scotian Shelf and Gulf of St. Lawrence. Nodes represent geographic zones sized by total animal observations; circular dashed loops represent within-zone residency/retention; directed curved arrows depict directional migration fluxes with width proportional to movement volume.
+  </div>
 
   <div class="card">
-    <h2>Directed Connectivity Graph (Transit Volumes)</h2>
-    <div class="slider-row">
-      <label for="flowThresh">Filter Minor Flows (Min Individuals): </label>
-      <input type="range" id="flowThresh" min="1" max="$max_count" value="1"
-             oninput="filterEdges(this.value)">
-      <span id="threshVal" style="color: #38bdf8; font-weight: 600;">1</span>
-    </div>
+    <h2>Macro-Regional Dispersal Flux Diagram</h2>
     <div class="graph-container">
       <svg width="$width" height="$height" xmlns="http://www.w3.org/2000/svg">
         <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="22" refY="5"
-                  markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <marker id="arrow" viewBox="0 0 10 10" refX="18" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
             <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
           </marker>
         </defs>
@@ -6836,41 +7022,49 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
         $(join(node_svgs, "\n"))
       </svg>
     </div>
-    <div class="controls">
-      <span><span class="dot" style="background: #38bdf8;"></span> Directed Path Vector</span>
-      <span>Total Directed Links: $(length(flow_pairs))</span>
-      <span>Total Animal Transits: $total_transit</span>
+    <div style="margin-top: 14px; font-size: 0.82rem; color: var(--muted); display: flex; gap: 20px;">
+      <span>Total Animal Movements Analyzed: <b>$total_transit</b></span>
+      <span>Active Regional Exchange Links: <b>$(count(>(0), values(regional_matrix)))</b></span>
     </div>
   </div>
 
   <div class="card">
-    <h2>Top Dispersal Corridors</h2>
+    <h2>Macro-Regional Stock Connectivity & Retention Metrics</h2>
     <table>
       <thead>
         <tr>
-          <th>Rank</th>
-          <th>Source Patch</th>
-          <th>Destination Patch</th>
-          <th>Flow Count</th>
-          <th>Transit Share</th>
+          <th>Geographic Macro-Zone</th>
+          <th>Total Obs</th>
+          <th>Within-Zone Retention (%)</th>
+          <th>Emigration (Outflow)</th>
+          <th>Immigration (Inflow)</th>
+          <th>Net Demophoric Exchange</th>
         </tr>
       </thead>
       <tbody>
-        $(join(table_rows, "\n"))
+        $(join(matrix_rows, "\n"))
       </tbody>
     </table>
   </div>
 
-  <script>
-    function filterEdges(val) {
-      document.getElementById('threshVal').innerText = val;
-      const edges = document.querySelectorAll('.flow-edge');
-      edges.forEach(e => {
-        const cnt = parseInt(e.getAttribute('data-count') || '0', 10);
-        e.style.display = cnt >= val ? 'inline' : 'none';
-      });
-    }
-  </script>
+  <div class="card">
+    <h2>Top Specific Inter-Patch Dispersal Corridors</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Source Zone & Unit</th>
+          <th>Destination Zone & Unit</th>
+          <th>Centroid Coordinates</th>
+          <th>Individual Flux</th>
+          <th>Total Flux Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        $(join(corridor_rows, "\n"))
+      </tbody>
+    </table>
+  </div>
 </body>
 </html>
 """
@@ -7052,9 +7246,9 @@ function export_movement_summary_dashboard(
     end
 
     # --- Build page ---
-    dist_svg    = _svg_histogram(dists, 20, "Total Distance (km)", "#10b981")
-    vel_svg     = _svg_histogram(vels, 15, "Velocity (km / step)", "#fbbf24")
-    rose_svg    = _svg_windrose(bearings)
+    dist_svg = _svg_histogram(dists, 20, "Total Distance (km)", "#10b981")
+    vel_svg  = _svg_histogram(vels, 15, "Velocity (km / step)", "#fbbf24")
+    rose_svg = _svg_windrose(bearings)
 
     # Summary statistics
     n_paths     = length(dists)
@@ -7063,18 +7257,151 @@ function export_movement_summary_dashboard(
     mean_vel    = isempty(vels)  ? 0.0 : mean(vels)
     mean_eff    = mov_stats !== nothing ? mean(mov_stats.path_efficiency) :
                   (isempty(paths_rich) ? 0.0 :
-                   mean([p.total_dist_km > 0.01 ?
-                         clamp(p.displacement_km / p.total_dist_km, 0.0, 1.0) :
-                         1.0 for p in paths_rich]))
+                   mean([begin
+                       if p.total_dist_km > 0.01
+                           eff = p.displacement_km / p.total_dist_km
+                           eff > 1.0 ? 1.0 : (eff < 0.0 ? 0.0 : eff)
+                       else
+                           1.0
+                       end
+                   end for p in paths_rich]))
     kappa_val   = mov_stats !== nothing ?
                   mov_stats.directional_bias.kappa : 0.0
+
+    # Circular statistics
+    sin_sum = isempty(bearings) ? 0.0 : sum(sind.(bearings))
+    cos_sum = isempty(bearings) ? 1.0 : sum(cosd.(bearings))
+    mean_bearing_deg = isempty(bearings) ? 0.0 : mod(atand(sin_sum, cos_sum), 360.0)
+
+    # Sector distribution (8 cardinal / intercardinal azimuths)
+    sectors8 = [
+        ("N",  "337.5° - 22.5°"),
+        ("NE", "22.5° - 67.5°"),
+        ("E",  "67.5° - 112.5°"),
+        ("SE", "112.5° - 157.5°"),
+        ("S",  "157.5° - 202.5°"),
+        ("SW", "202.5° - 247.5°"),
+        ("W",  "247.5° - 292.5°"),
+        ("NW", "292.5° - 337.5°"),
+    ]
+    counts8 = zeros(Int, 8)
+    for b in bearings
+        idx = floor(Int, mod(b + 22.5, 360.0) / 45.0) + 1
+        idx < 1 && (idx = 1)
+        idx > 8 && (idx = 8)
+        counts8[idx] += 1
+    end
+    total_b = max(1, length(bearings))
+    dom_idx = argmax(counts8)
+    dominant_sector = "$(sectors8[dom_idx][1]) ($(round(counts8[dom_idx]/total_b*100.0, digits=1))%)"
+
+    sector_rows = String[]
+    for i in 1:8
+        pct = round((counts8[i] / total_b) * 100.0, digits=1)
+        lbl, rng = sectors8[i]
+        bar_w = min(100.0, pct)
+        push!(sector_rows, """
+        <tr>
+          <td style="font-weight: 600; color: #38bdf8;">$lbl</td>
+          <td style="color: #94a3b8; font-size: 0.8rem;">$rng</td>
+          <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">$(counts8[i])</td>
+          <td style="text-align: right; font-family: 'JetBrains Mono', monospace;">$pct%</td>
+          <td style="width: 80px;">
+            <div style="background: rgba(255,255,255,0.06); border-radius: 4px; height: 6px; width: 100%;">
+              <div style="background: #38bdf8; height: 100%; width: $bar_w%; border-radius: 4px;"></div>
+            </div>
+          </td>
+        </tr>
+        """)
+    end
+
+    # Spatial clustering of release locations for map roses
+    rel_clusters = Dict{Tuple{Int, Int}, Vector{NamedTuple}}()
+    for p in paths_rich
+        (isempty(p.coords) || length(p.coords) < 2) && continue
+        r_lon, r_lat = p.coords[1]
+        k = (round(Int, r_lon / 0.18), round(Int, r_lat / 0.15))
+        push!(get!(rel_clusters, k, NamedTuple[]), p)
+    end
+
+    cluster_js_list = String[]
+    for (k, c_paths) in rel_clusters
+        isempty(c_paths) && continue
+        c_lon = round(mean([p.coords[1][1] for p in c_paths]); digits=4)
+        c_lat = round(mean([p.coords[1][2] for p in c_paths]); digits=4)
+        n_c = length(c_paths)
+
+        c_bearings = Float64[]
+        c_displs = Float64[]
+        for p in c_paths
+            length(p.coords) < 2 && continue
+            Δx = p.coords[end][1] - p.coords[1][1]
+            Δy = p.coords[end][2] - p.coords[1][2]
+            b = mod(atand(Δx, Δy), 360.0)
+            push!(c_bearings, b)
+            push!(c_displs, p.displacement_km)
+        end
+        isempty(c_bearings) && continue
+
+        c_counts8 = zeros(Int, 8)
+        for b in c_bearings
+            idx = floor(Int, mod(b + 22.5, 360.0) / 45.0) + 1
+            idx < 1 && (idx = 1)
+            idx > 8 && (idx = 8)
+            c_counts8[idx] += 1
+        end
+        c_mx = max(1, maximum(c_counts8))
+
+        sin_c = sum(sind.(c_bearings))
+        cos_c = sum(cosd.(c_bearings))
+        c_mean_deg = round(mod(atand(sin_c, cos_c), 360.0); digits=1)
+        c_mean_dist = round(mean(c_displs); digits=1)
+
+        # Build 48x48 mini SVG rose
+        c_cx, c_cy = 24, 24
+        c_rmax = 20.0
+        svg_wedges = String[]
+        for s in 1:8
+            c_counts8[s] == 0 && continue
+            r_s = (c_counts8[s] / c_mx) * c_rmax
+            r_s < 2.0 && (r_s = 2.0)
+            th_start = (s - 1) * 45.0 - 22.5 - 90.0
+            th_end   = th_start + 45.0
+            th1 = deg2rad(th_start)
+            th2 = deg2rad(th_end)
+            x1 = round(c_cx + r_s * cos(th1); digits=1)
+            y1 = round(c_cy + r_s * sin(th1); digits=1)
+            x2 = round(c_cx + r_s * cos(th2); digits=1)
+            y2 = round(c_cy + r_s * sin(th2); digits=1)
+            push!(svg_wedges, "<path d=\"M $c_cx $c_cy L $x1 $y1 A $r_s $r_s 0 0 1 $x2 $y2 Z\" fill=\"#38bdf8\" opacity=\"0.75\" stroke=\"#0284c7\" stroke-width=\"0.5\"/>")
+        end
+
+        mini_svg = """<svg width="48" height="48" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="23" fill="rgba(15,23,42,0.92)" stroke="#38bdf8" stroke-width="1.5"/><circle cx="24" cy="24" r="10" fill="none" stroke="#334155" stroke-width="0.5"/>$(join(svg_wedges, ""))<circle cx="24" cy="24" r="2.5" fill="#f8fafc"/></svg>"""
+        safe_svg = replace(replace(mini_svg, "\"" => "\\\""), "\n" => "")
+
+        popup_html = """<div style='font-family: Outfit, sans-serif; font-size: 0.85rem; color: #f8fafc; min-width: 190px;'><div style='font-weight: 700; color: #38bdf8; margin-bottom: 4px; font-size: 0.95rem;'>Release Station Cluster</div><div><strong>Location:</strong> $c_lat&deg;N, $c_lon&deg;W</div><div><strong>Tagged Releases:</strong> $n_c</div><div><strong>Mean Net Displ:</strong> $c_mean_dist km</div><div><strong>Mean Heading:</strong> $c_mean_deg&deg;N</div></div>"""
+        safe_popup = replace(replace(popup_html, "\"" => "\\\""), "\n" => "")
+
+        push!(cluster_js_list, """{
+          lat: $c_lat,
+          lon: $c_lon,
+          n: $n_c,
+          html: "$safe_svg",
+          popup: "$safe_popup"
+        }""")
+    end
 
     # Per-path table rows
     table_rows = String[]
     for (i, p) in enumerate(paths_rich)
-        p_eff = hasproperty(p, :path_efficiency) ? p.path_efficiency :
-                (p.total_dist_km > 0.01 ?
-                 clamp(p.displacement_km / p.total_dist_km, 0.0, 1.0) : 1.0)
+        p_eff = if hasproperty(p, :path_efficiency)
+            p.path_efficiency
+        elseif p.total_dist_km > 0.01
+            eff = p.displacement_km / p.total_dist_km
+            eff > 1.0 ? 1.0 : (eff < 0.0 ? 0.0 : eff)
+        else
+            1.0
+        end
         p_bout = if mov_stats !== nothing && hasproperty(mov_stats, :behavioral_bouts)
             bouts = mov_stats.behavioral_bouts
             cls = hasproperty(bouts, :classification) ?
@@ -7104,6 +7431,8 @@ function export_movement_summary_dashboard(
 <head>
   <meta charset="UTF-8">
   <title>$species — Movement Summary Diagnostics</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <link href="https://fonts.googleapis.com/css2?\\
 family=Outfit:wght@300;400;600;700&\\
 family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
@@ -7136,7 +7465,7 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
       border-radius: 12px; padding: 20px;
     }
     .card h2 { font-size: 1.05rem; font-weight: 600;
-               margin-bottom: 12px; }
+               margin-bottom: 12px; color: #38bdf8; }
     .stat-row { display: flex; gap: 24px;
                 margin-bottom: 22px; }
     .stat-box {
@@ -7159,6 +7488,20 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
     td { padding: 6px; border-bottom: 1px solid
          rgba(255,255,255,0.04); }
     tr:hover td { background: rgba(56,189,248,0.05); }
+    .rose-marker {
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    .leaflet-popup-content-wrapper {
+      background: #0f172a !important;
+      border: 1px solid rgba(56,189,248,0.4) !important;
+      color: #f8fafc !important;
+      border-radius: 8px !important;
+    }
+    .leaflet-popup-tip {
+      background: #0f172a !important;
+    }
   </style>
 </head>
 <body>
@@ -7179,7 +7522,7 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
     <div class="stat-val">$(round(kappa_val, digits=2))</div>
   </div>
   <div class="stat-box">
-    <div class="stat-label">Paths</div>
+    <div class="stat-label">Paths Analyzed</div>
     <div class="stat-val">$n_paths</div>
   </div>
 </div>
@@ -7198,13 +7541,34 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
     $rose_svg
   </div>
   <div class="card">
-    <h2>Bearing Rose</h2>
-    <p style="color: var(--muted); font-size: 0.85rem;">
-      Each petal represents the fraction of paths whose
-      release→recapture bearing falls in that compass sector.
-      North = 0°, East = 90°, clockwise.
-    </p>
+    <h2>Directional Dispersal Diagnostics</h2>
+    <div style="margin-bottom: 12px; font-size: 0.85rem; color: #94a3b8;">
+      Mean Heading: <span style="font-weight: 700; color: #38bdf8;">$(round(mean_bearing_deg, digits=1))°</span> •
+      Concentration (&kappa;): <span style="font-weight: 700; color: #10b981;">$(round(kappa_val, digits=2))</span> •
+      Dominant Sector: <span style="font-weight: 700; color: #fbbf24;">$dominant_sector</span>
+    </div>
+    <table style="font-size: 0.82rem;">
+      <thead>
+        <tr>
+          <th>Sector</th><th>Azimuth Range</th><th style="text-align: right;">Count</th>
+          <th style="text-align: right;">Pct</th><th style="width: 80px;">Share</th>
+        </tr>
+      </thead>
+      <tbody>
+        $(join(sector_rows, "\n        "))
+      </tbody>
+    </table>
   </div>
+</div>
+
+<div class="card" style="margin-bottom: 30px;">
+  <h2>Spatial Dispersal Rose Map (At Release Locations)</h2>
+  <div style="font-size: 0.85rem; color: var(--muted); margin-bottom: 14px;">
+    Directional rose glyphs positioned at each release location cluster across the study domain.
+    Petal orientation and length depict the directional frequency and heading of subsequent recaptures.
+    Click any station glyph to view detailed release metrics and localized directional distributions.
+  </div>
+  <div id="roseMap" style="width: 100%; height: 560px; border-radius: 8px; border: 1px solid var(--border);"></div>
 </div>
 
 <div class="card">
@@ -7225,6 +7589,32 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
     </table>
   </div>
 </div>
+
+<script>
+  var roseMap = L.map('roseMap').setView([45.5, -61.5], 7);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; CartoDB &copy; OpenStreetMap contributors',
+    maxZoom: 18
+  }).addTo(roseMap);
+
+  var clusters = [$(join(cluster_js_list, ",\n    "))];
+  var markers = [];
+  clusters.forEach(function(c) {
+    var icon = L.divIcon({
+      html: c.html,
+      className: 'rose-marker',
+      iconSize: [48, 48],
+      iconAnchor: [24, 24]
+    });
+    var m = L.marker([c.lat, c.lon], { icon: icon }).addTo(roseMap);
+    m.bindPopup(c.popup);
+    markers.push(m);
+  });
+  if (markers.length > 0) {
+    var group = new L.featureGroup(markers);
+    roseMap.fitBounds(group.getBounds().pad(0.08));
+  }
+</script>
 </body>
 </html>"""
 
@@ -8579,10 +8969,12 @@ function generate_movement_data(;
     tagids    = sorted_df.tagid
     times     = sorted_df.time
     s_idxs    = sorted_df.s_idx
+    lons      = sorted_df.lon
+    lats      = sorted_df.lat
     sexes_col = has_sex ? sorted_df.sex : nothing
     mats_col  = has_mat ? sorted_df.mat : nothing
 
-RecordType = NamedTuple{
+    RecordType = NamedTuple{
         (:tagid, :release, :recapture, :k, :rel_time, :sex, :mat, :lon, :lat),
         Tuple{String, Int, Int, Int, Float64, String, String, Float64, Float64}
     }
@@ -8604,8 +8996,11 @@ RecordType = NamedTuple{
                 release   = s_idxs[i-1],
                 recapture = s_idxs[i],
                 k         = k,
+                rel_time  = Float64(times[i-1]),
                 sex       = s_str,
-                mat       = m_str
+                mat       = m_str,
+                lon       = Float64(lons[i-1]),
+                lat       = Float64(lats[i-1])
             ))
         end
     end

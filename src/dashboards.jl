@@ -607,7 +607,8 @@ function _generate_leaflet_html_document(;
     extra_html_body::String = "",
     dark_mode::Bool = false,
     width::String = "100%",
-    height::String = "650px"
+    height::String = "650px",
+    badge::Union{Nothing, String} = nothing
 )::String
     bg_color = dark_mode ? "#0f172a" : "#f8fafc"
     panel_bg = dark_mode ? "rgba(30, 41, 59, 0.85)" : "rgba(255, 255, 255, 0.9)"
@@ -615,13 +616,14 @@ function _generate_leaflet_html_document(;
     text_muted = dark_mode ? "#94a3b8" : "#64748b"
     border_color = dark_mode ? "rgba(255, 255, 255, 0.12)" : "rgba(0, 0, 0, 0.1)"
     accent_color = "#38bdf8"
+    title_suffix = (badge !== nothing && !isempty(badge)) ? " - " * badge : ""
 
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>$(title) - MovementAnalysis Interactive Visualization</title>
+  <title>$(title)$(title_suffix)</title>
   
   <!-- Modern Typography -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -891,7 +893,7 @@ function _generate_leaflet_html_document(;
       <div class="ma-title-area">
         <h1>
           <span>$(title)</span>
-          <span class="ma-badge">MovementAnalysis Interactive</span>
+$((badge !== nothing && !isempty(badge)) ? "          <span class=\"ma-badge\">$(badge)</span>" : "")
         </h1>
         <div class="ma-subtitle">MovementAnalysis Movement Engine</div>
       </div>
@@ -961,6 +963,7 @@ function leaflet_choropleth(
     vmax = nothing,
     clims = nothing,
     center_zero::Bool = false,
+    transparent_zeros::Bool = false,
     colorbar_label::String = "Value",
     border_color::String = "#475569",
     border_width::Real = 1.0,
@@ -973,6 +976,7 @@ function leaflet_choropleth(
     width::String = "100%",
     height::String = "650px",
     dark_mode::Bool = false,
+    badge::Union{Nothing, String} = nothing,
     kwargs...
 )::LeafletMap
     n_poly = length(polygons)
@@ -989,11 +993,21 @@ function leaflet_choropleth(
         vmin = clims[1]
         vmax = clims[2]
     end
-    if vmin === nothing
-        vmin = !isempty(valid_vals) ? (length(valid_vals) > 1 ? quantile(valid_vals, 0.02) : minimum(valid_vals)) : 0.0
-    end
-    if vmax === nothing
-        vmax = !isempty(valid_vals) ? (length(valid_vals) > 1 ? quantile(valid_vals, 0.98) : maximum(valid_vals)) : 1.0
+    nonzeros = filter(v -> abs(v) > 1e-12, valid_vals)
+    if transparent_zeros && !isempty(nonzeros)
+        if vmin === nothing
+            vmin = length(nonzeros) > 1 ? quantile(nonzeros, 0.02) : minimum(nonzeros)
+        end
+        if vmax === nothing
+            vmax = length(nonzeros) > 1 ? quantile(nonzeros, 0.98) : maximum(nonzeros)
+        end
+    else
+        if vmin === nothing
+            vmin = !isempty(valid_vals) ? (length(valid_vals) > 1 ? quantile(valid_vals, 0.02) : minimum(valid_vals)) : 0.0
+        end
+        if vmax === nothing
+            vmax = !isempty(valid_vals) ? (length(valid_vals) > 1 ? quantile(valid_vals, 0.98) : maximum(valid_vals)) : 1.0
+        end
     end
     if center_zero
         lim = max(abs(vmin), abs(vmax))
@@ -1150,8 +1164,20 @@ function leaflet_choropleth(
     baseLayers["OpenStreetMap"] = osm;
 
     var geojsonData = $(geojson_collection);
+    var transparentZeros = $(transparent_zeros ? "true" : "false");
 
     function styleFeature(feature) {
+      var val = feature.properties.value;
+      var isZero = (val === null || val === undefined || isNaN(val) || Math.abs(val) < 1e-12);
+      if (transparentZeros && isZero) {
+        return {
+          fillColor: 'transparent',
+          weight: 0.0,
+          opacity: 0.0,
+          color: 'transparent',
+          fillOpacity: 0.0
+        };
+      }
       return {
         fillColor: feature.properties.fillColor,
         weight: $(border_width),
@@ -1163,10 +1189,12 @@ function leaflet_choropleth(
 
     function highlightFeature(e) {
       var layer = e.target;
+      var val = layer.feature ? layer.feature.properties.value : null;
+      var isZero = (val === null || val === undefined || isNaN(val) || Math.abs(val) < 1e-12);
       layer.setStyle({
         weight: $(border_width + 1.5),
         color: '#38bdf8',
-        fillOpacity: 0.95
+        fillOpacity: (transparentZeros && isZero) ? 0.2 : 0.95
       });
       layer.bringToFront();
     }
@@ -1223,7 +1251,8 @@ function leaflet_choropleth(
         map_setup_js = map_setup_js,
         dark_mode = dark_mode,
         width = width,
-        height = height
+        height = height,
+        badge = badge
     )
 
     return LeafletMap(doc, title=title, width=width, height=height,
@@ -1688,11 +1717,14 @@ function leaflet_advection_arrows(
     au::NamedTuple;
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
     velocity::Real = 1.0,
-    Gamma::Union{Nothing, AbstractMatrix{<:Real}} = nothing,
+    Gamma::Union{Nothing, AbstractMatrix{<:Real}, AbstractVector} = nothing,
+    u_velocity::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    v_velocity::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
     relationship::Symbol = :exponential,
     arrow_scale::Real = 1.0,
     arrow_color::String = "#f8fafc",
-    background::Symbol = :hsi,
+    background::Symbol = :mesh,
     cmap::Symbol = :viridis,
     title::String = "Advection Drift & Velocity Field",
     min_speed_quantile::Real = 0.05,
@@ -1707,20 +1739,27 @@ function leaflet_advection_arrows(
     vx = zeros(Float64, S)
     vy = zeros(Float64, S)
 
+    l_mask = land_mask !== nothing ? land_mask : (hasproperty(au, :land_mask) ? au.land_mask : nothing)
+
     wkt_str = !isnothing(wkt) ? string(wkt) : _extract_wkt(au)
     tf = _build_coordinate_transformer(au.centroids; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
 
-    if !isnothing(hsi) && hasproperty(au, :W) && !isnothing(au.W)
+    if !isnothing(u_velocity) && !isnothing(v_velocity)
+        vx .= Float64.(u_velocity)
+        vy .= Float64.(v_velocity)
+    elseif !isnothing(hsi) && hasproperty(au, :W) && !isnothing(au.W)
         W = au.W
         rows = rowvals(W)
         vals = nonzeros(W)
         hsi_vec = Float64.(hsi)
 
         for i in 1:S
+            (l_mask !== nothing && l_mask[i]) && continue
             ci = au.centroids[i]
             for j_idx in nzrange(W, i)
                 j = rows[j_idx]
                 i == j && continue
+                (l_mask !== nothing && l_mask[j]) && continue
                 cj = au.centroids[j]
                 dh = hsi_vec[j] - hsi_vec[i]
                 if dh > 0.0
@@ -1742,14 +1781,30 @@ function leaflet_advection_arrows(
         vx .*= Float64(velocity)
         vy .*= Float64(velocity)
     elseif !isnothing(Gamma)
+        G_mat = Gamma isa AbstractVector ? Gamma[1] : Gamma
+        if size(G_mat, 1) == S && size(G_mat, 2) == S
+            for i in 1:S
+                (l_mask !== nothing && l_mask[i]) && continue
+                ci = au.centroids[i]
+                for j in 1:S
+                    i == j && continue
+                    (l_mask !== nothing && l_mask[j]) && continue
+                    cj = au.centroids[j]
+                    p_ij = G_mat[i, j]
+                    vx[i] += p_ij * (cj[1] - ci[1])
+                    vy[i] += p_ij * (cj[2] - ci[2])
+                end
+            end
+        elseif size(G_mat, 1) == S
+            vx .= vec(Float64.(G_mat[:, 1]))
+        end
+    end
+
+    if l_mask !== nothing
         for i in 1:S
-            ci = au.centroids[i]
-            for j in 1:S
-                i == j && continue
-                cj = au.centroids[j]
-                p_ij = Gamma[i, j]
-                vx[i] += p_ij * (cj[1] - ci[1])
-                vy[i] += p_ij * (cj[2] - ci[2])
+            if l_mask[i]
+                vx[i] = 0.0
+                vy[i] = 0.0
             end
         end
     end
@@ -1774,6 +1829,7 @@ function leaflet_advection_arrows(
     bases_json = String[]
 
     for i in 1:S
+        (l_mask !== nothing && l_mask[i]) && continue
         sp = speeds[i]
         if sp >= speed_cutoff && max_sp > 1e-12
             c0_trans = _transform_point(tf, au.centroids[i])
@@ -1836,7 +1892,7 @@ function leaflet_advection_arrows(
         leaflet_hsi_map(hsi, au; title=title, cmap=cmap, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height)
     elseif hasproperty(au, :polygons)
         polys = au.polygons
-        leaflet_choropleth(polys, fill(0.5, length(polys)); au=au, title=title, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height)
+        leaflet_spatial_graph(au.centroids, nothing; polygons=polys, au=au, title=title, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height)
     else
         leaflet_spatial_graph(au.centroids, nothing; au=au, title=title, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height)
     end
@@ -1938,12 +1994,13 @@ function leaflet_tracks_map(
     au::Union{Nothing, NamedTuple} = NamedTuple();
     empirical_paths = nothing,
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    overlay_hsi::Bool = false,
     background::Symbol = :polygons,
     title::String = "Animal Movement Trajectories",
     palette::Symbol = :tab10,
     show_start_end::Bool = true,
     max_paths::Int = 50,
-    max_empirical_paths::Int = 500,
+    max_empirical_paths::Int = 100_000,
     animated::Bool = true,
     tag_prefix::String = "Tag",
     wkt::Union{Nothing, AbstractString} = nothing,
@@ -2171,7 +2228,7 @@ function leaflet_tracks_map(
 
     # Background Polygons in transformed space with HSI coloring
     polys_json = String[]
-    has_hsi = !isnothing(hsi) && !isempty(hsi)
+    has_hsi = overlay_hsi && !isnothing(hsi) && !isempty(hsi)
     hsi_vec = has_hsi ? Float64.(hsi) : Float64[]
     pal_hsi = _resolve_palette(:viridis)
 
@@ -2229,6 +2286,34 @@ function leaflet_tracks_map(
     end
 
     map_id = "ma_tracks_map_" * string(abs(hash(title * string(rand()))), base=16)
+
+    hsi_popup_row = has_hsi ?
+        "            '<div class=\"ma-popup-row\"><span class=\"ma-popup-label\">Habitat Suitability (HSI):</span><span class=\"ma-popup-val\">' + p.hsi + '</span></div>' +" :
+        ""
+
+    hsi_legend_js = has_hsi ?
+        """
+        // HSI Colorbar Legend
+        var legend = L.control({ position: 'bottomright' });
+        legend.onAdd = function() {
+          var div = L.DomUtil.create('div', 'ma-legend');
+          div.style.backgroundColor = 'rgba(15, 23, 42, 0.88)';
+          div.style.padding = '8px 12px';
+          div.style.borderRadius = '6px';
+          div.style.border = '1px solid #334155';
+          div.style.color = '#f8fafc';
+          div.style.fontSize = '12px';
+          div.innerHTML = '<div style="font-weight:600;margin-bottom:4px;">Habitat Suitability (HSI)</div>' +
+            '<div style="display:flex;align-items:center;gap:6px;">' +
+            '<span>0.0</span>' +
+            '<div style="width:120px;height:12px;border-radius:2px;background:linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725);"></div>' +
+            '<span>1.0</span>' +
+            '</div>';
+          return div;
+        };
+        legend.addTo(map);
+        """ :
+        ""
 
     map_setup_js = """
     var isGeo = $(tf.is_geo ? "true" : "false");
@@ -2301,11 +2386,11 @@ function leaflet_tracks_map(
           });
           layer.bindPopup('<div class="ma-popup">' +
             '<div class="ma-popup-title">Areal Unit #' + p.unit_id + '</div>' +
-            (hasHsi ? '<div class="ma-popup-row"><span class="ma-popup-label">Habitat Suitability (HSI):</span><span class="ma-popup-val">' + p.hsi + '</span></div>' : '') +
+$(hsi_popup_row)
             '</div>');
         }
       }).addTo(map);
-      overlayLayers[hasHsi ? "Habitat Suitability (HSI)" : "Spatial Tessellation"] = polyLayer;
+      overlayLayers["$(has_hsi ? "Habitat Suitability (HSI)" : "Spatial Tessellation")"] = polyLayer;
     }
 
     // 2. Empirical Tag Observations Layer
@@ -2455,27 +2540,7 @@ function leaflet_tracks_map(
     // Layer Control
     L.control.layers(baseLayers, overlayLayers, { collapsed: false }).addTo(map);
 
-    // HSI Colorbar Legend
-    if (hasHsi) {
-      var legend = L.control({ position: 'bottomright' });
-      legend.onAdd = function() {
-        var div = L.DomUtil.create('div', 'ma-legend');
-        div.style.backgroundColor = 'rgba(15, 23, 42, 0.88)';
-        div.style.padding = '8px 12px';
-        div.style.borderRadius = '6px';
-        div.style.border = '1px solid #334155';
-        div.style.color = '#f8fafc';
-        div.style.fontSize = '12px';
-        div.innerHTML = '<div style="font-weight:600;margin-bottom:4px;">Habitat Suitability (HSI)</div>' +
-          '<div style="display:flex;align-items:center;gap:6px;">' +
-          '<span>0.0</span>' +
-          '<div style="width:120px;height:12px;border-radius:2px;background:linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725);"></div>' +
-          '<span>1.0</span>' +
-          '</div>';
-        return div;
-      };
-      legend.addTo(map);
-    }
+$(hsi_legend_js)
 
     var bounds = [[$(min_lat), $(min_lng)], [$(max_lat), $(max_lng)]];
     map.fitBounds(bounds, { padding: [25, 25] });
@@ -3438,7 +3503,7 @@ Generates a standalone interactive HTML chart showing isotropic transition proba
 decay against pairwise spatial distances with empirical binned means.
 """
 function leaflet_dispersal_kernel(
-    Gamma::AbstractMatrix{<:Real},
+    Gamma::Union{AbstractMatrix{<:Real}, AbstractVector},
     au::NamedTuple;
     title::String = "Dispersal Kernel Distance Decay",
     dark_mode::Bool = false,
@@ -3447,21 +3512,29 @@ function leaflet_dispersal_kernel(
     kwargs...
 )::LeafletMap
     cents = au.centroids
-    S = size(Gamma, 1)
+    G_mat = Gamma isa AbstractVector ? Gamma[1] : Gamma
+    S = size(G_mat, 1)
+    sp_G = sparse(G_mat)
+    rows = rowvals(sp_G)
+    vals = nonzeros(sp_G)
+
     distances = Float64[]
     probs = Float64[]
     for i in 1:S
         ci = cents[i]
-        for j in 1:S
+        for idx in nzrange(sp_G, i)
+            j = rows[idx]
             i == j && continue
             cj = cents[j]
             d = sqrt((cj[1] - ci[1])^2 + (cj[2] - ci[2])^2)
             push!(distances, d)
-            push!(probs, Gamma[i, j])
+            push!(probs, Float64(vals[idx]))
         end
     end
+
     n_bins = 15
-    d_min, d_max = !isempty(distances) ? (minimum(distances), maximum(distances)) : (0.0, 10.0)
+    d_min, d_max = !isempty(distances) ? extrema(distances) : (0.0, 10.0)
+    abs(d_max - d_min) < 1e-12 && (d_max = d_min + 1.0)
     bin_edges = range(d_min, d_max, length=n_bins+1)
     bin_mids, bin_means = Float64[], Float64[]
     for b in 1:n_bins
@@ -3479,7 +3552,7 @@ function leaflet_dispersal_kernel(
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>\$(title)</title>
+  <title>$(title)</title>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
@@ -3490,15 +3563,15 @@ function leaflet_dispersal_kernel(
 </head>
 <body>
   <div class="card">
-    <h2>\$(title)</h2>
+    <h2>$(title)</h2>
     <div style="height: 320px;"><canvas id="chart"></canvas></div>
   </div>
   <script>
     new Chart(document.getElementById('chart'), {
       type: 'line',
       data: {
-        labels: [\$dx_str],
-        datasets: [{ label: 'Transition Probability', data: [\$dy_str], borderColor: '#38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.2)', fill: true, tension: 0.3 }]
+        labels: [$(dx_str)],
+        datasets: [{ label: 'Transition Probability', data: [$(dy_str)], borderColor: '#38bdf8', backgroundColor: 'rgba(56, 189, 248, 0.2)', fill: true, tension: 0.3 }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -3525,101 +3598,239 @@ function leaflet_step_diagnostics(
     title::String = "Step Length & Turning Angle Diagnostics",
     dark_mode::Bool = false,
     width::String = "100%",
-    height::String = "400px",
+    height::String = "500px",
     kwargs...
 )::LeafletMap
-    cents = au.centroids
+    cents = if hasproperty(au, :centroids_lonlat) && !isempty(au.centroids_lonlat)
+        au.centroids_lonlat
+    elseif hasproperty(au, :centroids) && !isempty(au.centroids)
+        au.centroids
+    elseif hasproperty(au, :centroids_km) && !isempty(au.centroids_km)
+        au.centroids_km
+    else
+        Tuple{Float64, Float64}[]
+    end
+
     step_lengths = Float64[]
     turning_angles = Float64[]
 
-    if isa(paths, AbstractMatrix)
+    # Normalize paths into an array of coordinate trajectories
+    raw_tracks = Vector{Vector{Tuple{Float64, Float64}}}()
+
+    if isa(paths, AbstractDict)
+        for (_, node_seq) in paths
+            if isa(node_seq, AbstractVector) && !isempty(node_seq)
+                pts = Tuple{Float64, Float64}[]
+                for u in node_seq
+                    if isa(u, Integer) && 1 <= u <= length(cents)
+                        push!(pts, (Float64(cents[u][1]), Float64(cents[u][2])))
+                    end
+                end
+                length(pts) >= 2 && push!(raw_tracks, pts)
+            end
+        end
+    elseif isa(paths, AbstractMatrix)
         n_indiv, n_steps = size(paths)
         for i in 1:n_indiv
-            xs = [cents[paths[i, t]][1] for t in 1:n_steps if 1 <= paths[i, t] <= length(cents)]
-            ys = [cents[paths[i, t]][2] for t in 1:n_steps if 1 <= paths[i, t] <= length(cents)]
-            for t in 2:length(xs)
-                push!(step_lengths, sqrt((xs[t] - xs[t-1])^2 + (ys[t] - ys[t-1])^2))
-                if t >= 3
-                    dx1, dy1 = xs[t-1] - xs[t-2], ys[t-1] - ys[t-2]
-                    dx2, dy2 = xs[t] - xs[t-1], ys[t] - ys[t-1]
-                    a1 = atan(dy1, dx1)
-                    a2 = atan(dy2, dx2)
-                    push!(turning_angles, atan(sin(a2 - a1), cos(a2 - a1)))
+            pts = Tuple{Float64, Float64}[]
+            for t in 1:n_steps
+                u = paths[i, t]
+                if 1 <= u <= length(cents)
+                    push!(pts, (Float64(cents[u][1]), Float64(cents[u][2])))
                 end
             end
+            length(pts) >= 2 && push!(raw_tracks, pts)
         end
     elseif isa(paths, AbstractVector)
         for p in paths
-            coords = if p isa NamedTuple && hasproperty(p, :coords)
-                p.coords
-            elseif p isa AbstractVector
-                p
-            else
-                nothing
-            end
-            if !isnothing(coords) && length(coords) >= 2
-                for t in 2:length(coords)
-                    pt1 = coords[t-1]
-                    pt2 = coords[t]
-                    push!(step_lengths, sqrt((pt2[1] - pt1[1])^2 + (pt2[2] - pt1[2])^2))
-                    if t >= 3
-                        pt0 = coords[t-2]
-                        dx1, dy1 = pt1[1] - pt0[1], pt1[2] - pt0[2]
-                        dx2, dy2 = pt2[1] - pt1[1], pt2[2] - pt1[2]
-                        a1 = atan(dy1, dx1)
-                        a2 = atan(dy2, dx2)
-                        push!(turning_angles, atan(sin(a2 - a1), cos(a2 - a1)))
+            if p isa NamedTuple && hasproperty(p, :coords) && isa(p.coords, AbstractVector)
+                pts = Tuple{Float64, Float64}[
+                    (Float64(pt[1]), Float64(pt[2])) for pt in p.coords if length(pt) >= 2
+                ]
+                length(pts) >= 2 && push!(raw_tracks, pts)
+            elseif p isa NamedTuple && hasproperty(p, :path) && isa(p.path, AbstractVector)
+                pts = Tuple{Float64, Float64}[]
+                for u in p.path
+                    if isa(u, Integer) && 1 <= u <= length(cents)
+                        push!(pts, (Float64(cents[u][1]), Float64(cents[u][2])))
                     end
+                end
+                length(pts) >= 2 && push!(raw_tracks, pts)
+            elseif p isa AbstractVector
+                if !isempty(p) && first(p) isa Integer
+                    pts = Tuple{Float64, Float64}[]
+                    for u in p
+                        if 1 <= u <= length(cents)
+                            push!(pts, (Float64(cents[u][1]), Float64(cents[u][2])))
+                        end
+                    end
+                    length(pts) >= 2 && push!(raw_tracks, pts)
+                else
+                    pts = Tuple{Float64, Float64}[
+                        (Float64(pt[1]), Float64(pt[2])) for pt in p if length(pt) >= 2
+                    ]
+                    length(pts) >= 2 && push!(raw_tracks, pts)
                 end
             end
         end
     end
 
-    s_bins = 15
-    s_min, s_max = !isempty(step_lengths) ? (minimum(step_lengths), maximum(step_lengths)) : (0.0, 10.0)
-    s_edges = range(s_min, s_max, length=s_bins+1)
-    s_counts = [count(x -> s_edges[b] <= x < s_edges[b+1], step_lengths) for b in 1:s_bins]
-    s_mids = [(@sprintf("%.1f", (s_edges[b]+s_edges[b+1])/2.0)) for b in 1:s_bins]
-    sx_str = join(["\"" * m * "\"" for m in s_mids], ", ")
+    # Compute step lengths (in km) and turning angles (in degrees)
+    for coords in raw_tracks
+        length(coords) < 2 && continue
+        is_geo = all(pt -> -180.0 <= pt[1] <= 180.0 && -90.0 <= pt[2] <= 90.0, coords)
+        for t in 2:length(coords)
+            pt1 = coords[t - 1]
+            pt2 = coords[t]
+            dist_km = is_geo ?
+                haversine_distance(pt1[1], pt1[2], pt2[1], pt2[2]) / 1000.0 :
+                sqrt((pt2[1] - pt1[1])^2 + (pt2[2] - pt1[2])^2)
+            push!(step_lengths, dist_km)
+
+            if t >= 3
+                pt0 = coords[t - 2]
+                dx1, dy1 = pt1[1] - pt0[1], pt1[2] - pt0[2]
+                dx2, dy2 = pt2[1] - pt1[1], pt2[2] - pt1[2]
+                a1 = atan(dy1, dx1)
+                a2 = atan(dy2, dx2)
+                d_ang_deg = rad2deg(atan(sin(a2 - a1), cos(a2 - a1)))
+                push!(turning_angles, d_ang_deg)
+            end
+        end
+    end
+
+    # Step length histogram
+    s_bins = 16
+    s_min, s_max = !isempty(step_lengths) ? extrema(step_lengths) : (0.0, 10.0)
+    s_max <= s_min && (s_max = s_min + 1.0)
+    s_edges = range(s_min, s_max, length = s_bins + 1)
+    s_counts = [count(x -> s_edges[b] <= x < s_edges[b + 1], step_lengths) for b in 1:s_bins]
+    s_mids = [(@sprintf("%.1f", (s_edges[b] + s_edges[b + 1]) / 2.0)) for b in 1:s_bins]
+    sx_str = join(["\"" * m * " km\"" for m in s_mids], ", ")
     sy_str = join(s_counts, ", ")
 
+    # Turning angle histogram (-180° to 180°)
+    a_bins = 12
+    a_edges = range(-180.0, 180.0, length = a_bins + 1)
+    a_counts = [count(x -> a_edges[b] <= x < a_edges[b + 1], turning_angles) for b in 1:a_bins]
+    a_mids = [(@sprintf("%d°", round(Int, (a_edges[b] + a_edges[b + 1]) / 2.0))) for b in 1:a_bins]
+    ax_str = join(["\"" * m * "\"" for m in a_mids], ", ")
+    ay_str = join(a_counts, ", ")
+
+    mean_step = !isempty(step_lengths) ? round(sum(step_lengths) / length(step_lengths), digits = 2) : 0.0
+    max_step = !isempty(step_lengths) ? round(maximum(step_lengths), digits = 2) : 0.0
+    n_total_steps = length(step_lengths)
+
     html = """<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <title>$(title)</title>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    body { background: #0f172a; color: #f8fafc; font-family: 'Outfit', sans-serif; padding: 20px; }
-    .card { background: rgba(30, 41, 59, 0.85); border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 20px; max-width: 900px; margin: auto; }
-    h2 { font-size: 1.15rem; margin-bottom: 12px; color: #818cf8; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0b1120; color: #f8fafc; font-family: 'Outfit', sans-serif; padding: 24px; }
+    .card { background: rgba(15, 23, 42, 0.90); border: 1px solid rgba(255,255,255,0.12); border-radius: 12px; padding: 20px; max-width: 1100px; margin: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 12px; }
+    h2 { font-size: 1.25rem; font-weight: 700; color: #38bdf8; }
+    .badge { font-size: 0.75rem; background: rgba(56, 189, 248, 0.15); color: #38bdf8; padding: 4px 10px; border-radius: 6px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+    .stat-card { background: #080d1a; border: 1px solid rgba(255,255,255,0.06); border-radius: 8px; padding: 12px; }
+    .stat-label { font-size: 0.75rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.05em; }
+    .stat-val { font-size: 1.35rem; font-weight: 700; color: #f8fafc; font-family: 'JetBrains Mono', monospace; margin-top: 4px; }
+    .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    .chart-box { background: #080d1a; border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px; height: 340px; }
+    .chart-title { font-size: 0.90rem; font-weight: 600; color: #cbd5e1; margin-bottom: 10px; }
+    @media (max-width: 850px) { .charts-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>$(title)</h2>
-    <div style="height: 320px;"><canvas id="chart"></canvas></div>
+    <div class="header">
+      <h2>$(title)</h2>
+      <span class="badge">Movement Diagnostics</span>
+    </div>
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Total Trajectory Steps</div>
+        <div class="stat-val">$n_total_steps</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Mean Step Length</div>
+        <div class="stat-val">$mean_step km</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Max Step Displacement</div>
+        <div class="stat-val">$max_step km</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Paths Analyzed</div>
+        <div class="stat-val">$(length(raw_tracks))</div>
+      </div>
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-box">
+        <div class="chart-title">Step Displacement Distribution</div>
+        <div style="height: 270px;"><canvas id="stepChart"></canvas></div>
+      </div>
+      <div class="chart-box">
+        <div class="chart-title">Turning Angle Distribution (-180° to +180°)</div>
+        <div style="height: 270px;"><canvas id="angleChart"></canvas></div>
+      </div>
+    </div>
   </div>
+
   <script>
-    new Chart(document.getElementById('chart'), {
+    new Chart(document.getElementById('stepChart'), {
       type: 'bar',
       data: {
         labels: [$(sx_str)],
-        datasets: [{ label: 'Frequency', data: [$(sy_str)], backgroundColor: '#818cf8', borderRadius: 4 }]
+        datasets: [{
+          label: 'Step Count',
+          data: [$(sy_str)],
+          backgroundColor: '#38bdf8',
+          borderRadius: 4
+        }]
       },
       options: {
-        responsive: true, maintainAspectRatio: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
         scales: {
-          x: { title: { display: true, text: 'Step Displacement', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' } },
-          y: { title: { display: true, text: 'Count', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' } }
+          x: { title: { display: true, text: 'Displacement (km)', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } },
+          y: { title: { display: true, text: 'Frequency', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } }
+        }
+      }
+    });
+
+    new Chart(document.getElementById('angleChart'), {
+      type: 'bar',
+      data: {
+        labels: [$(ax_str)],
+        datasets: [{
+          label: 'Turning Angles',
+          data: [$(ay_str)],
+          backgroundColor: '#818cf8',
+          borderRadius: 4
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { title: { display: true, text: 'Turning Angle (degrees)', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } },
+          y: { title: { display: true, text: 'Frequency', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } }
         }
       }
     });
   </script>
 </body>
 </html>"""
-    return LeafletMap(html, title=title, width=width, height=height, metadata=Dict(:n_steps=>length(step_lengths)))
+    return LeafletMap(html, title = title, width = width, height = height, metadata = Dict(:n_steps => length(step_lengths)))
 end
 
 """
@@ -4160,8 +4371,8 @@ function leaflet_hydrodynamic_dashboard(
           if (v !== null && !isNaN(v)) vals.push(v);
         });
         vals.sort(function(a, b) { return a - b; });
-        var minVal = vals.length > 0 ? vals[Math.floor(vals.length * 0.02)] : 0;
-        var maxVal = vals.length > 0 ? vals[Math.floor(vals.length * 0.98)] : 1;
+        var minVal = vals.length > 0 ? vals[0] : 0;
+        var maxVal = vals.length > 0 ? vals[vals.length - 1] : 1;
         if (minVal === maxVal) maxVal += 0.1;
         layerRanges[lKey].push({ min: minVal, max: maxVal });
       }
@@ -4198,12 +4409,12 @@ function leaflet_hydrodynamic_dashboard(
         var rng = (curLayer === 'bathy') ? layerRanges['bathy'][0] : layerRanges[curLayer][curDepthIdx];
         var val = (curLayer === 'bathy') ? f.properties.bathy : f.properties[curLayer][curDepthIdx];
         var col = getColor(val, rng.min, rng.max, palettes[curLayer]);
-        return { fillColor: col, fillOpacity: 0.82, weight: 0.6, color: '#0f172a' };
+        return { fillColor: col, fillOpacity: 0.88, weight: 0.0, opacity: 0.0, stroke: false };
       },
       onEachFeature: function(f, layer) {
         layer.on({
           mouseover: function(e) {
-            e.target.setStyle({ weight: 2, color: '#38bdf8' });
+            e.target.setStyle({ stroke: true, weight: 1.8, color: '#38bdf8', opacity: 1.0 });
             e.target.bringToFront();
             updateHUD(f.properties);
           },
@@ -4358,6 +4569,7 @@ function leaflet_posterior_path_ensemble(
     width::String = "100%",
     height::String = "720px",
     max_individuals::Int = 24,
+    overlay_hsi::Bool = false,
     kwargs...
 )::LeafletMap
 
@@ -4498,7 +4710,7 @@ function leaflet_posterior_path_ensemble(
         <input type="checkbox" id="maShowMesh" checked> mesh
       </label>
       <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer;">
-        <input type="checkbox" id="maShowHsi" checked> HSI
+        <input type="checkbox" id="maShowHsi"$(overlay_hsi ? " checked" : "")> HSI
       </label>
       <span id="maTagSummary" style="color:var(--ma-text-muted,#64748b);font-size:12px;"></span>
       <span style="color:var(--ma-text-muted,#64748b);font-size:12px;margin-left:auto;">$(scope_str)</span>
@@ -4517,7 +4729,7 @@ function leaflet_posterior_path_ensemble(
 
     map_setup_js = """
     var isGeo = $(tf.is_geo ? "true" : "false");
-    var showHsi = true;
+    var showHsi = $(overlay_hsi ? "true" : "false");
     var map = L.map('$(map_id)', { attributionControl: false });
 
     var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', {
@@ -4760,7 +4972,8 @@ function leaflet_interactive_corridor_dashboard(
     width::String = "100%",
     height::String = "750px",
     k_default::Int = 4,
-    max_paths_render::Int = 30
+    max_paths_render::Int = 30,
+    overlay_hsi::Bool = false
 )::LeafletMap
 
     # Extract centroids and polygons
@@ -4858,7 +5071,7 @@ function leaflet_interactive_corridor_dashboard(
     cents_json = "{" * join(cents_json_parts, ",") * "}"
 
     # Background Polygons GeoJSON
-    has_hsi = !isnothing(hsi) && length(hsi) == S
+    has_hsi = overlay_hsi && !isnothing(hsi) && length(hsi) == S
     hsi_vals = has_hsi ? Float64.(hsi) : fill(0.5, S)
     pal_hsi = _resolve_palette(:viridis)
 
@@ -5195,13 +5408,14 @@ function leaflet_interactive_corridor_dashboard(
     var overlayLayers = {};
 
     // Base Polygons Layer
+    var hasHsi = $(has_hsi ? "true" : "false");
     var polyLayer = L.geoJSON(polysData, {
       style: function(feature) {
         return {
-          fillColor: feature.properties.fill_color || '#1e293b',
-          fillOpacity: 0.55,
+          fillColor: hasHsi ? (feature.properties.fill_color || '#1e293b') : '#1e293b',
+          fillOpacity: hasHsi ? 0.55 : 0.12,
           color: '#334155',
-          weight: 0.8
+          weight: hasHsi ? 0.8 : 0.6
         };
       },
       onEachFeature: function(feature, layer) {
@@ -5219,10 +5433,10 @@ function leaflet_interactive_corridor_dashboard(
             polyLayer.resetStyle(layer);
           }
         });
-        layer.bindTooltip("Unit #" + uid + (feature.properties.hsi ? " (HSI: " + feature.properties.hsi + ")" : ""));
+        layer.bindTooltip("Unit #" + uid + (hasHsi && feature.properties.hsi ? " (HSI: " + feature.properties.hsi + ")" : ""));
       }
     }).addTo(map);
-    overlayLayers["Spatial Mesh (HSI)"] = polyLayer;
+    overlayLayers["$(has_hsi ? "Spatial Mesh (HSI)" : "Spatial Mesh")"] = polyLayer;
 
     try {
       if (polyLayer && polyLayer.getBounds().isValid()) {
@@ -5323,6 +5537,73 @@ function leaflet_interactive_corridor_dashboard(
     }
 
     // 4. Client-Side Dynamic Path Ensemble Search
+    // 4. Client-Side Dynamic Path Ensemble Search via Goal-Directed A*
+    function aStarSearch(startId, endId, P, centroids, perturb) {
+      var dist = {};
+      var prev = {};
+      var openSet = [startId];
+      dist[startId] = 0;
+
+      function h(u) {
+        var c1 = centroids[String(u)];
+        var c2 = centroids[String(endId)];
+        if (!c1 || !c2) return 0;
+        var dx = (c1[0] - c2[0]) * Math.cos((c1[1] + c2[1]) * 0.5 * Math.PI / 180);
+        var dy = c1[1] - c2[1];
+        return Math.sqrt(dx * dx + dy * dy) * 111.0 / 8.0;
+      }
+
+      var closed = new Set();
+      var maxIters = 6000;
+      var iters = 0;
+
+      while (openSet.length > 0 && iters++ < maxIters) {
+        var bestIdx = 0;
+        var bestScore = Infinity;
+        for (var i = 0; i < openSet.length; i++) {
+          var u = openSet[i];
+          var f = dist[u] + h(u);
+          if (f < bestScore) {
+            bestScore = f;
+            bestIdx = i;
+          }
+        }
+        var current = openSet.splice(bestIdx, 1)[0];
+        if (current === endId) {
+          var path = [endId];
+          var curr = endId;
+          while (prev[curr] !== undefined) {
+            curr = prev[curr];
+            path.unshift(curr);
+          }
+          return { seq: path, cost: dist[endId] };
+        }
+        closed.add(current);
+
+        var nbrs = P[String(current)];
+        if (!nbrs) continue;
+        for (var n = 0; n < nbrs.length; n++) {
+          var target = Number(nbrs[n][0]);
+          var pVal = nbrs[n][1];
+          if (closed.has(target)) continue;
+
+          var edgeCost = -Math.log(pVal + 1e-5);
+          if (perturb) {
+            edgeCost *= (0.65 + 0.70 * Math.random());
+          }
+          var tentative = dist[current] + edgeCost;
+          if (dist[target] === undefined || tentative < dist[target]) {
+            dist[target] = tentative;
+            prev[target] = current;
+            if (openSet.indexOf(target) === -1) {
+              openSet.push(target);
+            }
+          }
+        }
+      }
+      return null;
+    }
+
     function computeAndRenderPaths() {
       if (state.startUnit === null || state.endUnit === null) return;
 
@@ -5330,80 +5611,74 @@ function leaflet_interactive_corridor_dashboard(
       var P = allKernels[state.group] || allKernels[defaultGroup];
       if (!P) return;
 
-      var start = String(state.startUnit);
+      var start = Number(state.startUnit);
       var end = Number(state.endUnit);
-      var k = state.k;
       var maxRender = state.maxPaths;
 
-      // Beam search for top candidate paths from start to end in k steps
-      // Path representation: { seq: [start, ...], prob: 1.0 }
-      var beam = [{ seq: [Number(start)], prob: 1.0 }];
-      var BEAM_WIDTH = 150;
-
-      for (var step = 1; step <= k; step++) {
-        var nextBeam = [];
-        for (var b = 0; b < beam.length; b++) {
-          var pItem = beam[b];
-          var lastNode = String(pItem.seq[pItem.seq.length - 1]);
-          var nbrs = P[lastNode];
-          if (!nbrs || nbrs.length === 0) continue;
-
-          for (var n = 0; n < nbrs.length; n++) {
-            var target = nbrs[n][0];
-            var pVal = nbrs[n][1];
-            nextBeam.push({
-              seq: pItem.seq.concat([target]),
-              prob: pItem.prob * pVal
-            });
-          }
-        }
-        nextBeam.sort(function(a, b) { return b.prob - a.prob; });
-        beam = nextBeam.slice(0, BEAM_WIDTH);
-      }
-
-      // Filter paths that ended at destination
-      var validPaths = beam.filter(function(item) {
-        return item.seq[item.seq.length - 1] === end;
-      });
-
-      // If exact step reach is empty, fallback to paths that reached destination at intermediate steps
-      if (validPaths.length === 0) {
-        validPaths = beam.filter(function(item) {
-          return item.seq.indexOf(end) !== -1;
-        });
-      }
-
-      if (validPaths.length === 0) {
-        updateStatus("<span style='color:#f87171;'>No viable path found</span> from #" + start + " to #" + end + " in " + k + " steps. Try increasing the <b>k</b> slider.");
+      // 1. Compute optimal maximum likelihood path
+      var optimalPath = aStarSearch(start, end, P, centroids, false);
+      if (!optimalPath) {
+        updateStatus("<span style='color:#f87171;'>No viable corridor found</span> between #" + start + " and #" + end + " through active marine units. Endpoints may be separated by dry land barriers.");
         document.getElementById('paths_count_badge').style.display = 'none';
         return;
       }
 
-      validPaths.sort(function(a, b) { return b.prob - a.prob; });
-      var renderPaths = validPaths.slice(0, maxRender);
-      var maxProb = renderPaths[0].prob;
+      var pathCandidates = [optimalPath];
+      var seenSeqs = new Set([optimalPath.seq.join("-")]);
+
+      // 2. Generate candidate ensemble via stochastic edge perturbations
+      var attempts = 0;
+      while (pathCandidates.length < maxRender && attempts++ < maxRender * 3) {
+        var alt = aStarSearch(start, end, P, centroids, true);
+        if (alt) {
+          var sig = alt.seq.join("-");
+          if (!seenSeqs.has(sig)) {
+            seenSeqs.add(sig);
+            pathCandidates.push(alt);
+          }
+        }
+      }
+
+      // Calculate relative probabilities from transition costs
+      var minCost = optimalPath.cost;
+      var pathsWithProb = pathCandidates.map(function(item) {
+        var relProb = Math.exp(-(item.cost - minCost));
+        return { seq: item.seq, prob: relProb };
+      });
+
+      pathsWithProb.sort(function(a, b) { return b.prob - a.prob; });
+      var renderPaths = pathsWithProb.slice(0, maxRender);
 
       document.getElementById('paths_count_badge').style.display = 'inline';
       document.getElementById('paths_count_badge').innerText = renderPaths.length + " paths";
-      updateStatus("Rendered <b>" + renderPaths.length + " paths</b> between #" + start + " and #" + end + " (" + k + " steps). <i>Darker = higher posterior probability</i>.");
+      var optHops = optimalPath.seq.length - 1;
+      updateStatus("Rendered <b>" + renderPaths.length + " candidate corridors</b> from Release <b>#" + start + "</b> to Recapture <b>#" + end + "</b> (" + optHops + " hops). <i>Bright cyan = most probable trajectory</i>.");
 
-      // Render Polylines with probability-weighted opacity, thickness, and color
+      // Render Polylines with probability-weighted styling
       for (var pIdx = 0; pIdx < renderPaths.length; pIdx++) {
         var pathObj = renderPaths[pIdx];
-        var relWeight = (maxProb > 0) ? (pathObj.prob / maxProb) : 1.0;
+        var isOptimal = (pIdx === 0);
 
         var coords = [];
+        var totalDistKm = 0.0;
         for (var s = 0; s < pathObj.seq.length; s++) {
           var c = centroids[String(pathObj.seq[s])];
-          if (c) coords.push([c[1], c[0]]); // Leaflet [lat, lon]
+          if (c) {
+            coords.push([c[1], c[0]]); // Leaflet [lat, lon]
+            if (s > 0) {
+              var cPrev = centroids[String(pathObj.seq[s - 1])];
+              if (cPrev) {
+                var dx = (c[0] - cPrev[0]) * Math.cos((c[1] + cPrev[1]) * 0.5 * Math.PI / 180);
+                var dy = c[1] - cPrev[1];
+                totalDistKm += Math.sqrt(dx * dx + dy * dy) * 111.0;
+              }
+            }
+          }
         }
 
-        // More probable = darker, thicker, higher opacity
-        var opacity = 0.20 + 0.75 * relWeight;
-        var weight = 1.4 + 3.6 * relWeight;
-        
-        // Color mapping: dark navy / blue for high, soft slate/cyan for low
-        var col = (relWeight > 0.6) ? '#0284c7' : (relWeight > 0.25 ? '#38bdf8' : '#94a3b8');
+        var opacity = isOptimal ? 0.95 : (0.30 + 0.45 * pathObj.prob);
+        var weight = isOptimal ? 3.8 : (1.4 + 2.0 * pathObj.prob);
+        var col = isOptimal ? '#06b6d4' : (pathObj.prob > 0.5 ? '#38bdf8' : '#818cf8');
 
         var line = L.polyline(coords, {
           color: col,
@@ -5411,13 +5686,15 @@ function leaflet_interactive_corridor_dashboard(
           opacity: opacity
         }).addTo(pathsGroup);
 
-        var probPct = (relWeight * 100).toFixed(1);
+        var probPct = (pathObj.prob * 100).toFixed(1);
+        var rankLabel = isOptimal ? "Optimal Maximum-Likelihood Corridor" : ("Alternative Path #" + (pIdx + 1));
         line.bindPopup(
-          "<div style='font-family:var(--font-main);font-size:0.85rem;'>" +
-          "<b>Probabilistic Path #" + (pIdx + 1) + "</b><br>" +
-          "Relative Probability: <b>" + probPct + "%</b><br>" +
-          "Steps: " + (pathObj.seq.length - 1) + " hops<br>" +
-          "<span style='font-size:0.75rem;color:#94a3b8;font-family:var(--font-mono);'>Route: " + pathObj.seq.join(" → ") + "</span>" +
+          "<div style='font-family:var(--font-main);font-size:0.85rem;line-height:1.4;'>" +
+          "<b style='color:#38bdf8;'>" + rankLabel + "</b><br>" +
+          "Relative Likelihood: <b>" + probPct + "%</b><br>" +
+          "Geodesic Distance: <b>" + totalDistKm.toFixed(1) + " km</b><br>" +
+          "Network Transit: <b>" + (pathObj.seq.length - 1) + " steps</b><br>" +
+          "<span style='font-size:0.75rem;color:#94a3b8;font-family:var(--font-mono);'>Route: " + pathObj.seq.slice(0, 8).join(" → ") + (pathObj.seq.length > 8 ? " ... → " + end : "") + "</span>" +
           "</div>"
         );
       }
@@ -5508,6 +5785,8 @@ function leaflet_current_density_map(
     prob_threshold::Real = 0.80,
     title::String = "MovementAnalysis Posterior Migratory Current Density & Pinch-Points",
     legend_title::String = "Posterior Mean Flux (J)",
+    transparent_zeros::Bool = true,
+    badge::Union{Nothing, String} = nothing,
     kwargs...
 )
     robust_mask, _, _ = identify_stochastic_pinchpoints(
@@ -5520,6 +5799,8 @@ function leaflet_current_density_map(
         pinch_score = res.pinchpoint_prob,
         title = title,
         legend_title = legend_title,
+        transparent_zeros = transparent_zeros,
+        badge = badge,
         kwargs...
     )
 end
@@ -5536,7 +5817,9 @@ function leaflet_current_density_map(
     dark_mode::Bool = false,
     width::String = "100%",
     height::String = "750px",
-    legend_title::String = "Current Density (J)"
+    legend_title::String = "Current Density (J)",
+    transparent_zeros::Bool = true,
+    badge::Union{Nothing, String} = nothing
 )
     polys_raw = if hasproperty(mesh, :polygons)
         mesh.polygons
@@ -5571,8 +5854,11 @@ function leaflet_current_density_map(
 
     pal = _resolve_palette(colormap)
     dens_vals = Float64.(current_density)
-    max_d = maximum(dens_vals)
-    min_d = minimum(dens_vals)
+    non_zeros = filter(v -> abs(v) > 1e-12, dens_vals)
+    min_d = (!isempty(non_zeros) && transparent_zeros) ? minimum(non_zeros) :
+            (!isempty(dens_vals) ? minimum(dens_vals) : 0.0)
+    max_d = !isempty(dens_vals) ? maximum(dens_vals) : 1.0
+    max_d <= min_d && (max_d = min_d + 1e-6)
 
     has_pinch = !isnothing(pinch_mask) && length(pinch_mask) == S
     pinch_bools = has_pinch ? pinch_mask : fill(false, S)
@@ -5592,7 +5878,8 @@ function leaflet_current_density_map(
         end
 
         d_val = dens_vals[i]
-        col = _map_val_to_hex(d_val, min_d, max_d, pal)
+        is_z = transparent_zeros && (abs(d_val) <= 1e-12)
+        col = is_z ? "transparent" : _map_val_to_hex(d_val, min_d, max_d, pal)
         is_p = pinch_bools[i]
         p_str = is_p ? "CRITICAL PINCH-POINT" : "Normal Corridor"
         ps_str = if !isnothing(pinch_score) && length(pinch_score) == S
@@ -5607,6 +5894,7 @@ function leaflet_current_density_map(
           "properties": {
             "unit_id": $i,
             "density": $(round(d_val, digits=5)),
+            "is_zero": $(is_z ? "true" : "false"),
             "is_pinch": $(is_p ? "true" : "false"),
             "pinch_status": "$p_str",
             "pinch_score": "$ps_str",
@@ -5770,7 +6058,7 @@ function leaflet_current_density_map(
   <header class="ma-header">
     <div class="ma-title">
       <span>$title</span>
-      <span class="ma-badge">Circuit Theory / Ohm's Law</span>
+      $(badge !== nothing ? """<span class="ma-badge">$badge</span>""" : "")
     </div>
     <div style="font-size: 0.82rem; color: var(--text-muted);">
       Population Migratory Flux & Bottleneck Corridors
@@ -5808,6 +6096,7 @@ function leaflet_current_density_map(
         <span>$min_str</span>
         <span>$max_str</span>
       </div>
+      $(transparent_zeros ? "<div style=\"font-size:0.70rem;color:var(--text-muted);margin-top:4px;\">Zero density areas rendered transparent</div>" : "")
     </div>
   </div>
 
@@ -5828,6 +6117,15 @@ function leaflet_current_density_map(
     var showPinchHighlight = true;
 
     function getFeatureStyle(feature) {
+      if (feature.properties.is_zero) {
+        return {
+          fillColor: 'transparent',
+          fillOpacity: 0.0,
+          color: 'transparent',
+          weight: 0.0,
+          opacity: 0.0
+        };
+      }
       var isP = feature.properties.is_pinch;
       var strokeColor = (isP && showPinchHighlight) ? '#06b6d4' : '#1e293b';
       var strokeWeight = (isP && showPinchHighlight) ? 2.5 : 0.6;
@@ -5850,7 +6148,9 @@ function leaflet_current_density_map(
           ? "<span style='background:rgba(6,182,212,0.2);color:#06b6d4;" +
             "padding:2px 6px;border-radius:4px;font-size:0.75rem;font-weight:700;'>" +
             "CRITICAL BOTTLENECK</span>"
-          : "<span style='color:#94a3b8;font-size:0.75rem;'>Standard Marine Corridor</span>";
+          : (p.is_zero
+            ? "<span style='color:#64748b;font-size:0.75rem;'>Zero Flux (Inactive)</span>"
+            : "<span style='color:#94a3b8;font-size:0.75rem;'>Standard Marine Corridor</span>");
 
         var scoreRow = (p.pinch_score !== 'N/A')
           ? "<div>Pinch Score: <b style='font-family:var(--font-mono);'>" +
@@ -5869,7 +6169,11 @@ function leaflet_current_density_map(
         );
 
         layer.on('mouseover', function() {
-          this.setStyle({ weight: 3.5, color: '#f8fafc', fillOpacity: 0.95 });
+          if (p.is_zero) {
+            this.setStyle({ weight: 1.0, color: '#38bdf8', fillOpacity: 0.15 });
+          } else {
+            this.setStyle({ weight: 3.5, color: '#f8fafc', fillOpacity: 0.95 });
+          }
         });
         layer.on('mouseout', function() {
           geojsonLayer.resetStyle(this);

@@ -827,6 +827,69 @@ end
         @test 0.0 <= disp_model.p_val <= 1.0
     end
 
+    @testset "No HSI overlay by default and transparent choropleth zeros" begin
+        # Config default
+        @test MovementAnalysisConfig().overlay_hsi === false
+
+        # Spatial mesh setup for testing
+        cents = [(-63.5, 44.5), (-63.0, 44.8), (-62.5, 45.0)]
+        polys = [
+            [(-63.6, 44.4), (-63.4, 44.4), (-63.4, 44.6), (-63.6, 44.6)],
+            [(-63.1, 44.7), (-62.9, 44.7), (-62.9, 44.9), (-63.1, 44.9)],
+            [(-62.6, 44.9), (-62.4, 44.9), (-62.4, 45.1), (-62.6, 45.1)]
+        ]
+        au = (
+            centroids = cents, centroids_lonlat = cents,
+            polygons = polys, polygons_lonlat = polys,
+            n_units = 3
+        )
+        hsi_test = [0.2, 0.6, 0.9]
+
+        # 1. Corridor dashboard does not overlay HSI by default
+        P = [0.2 0.8 0.0; 0.3 0.4 0.3; 0.0 0.5 0.5]
+        corr_def = leaflet_interactive_corridor_dashboard(P, au; hsi = hsi_test)
+        @test occursin("overlayLayers[\"Spatial Mesh\"]", corr_def.html)
+        @test !occursin("overlayLayers[\"Spatial Mesh (HSI)\"]", corr_def.html)
+
+        corr_hsi = leaflet_interactive_corridor_dashboard(
+            P, au; hsi = hsi_test, overlay_hsi = true
+        )
+        @test occursin("overlayLayers[\"Spatial Mesh (HSI)\"]", corr_hsi.html)
+
+        # 2. Tracks map does not overlay HSI by default
+        tracks_def = leaflet_tracks_map([[1, 2], [2, 3]], au; hsi = hsi_test)
+        @test occursin("Spatial Tessellation", tracks_def.html)
+        @test !occursin("Habitat Suitability (HSI)", tracks_def.html)
+
+        tracks_hsi = leaflet_tracks_map(
+            [[1, 2], [2, 3]], au; hsi = hsi_test, overlay_hsi = true
+        )
+        @test occursin("Habitat Suitability (HSI)", tracks_hsi.html)
+
+        # 3. Posterior path ensemble has showHsi = false by default
+        agreed = (
+            ensemble_paths = Dict("A" => [[1, 2, 3], [1, 2, 3]]),
+            ensemble_corridors = Dict("A" => zeros(3, 3))
+        )
+        ens_def = leaflet_posterior_path_ensemble(agreed, au; hsi = hsi_test)
+        @test occursin("var showHsi = false;", ens_def.html)
+
+        ens_hsi = leaflet_posterior_path_ensemble(
+            agreed, au; hsi = hsi_test, overlay_hsi = true
+        )
+        @test occursin("var showHsi = true;", ens_hsi.html)
+
+        # 4. Advection arrows default to :mesh background without HSI overlay
+        adv_def = leaflet_advection_arrows(au; Gamma = P)
+        @test adv_def isa LeafletMap
+
+        # 5. Choropleth transparent zeros
+        ch_zeros = leaflet_choropleth(polys, [0.0, 0.4, 0.8]; transparent_zeros = true)
+        @test occursin("var transparentZeros = true;", ch_zeros.html)
+        @test occursin("fillColor: 'transparent'", ch_zeros.html)
+        @test occursin("fillOpacity: 0.0", ch_zeros.html)
+    end
+
     include("test_ssa_movement.jl")
     include("test_agent_movement.jl")
 
