@@ -31,8 +31,7 @@ the default and the load-time validation cannot drift apart.
 """
 const DIAGNOSTIC_CHOICES = Set([:circuit, :stochastic, :bottlenecks,
                                 :validation, :bayesian_ensemble])
-const MODEL_MODE_CHOICES = Set([:telemetry, :telemetry_and_survey, :ssa,
-                               :ssa_and_survey, :agent])
+  const MODEL_MODE_CHOICES = Set([:telemetry, :telemetry_and_survey, :agent])
 const PATH_METHOD_CHOICES = Set([:astar, :viterbi])
 
 """
@@ -59,9 +58,9 @@ typo is a load error rather than a silently unmatched string comparison.
 """
 Base.@kwdef struct MovementAnalysisConfig
     # --- Approaches to fit ---------------------------------------------------
-    model_modes::Vector{Symbol} = Symbol[
-        :telemetry, :telemetry_and_survey, :ssa, :ssa_and_survey, :agent
-    ]
+      model_modes::Vector{Symbol} = Symbol[
+          :telemetry, :telemetry_and_survey, :agent
+      ]
 
     # --- Input files ---------------------------------------------------------
     tagging_file::Union{Nothing,String} = nothing
@@ -324,14 +323,14 @@ _get(params::MovementAnalysisConfig, field::Symbol, default) =
 
 Select the first available chain from the fitted models.
 
-Priority order: SSA telemetry > SSA+Survey > Telemetry > Telemetry+Survey,
-because the continuous-time models condition on the same observations with a
-strictly richer likelihood, so their posterior is the better one to summarise
-whenever it was actually fitted. Returns `nothing` when no model produced a chain,
-so a caller can report "nothing was fitted" rather than indexing an empty dict.
-"""
-function _get_active_chain(chains::Dict)
-    priority = [:ssa_telemetry, :ssa_and_survey, :telemetry, :telemetry_and_survey]
+  Priority order: Telemetry > Telemetry+Survey, because the survey model
+  conditions on the same observations with a strictly richer likelihood, so its
+  posterior is the better one to summarise whenever it was actually fitted.
+  Returns `nothing` when no model produced a chain, so a caller can report
+  "nothing was fitted" rather than indexing an empty dict.
+  """
+  function _get_active_chain(chains::Dict)
+      priority = [:telemetry, :telemetry_and_survey]
     for key in priority
         haskey(chains, key) && return chains[key]
     end
@@ -403,7 +402,7 @@ function create_argparse_settings()::ArgParseSettings
         # --- Approaches to fit ------------------------------------------------
         "--model-modes"
             dest_name = "model_modes"
-            help = "Comma-separated approaches: telemetry, telemetry_and_survey, ssa, ssa_and_survey, agent."
+            help = "Comma-separated approaches: telemetry, telemetry_and_survey, agent."
             arg_type = String
             metavar = "MODES"
 

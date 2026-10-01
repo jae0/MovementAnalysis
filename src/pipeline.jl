@@ -1275,12 +1275,9 @@ Approaches to fit (set via `params.model_modes`):
     the population level. recapture ~ Categorical(P^k[release, :]) for free
     parameters `mu_velocity`, `mu_diffusion`, `mu_gamma`; `alpha` and `rho` are
     derived from the first two by `movement_alpha_rho`.
-- `"ssa"`: Continuous-time semigroup over the same three parameters.
-    recapture ~ Categorical(exp(Q * dt)[release, :])
-- `"telemetry_and_survey"` / `"ssa_and_survey"`: **the survey density likelihood
-    is not implemented** — `counts` and `depths` are accepted and ignored, so
-    these reduce to the telemetry and SSA models respectively and emit a warning.
-    See `todo.md` §1.6.
+- `"telemetry_and_survey"`: **the survey density likelihood is not implemented** —
+    `counts` and `depths` are accepted and ignored, so this reduces to the
+    telemetry model and emits a warning.
 - `"agent"`: Agent-based movement simulation; no MCMC.
 
 # Arguments
@@ -1300,8 +1297,7 @@ This was missing, and it mattered more than it looked. Without it the returned
 "posterior" was the *opening segment* of the random walk, dominated by the
 initial draw and therefore by the prior. Two different models, seeded the same
 way, then reported near-identical parameters because both were mostly reporting
-their priors -- which is exactly what the SSA and telemetry runs did before the
-fix. `n_warmup` was a documented, configurable field that nothing read.
+their priors. `n_warmup` was a documented, configurable field that nothing read.
 
 # On reporting whether the chain moved
 A frozen chain produces a posterior mean indistinguishable from a converged one, and
@@ -1327,68 +1323,13 @@ function fit_movement_models(loaded, params)::NamedTuple
             "  Note: :$(m) not run -- no readable surveydata_file configured."
         )
     end
-    fit_tel       = :telemetry in mode_set
-    fit_joint     = :telemetry_and_survey in mode_set
-    fit_ssa       = :ssa in mode_set
-    fit_ssa_joint = :ssa_and_survey in mode_set
-    rng       = MersenneTwister(params.seed)
-    models    = Dict{Symbol, Any}()
-    chains    = Dict{Symbol, Any}()
+      fit_tel       = :telemetry in mode_set
+      fit_joint     = :telemetry_and_survey in mode_set
+      rng       = MersenneTwister(params.seed)
+      models    = Dict{Symbol, Any}()
+      chains    = Dict{Symbol, Any}()
 
-    # -- Continuous-Time SSA Telemetry Model ---------------------------------
-    if fit_ssa
-        verbose && println("\n[Phase 2] Fitting Continuous-Time SSA Telemetry model...")
-        verbose && println(
-            "  recapture ~ Categorical(exp(Q * dt)[release, :])"
-        )
-        obs_df     = loaded.obs_df
-        releases   = Int.(obs_df.release)
-        recaptures = Int.(obs_df.recapture)
-        dts        = Float64.(obs_df.k)
-        tagids     = obs_df.tagid
-        m_ssa = ssa_telemetry_turing_model(
-            releases, recaptures, dts,
-            loaded.W, loaded.hsi_vec, loaded.land_mask
-        )
-        models[:ssa_telemetry] = m_ssa
-        spl = movement_sampler(POPULATION_PRIOR_SCALES, params)
-        verbose && println("  Sampling $(params.n_samples) draws " *
-                          "(discarding $(params.n_warmup) warmup)...")
-        chn_ssa = sample(rng, m_ssa, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
-                chains[:ssa_telemetry] = chn_ssa
-        report_chain_health("ssa_telemetry", chn_ssa, params)
-        verbose && println("  SSA telemetry model complete.")
-    end
-
-    # -- Continuous-Time Joint Survey + SSA Telemetry Model ------------------
-    if fit_ssa_joint && !isnothing(loaded.survey_df)
-        verbose && println("\n[Phase 2] Fitting Continuous-Time Joint Survey + SSA Telemetry model...")
-        
-        obs_df     = loaded.obs_df
-        releases   = Int.(obs_df.release)
-        recaptures = Int.(obs_df.recapture)
-        dts        = Float64.(obs_df.k)
-        survey_df  = loaded.survey_df
-        counts     = Int.(round.(survey_df.density))
-        depths     = hasproperty(survey_df, :depth) ?
-                     Float64.(survey_df.depth) : zeros(Float64, length(counts))
-
-        m_ssa_j = joint_survey_ssa_telemetry_turing_model(
-            counts, depths,
-            releases, recaptures, dts,
-                        loaded.W, loaded.hsi_vec, loaded.land_mask
-        )
-        models[:ssa_and_survey] = m_ssa_j
-        spl = movement_sampler(POPULATION_PRIOR_SCALES, params)
-        verbose && println("  Sampling $(params.n_samples) draws " *
-                          " (discarding $(params.n_warmup) warmup)...")
-        chn_ssa_j = sample(rng, m_ssa_j, spl, params.n_samples; num_warmup = params.n_warmup, progress = false)
-                chains[:ssa_and_survey] = chn_ssa_j
-        report_chain_health("ssa_and_survey", chn_ssa_j, params)
-        verbose && println("  Joint SSA model complete.")
-    end
-
-    # -- Pure Telemetry Model ------------------------------------------------
+      # -- Pure Telemetry Model ------------------------------------------------
     if fit_tel
         verbose && println("\n[Phase 2] Fitting Pure Telemetry model...")
         verbose && println(
@@ -1607,12 +1548,8 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
     verbose = params.verbose
     chains  = fitted.chains
 
-    # Choose the first available chain (prefer SSA > joint > telemetry)
-    active_chain = if haskey(chains, :ssa_telemetry)
-        chains[:ssa_telemetry]
-    elseif haskey(chains, :ssa_and_survey)
-        chains[:ssa_and_survey]
-    elseif haskey(chains, :telemetry)
+    # Choose the first available chain (prefer joint > telemetry)
+    active_chain = if haskey(chains, :telemetry)
         chains[:telemetry]
     elseif haskey(chains, :telemetry_and_survey)
         chains[:telemetry_and_survey]

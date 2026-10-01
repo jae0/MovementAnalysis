@@ -19,8 +19,7 @@ The framework is organized into six cohesive phases:
    â–¼
 [Phase 2] Bayesian Model Fitting
    â”‚      - Categorical pure-telemetry Markov likelihood (discrete-time)
-   â”‚      - SSA continuous-time spatial jump process
-   â”‚      - Prior-scaled random-walk MH sampler (movement_sampler)
+   •      - Prior-scaled random-walk MH sampler (movement_sampler)
    â–¼
 [Phase 3] Stochastic Transition Kernel Construction
    â”‚      - Group-stratified advection-diffusion-taxis extraction
@@ -166,14 +165,6 @@ $$\log \mathcal{L}(\mathbf{y}_{1:T} \mid \theta) =
 **HSI in MCMC**: uses climatological mean `hsi_vec`. Time-varying HSI is
 applied post-estimation during path reconstruction (Phase 4).
 
-#### Continuous-Time SSA Telemetry Model
-
-$$T(\Delta t) = \exp(Q_g \Delta t)$$
-
-evaluated via the Uniformization (Poisson-Krylov) algorithm. The SSA cache
-shares the same 9Ã— grouping improvement as the discrete-time cache; see
-`todo.md` Â§1.7 for remaining work.
-
 #### Joint Density-Movement Model
 
 The survey density likelihood is **not yet implemented** â€” both joint models
@@ -282,7 +273,7 @@ Generates standalone HTML/SVG dashboards. After Phase 6 completes, writes
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `data_source` | `Symbol` | `:simulate` | `:simulate` or `:snowcrab` |
-| `model_modes` | `Vector{Symbol}` | `[:telemetry]` | Active model types (`:telemetry`, `:ssa`, `:agent`) |
+| `model_modes` | `Vector{Symbol}` | `[:telemetry]` | Active model types (`:telemetry`, `:telemetry_and_survey`, `:agent`) |
 | `reshard_hex` | `Bool` | `false` | Reshard domain to fine hexagons |
 | `hex_radius_km` | `Float64` | `10.0` | Cell radius for resharded hexagons (km) |
 | `depth_range` | `Tuple / Nothing` | `nothing` | Depth window `(min, max)` (m) |

@@ -88,14 +88,14 @@ end
             write(p, """
                 species_name = "Snow Crab"
                 n_samples = 500
-                model_modes = ["telemetry", "ssa", "agent"]
+                  model_modes = ["telemetry", "telemetry_and_survey", "agent"]
                 depth_range = [25.0, 400.0]
                 region_labels = []
                 """)
             from_file = load_config(config_path = p, cli_args = ["--max-paths=2"])
             @test from_file.species_name == "Snow Crab"
             @test from_file.n_samples == 500
-            @test from_file.model_modes == [:telemetry, :ssa, :agent]
+              @test from_file.model_modes == [:telemetry, :telemetry_and_survey, :agent]
             @test from_file.depth_range == [25.0, 400.0]
             @test from_file.max_paths == 2
 
@@ -265,56 +265,6 @@ end
         @test population_level_parameter_names(chn)
     end
 
-    @testset "Continuous-Time SSA Uniformization and Model" begin
-        # The generator itself, the `expm`/`taylor` transition matrices and the
-        # Gillespie simulator are covered in `test_ssa_movement.jl`. What was
-        # missing is the uniformization path -- `calculate_ssa_transition_row`, the
-        # one the Turing model actually calls -- and the fact that the model had
-        # never been fitted at all. Only those are checked here.
-        S = 8
-        W = spzeros(S, S)
-        for i in 1:S-1
-            W[i, i+1] = 1.0; W[i+1, i] = 1.0
-        end
-        hsi = collect(range(0.2, 0.8; length = S))
-        land = falses(S)
-
-        Q = construct_ssa_generator(W, hsi; velocity = 0.3, diffusion = 0.1,
-                                    gamma = 0.9, land_mask = land)
-
-        # Uniformization needs a positive rate; a generator with an all-zero
-        # diagonal would send the row builder down its degenerate early exit.
-        @test maximum(abs.(real(diag(Q)))) > 0
-
-        # A row must be a probability distribution at every dt, including ones long
-        # enough for the chain to have spread far.
-        rows = [MovementAnalysis.calculate_ssa_transition_row(Q, dt, 1)
-                for dt in (0.1, 1.0, 5.0, 50.0, 500.0)]
-        @test all(r -> sum(r) ≈ 1.0, rows)
-        @test all(r -> all(>=(0.0), r), rows)
-
-        # Longer elapsed time must not concentrate probability back on the start.
-        @test rows[2][1] > rows[4][1]
-
-        # The model builds, samples, and yields the same three population
-        # parameters as the discrete model.
-        releases = [1, 2, 3, 4, 5]
-        recaptures = [2, 3, 4, 5, 6]
-        dts = [1.0, 1.0, 2.0, 3.0, 4.0]
-        m_ssa = ssa_telemetry_turing_model(releases, recaptures, dts, W, hsi, land)
-        @test m_ssa isa DynamicPPL.Model
-
-        rng = MersenneTwister(42)
-        chn_ssa = sample(rng, m_ssa, MH(), 40; num_warmup = 100, progress = false)
-        @test size(chn_ssa, 1) == 40
-        @test population_level_parameter_names(chn_ssa)
-
-        vv, dd, gg = MovementAnalysis.posterior_kernel_draws(chn_ssa)
-        @test all(x -> length(x) == 40, (vv, dd, gg))
-        @test all(x -> all(isfinite, x), (vv, dd, gg))
-        @test all(>=(0.0), vv) && all(>=(0.0), dd)
-    end
-
     @testset "Burn-in is actually discarded" begin
         # `n_warmup` was a documented, configurable field that no `sample` call
         # read, so every returned "posterior" was the opening segment of the
@@ -378,59 +328,6 @@ end
         # A non-positive scale is a configuration error, not a silent freeze.
         @test_throws ArgumentError MovementAnalysis.movement_sampler(
             [0.2, 0.2, 1.0], MovementAnalysisConfig(; mh_proposal_scale = 0.0))
-    end
-
-    @testset "Continuous-time path is differentiable" begin
-        # The SSA path hard-cast to `Float64` in two places -- the generator's
-        # parameters and the model's cache -- so any sampler running under
-        # ForwardDiff failed with `Float64(::ForwardDiff.Dual)`. `movement_sampler`
-        # is exactly such a sampler (a linked-space random walk needs the
-        # Jacobian), so this took out the whole `:ssa` mode, which the default
-        # snow crab config requests. Both must now preserve the element type.
-        S = 6
-        W = spzeros(S, S)
-        for i in 1:S-1
-            W[i, i+1] = 1.0; W[i+1, i] = 1.0
-        end
-        hsi = collect(range(0.2, 0.8; length = S))
-        land = falses(S)
-
-        # With concrete parameters the generator is unchanged.
-        Qf = construct_ssa_generator(W, hsi; velocity = 0.3, diffusion = 0.1,
-                                     gamma = 0.9, land_mask = land)
-        @test eltype(Qf) === Float64
-        @test all(abs.(vec(sum(Qf; dims = 2))) .< 1e-10)   # conservative
-
-        # With duals it stays on the tape. The same parameters must give the same
-        # numbers, so a Dual generator is checked against a Float64 one.
-        Qd = construct_ssa_generator(W, hsi;
-                                     velocity  = ForwardDiff.Dual(0.3, 1.0),
-                                     diffusion = ForwardDiff.Dual(0.1, 1.0),
-                                     gamma     = ForwardDiff.Dual(0.9, 1.0),
-                                     land_mask = land)
-        @test eltype(Qd) <: ForwardDiff.Dual
-        @test ForwardDiff.value.(Qd.nzval) ≈ Qf.nzval
-        @test any(!iszero, ForwardDiff.partials.(Qd.nzval))
-
-        # A dual transition row is still a probability distribution.
-        rowd = MovementAnalysis.calculate_ssa_transition_row(Qd, 2.0, 1)
-        @test eltype(rowd) <: ForwardDiff.Dual
-        @test sum(ForwardDiff.value.(rowd)) ≈ 1.0 atol = 1e-9
-
-        # The regression itself: the SSA model must sample under the AD sampler the
-        # pipeline uses. This is what failed before.
-        m = ssa_telemetry_turing_model([1, 2, 3, 4, 5], [2, 3, 4, 5, 6],
-                                      [1.0, 1.0, 2.0, 3.0, 4.0], W, hsi, land)
-        spl = MovementAnalysis.movement_sampler(
-            [0.2, 0.2, 1.0], MovementAnalysisConfig(; n_samples = 20, n_warmup = 20))
-        chn = sample(MersenneTwister(42), m, spl, 20;
-                     num_warmup = 20, progress = false)
-        @test size(chn, 1) == 20
-        @test population_level_parameter_names(chn)
-        vv, dd, gg = MovementAnalysis.posterior_kernel_draws(chn)
-        @test all(x -> length(x) == 20, (vv, dd, gg))
-        @test all(x -> all(isfinite, x), (vv, dd, gg))
-        @test length(unique(round.(vv; digits = 9))) > 1     # not frozen
     end
 
     @testset "Posterior extraction is AD-safe" begin
@@ -1032,7 +929,6 @@ end
         rm(tmp_tess; force = true)
     end
 
-    include("test_ssa_movement.jl")
-    include("test_agent_movement.jl")
+      include("test_agent_movement.jl")
 
 end

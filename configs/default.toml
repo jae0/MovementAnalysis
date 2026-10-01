@@ -24,13 +24,11 @@
 # -----------------------------------------------------------------------------
 #   telemetry            -- categorical mark-recapture transitions
 #   telemetry_and_survey -- joint NegBin survey density + telemetry
-#   ssa                  -- continuous-time SSA telemetry
-#   ssa_and_survey       -- joint survey + continuous-time SSA
 #   agent                -- agent-based movement simulation
 #
-# The two survey-dependent approaches are skipped unless `surveydata_file` below
-# names a readable file, so listing them here without one is harmless.
-model_modes = ["telemetry", "telemetry_and_survey", "ssa", "ssa_and_survey", "agent"]
+# The survey-dependent approach is skipped unless `surveydata_file` below
+# names a readable file, so listing it here without one is harmless.
+model_modes = ["telemetry", "telemetry_and_survey", "agent"]
 
 # -----------------------------------------------------------------------------
 # Input files

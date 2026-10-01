@@ -35,7 +35,6 @@ using Turing
 include("config.jl")
 include("spatial_sources.jl")
 include("spatial_utils.jl")
-include("ssa_movement.jl")
 include("turing_models.jl")
 include("persistence.jl")
 include("movement.jl")
@@ -61,22 +60,12 @@ export
     extract_hydrodynamic_dataset,
     compute_network_transfer_matrix,
     get_polygon_area,
-    summarize_sample_matrix,
-    reshard_spatial_field,
+      summarize_sample_matrix,
+      reshard_spatial_field,
 
-    # Continuous-Time SSA Movement Models (Master Equation)
-    SSAMovementParams,
-    calculate_ssa_utility,
-    construct_ssa_generator,
-    calculate_ssa_transition_matrix,
-    simulate_gillespie_trajectories,
-    generate_ssa_movement_data,
-
-    # Probabilistic Turing Models
-    pure_telemetry_turing_model,
-    joint_survey_telemetry_turing_model,
-    ssa_telemetry_turing_model,
-    joint_survey_ssa_telemetry_turing_model,
+      # Probabilistic Turing Models
+      pure_telemetry_turing_model,
+      joint_survey_telemetry_turing_model,
 
     # Agent-Based Model Alternative
     TrackedAgent,

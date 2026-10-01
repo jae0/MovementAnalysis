@@ -15,16 +15,14 @@
 # -----------------------------------------------------------------------------
 #   telemetry            -- categorical mark-recapture transitions
 #   telemetry_and_survey -- joint NegBin survey density + telemetry
-#   ssa                  -- continuous-time SSA telemetry
-#   ssa_and_survey       -- joint survey + continuous-time SSA
 #   agent                -- agent-based movement simulation
 #
-# The two survey-dependent approaches are omitted: the Scotian Shelf tagging
-# series carries no paired survey density file, so those likelihoods would have
-# nothing to condition on. They are listed out rather than merely left to fail --
-# asking for one without a survey file is skipped, not an error. Add them back
+# The survey-dependent approach is omitted: the Scotian Shelf tagging
+# series carries no paired survey density file, so that likelihood would have
+# nothing to condition on. It is listed out rather than merely left to fail --
+# asking for one without a survey file is skipped, not an error. Add it back
 # together with `surveydata_file` if survey data becomes available.
-model_modes = ["telemetry", "ssa", "agent"]
+model_modes = ["telemetry", "agent"]
 
 # -----------------------------------------------------------------------------
 # Input files
