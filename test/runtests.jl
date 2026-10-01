@@ -774,8 +774,7 @@ end
 
         map_geo = leaflet_interactive_corridor_dashboard(
             P, au_geo;
-            title = "Test Corridor Map",
-            group_labels = ["All"]
+            title = "Test Corridor Map"
         )
         @test map_geo isa LeafletMap
         @test occursin("esriOcean", map_geo.html)
@@ -806,14 +805,17 @@ end
             ]
         )
         map_planar = leaflet_interactive_corridor_dashboard(
-            [P, P], au_planar;
-            title = "Planar Test Map",
-            group_labels = ["Group 1", "Group 2"]
+            P, au_planar;
+            title = "Planar Test Map"
         )
         @test map_planar isa LeafletMap
         @test occursin("esriOcean", map_planar.html)
-        @test occursin("Group 1", map_planar.html)
-        @test occursin("Group 2", map_planar.html)
+        # One pooled kernel, so the explorer carries a single "Pooled" entry and no
+        # per-group labels.
+        @test occursin("Pooled", map_planar.html)
+        @test !occursin("Group 1", map_planar.html)
+        # A planar frame must not be rendered as longitude/latitude.
+        @test !occursin("-63.", map_planar.html)
     end
 
     @testset "Trait-Movement Associations OLS" begin

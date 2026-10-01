@@ -1728,10 +1728,10 @@ function reconstruct_paths_and_diagnostics(
     W           = loaded.W
     hsi_vec     = loaded.hsi_vec
     land_mask   = loaded.land_mask
-    n_spatial   = loaded.n_spatial
-    P_kernel    = kernels.P_kernel
-    G           = kernels.G
-    grp_nlookup = kernels.grp_name_lookup
+      n_spatial   = loaded.n_spatial
+      P_kernel    = kernels.P_kernel
+      G           = 1
+      grp_nlookup = Dict{Int, String}()
 
     cents_planar, cents_lonlat, cents_mesh =
         _resolve_centroids(loaded.mesh, n_spatial)
@@ -1944,12 +1944,10 @@ if params.dynamic_kernels
             end
         end
 
-        grp_lbl = haskey(grp_nlookup, grp) ?
-                  " [$(grp_nlookup[grp])]" : ""
-        verbose && println(
-            "  Tag $tid$grp_lbl: " *
-            "$(length(full_path)) units " *
-            "($(first(full_path)) -> $(last(full_path)))"
+          verbose && println(
+              "  Tag $tid: " *
+              "$(length(full_path)) units " *
+              "($(first(full_path)) -> $(last(full_path)))"
         )
     end
 
@@ -2231,8 +2229,8 @@ function export_dashboards(
     hsi_vec     = loaded.hsi_vec
     obs_df      = loaded.obs_df
     P_kernel    = kernels.P_kernel
-    G           = kernels.G
-    grp_nlookup = kernels.grp_name_lookup
+    G           = 1
+    grp_nlookup = Dict{Int, String}()
     spp         = params.species_name
 
     # Use the resolved centroids from path reconstruction so node
@@ -2330,11 +2328,10 @@ function export_dashboards(
 
         # Look up the group-specific colour for this tag
         sub_obs = filter(:tagid => ==(tid), obs_df)
-        grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
-              first(sub_obs.group) : 1
-        grp_lbl = get(grp_nlookup, grp, "Group $grp")
-        color = palette_colors[
-            (grp - 1) % length(palette_colors) + 1
+          grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
+                first(sub_obs.group) : 1
+          color = palette_colors[
+              (grp - 1) % length(palette_colors) + 1
         ]
 
         # Duration in time steps (sum of k across segments)
@@ -2350,10 +2347,8 @@ function export_dashboards(
             tortuosity      = tort,
             mean_hsi        = mean_h,
             color           = color,
-            duration_days   = Float64(k_total),
-            group           = grp,
-            group_label     = grp_lbl,
-        ))
+              duration_days   = Float64(k_total),
+          ))
 
         push!(path_dists_km, total_dist)
         if k_total > 0
@@ -2573,14 +2568,12 @@ function export_dashboards(
     try
         corr_file  = joinpath(out_dir, "movement_interactive_corridor.html")
         corr_file_pl = joinpath(out_dir, "movement_interactive_corridors.html")
-        grp_labels = [get(grp_nlookup, g, "Group $g") for g in 1:G]
-        corr_map   = leaflet_interactive_corridor_dashboard(
-            P_kernel, au_mesh;
-            hsi             = params.overlay_hsi ? hsi_vec : nothing,
-            overlay_hsi     = params.overlay_hsi,
-            empirical_paths = emp_tracks,
-            group_labels    = grp_labels,
-            dark_mode       = params.dark_mode,
+          corr_map   = leaflet_interactive_corridor_dashboard(
+              P_kernel, au_mesh;
+              hsi             = params.overlay_hsi ? hsi_vec : nothing,
+              overlay_hsi     = params.overlay_hsi,
+              empirical_paths = emp_tracks,
+              dark_mode       = params.dark_mode,
             title           = "$spp Dynamic Migration Corridor" *
                               reshard_lbl * depth_lbl
         )
@@ -2942,10 +2935,8 @@ function export_dashboards(
                         for u in nodes
                     ),
                     color           = color,
-                    duration_days   = Float64(length(coords) - 1),
-                    group           = grp,
-                    group_label     = get(grp_nlookup, grp, "Group $grp"),
-                ))
+                      duration_days   = Float64(length(coords) - 1),
+                  ))
             end
             if !isempty(agent_rich)
                 agent_file = joinpath(out_dir, "movement_agent_trajectories.html")

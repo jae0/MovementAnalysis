@@ -5410,7 +5410,7 @@ function export_movement_summary_csv(
 )::String
     mkpath(dirname(filepath))
     open(filepath, "w") do io
-        write(io, "tagid,group,release_date,recapture_date,start_lon,start_lat," *
+        write(io, "tagid,release_date,recapture_date,start_lon,start_lat," *
                   "end_lon,end_lat,duration_days,total_dist_km,displacement_km," *
                   "efficiency,tortuosity,velocity_km_day,mean_hsi,bearing_deg," *
                   "primary_behavior\n")
@@ -5424,9 +5424,7 @@ function export_movement_summary_csv(
             vel = dur > 0.1 ? tot_d / dur : 0.0
             r_date = hasproperty(p, :release_date) ? string(p.release_date) : "N/A"
             c_date = hasproperty(p, :recapture_date) ? string(p.recapture_date) : "N/A"
-            grp_val = hasproperty(p, :group) ? string(p.group) :
-                (hasproperty(p, :group_label) ? string(p.group_label) : "1")
-            m_hsi = hasproperty(p, :mean_hsi) ? Float64(p.mean_hsi) : 0.5
+              m_hsi = hasproperty(p, :mean_hsi) ? Float64(p.mean_hsi) : 0.5
             eff_val = i <= length(mov_stats.path_efficiency) ?
                 mov_stats.path_efficiency[i] : 1.0
             tort_val = i <= length(mov_stats.tortuosity) ?
@@ -5441,7 +5439,6 @@ function export_movement_summary_csv(
 
             write(io, string(
                 p.tagid, ",",
-                grp_val, ",",
                 r_date, ",",
                 c_date, ",",
                 round(c_start[1]; digits=4), ",",
@@ -5547,7 +5544,7 @@ function path_credible_intervals(
     obs_df    = loaded.obs_df
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
-    G         = kernels.G
+        G         = 1
 
     v_samples = _posterior_param_draws(kernels, :alpha_samples, 0.3)
     d_samples = _posterior_param_draws(kernels, :rho_samples, 0.1)
@@ -5793,7 +5790,6 @@ function reconstruct_paths_bayesian_ensemble(
         "$n_ensemble MCMC posterior samples..."
     )
 
-    G_eff = size(chn_mat_v, 2)
     P_draws = Any[]
     for d_idx in draw_indices
         # Derived by the shared helper, so a per-draw kernel cannot drift from the
@@ -5816,16 +5812,13 @@ function reconstruct_paths_bayesian_ensemble(
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
         first_row = first(sub_obs)
-        grp = hasproperty(sub_obs, :group) ? first(sub_obs.group) : 1
 
         k_steps = max(1, first_row.k)
         accumulated_corridor = zeros(Float64, n_spatial, k_steps + 1)
         sample_path_collection = Vector{Int}[]
 
         for (i, d_idx) in enumerate(draw_indices)
-            P_draw_all = P_draws[i]
-            grp_eff = min(grp, G_eff)
-            P_draw = P_draw_all isa AbstractVector ? P_draw_all[grp_eff] : P_draw_all
+            P_draw = P_draws[i]
 
             corr_draw = predict_corridor(
                 P_draw, first_row.release, first_row.recapture, k_steps;
@@ -5953,7 +5946,7 @@ function compute_connectivity_credible_intervals(
 )::NamedTuple
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
-    G         = kernels.G
+        G         = 1
 
     if region_map === nothing
         region_map = ones(Int, n_spatial)
@@ -6086,7 +6079,7 @@ function posterior_predictive_check(
     obs_df    = loaded.obs_df
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
-    G         = kernels.G
+        G         = 1
     seed      = params.seed
 
     v_samples = _posterior_param_draws(kernels, :alpha_samples, 0.3)
@@ -6311,9 +6304,8 @@ function export_movement_posterior_dashboard(
     species::String = "generic"
 )::String
     mkpath(dirname(filepath))
-    G = kernels.G
-    grp_lookup = hasproperty(kernels, :group_lookup) ?
-                 kernels.group_lookup : Dict{Int, String}()
+      G = 1
+      grp_lookup = Dict{Int, String}()
 
     alpha_samples = hasproperty(kernels, :alpha_samples) ?
                     kernels.alpha_samples : Float64[]

@@ -2417,9 +2417,8 @@ function leaflet_tracks_map(
             dur_days_val = 0.0
             dist_val_str = ""
             disp_val_str = ""
-            tort_val_str = ""
-            grp_label_str = ""
-            hsi_val_str = ""
+              tort_val_str = ""
+              hsi_val_str = ""
             start_date_str = ""
             end_date_str = ""
 
@@ -2453,10 +2452,8 @@ function leaflet_tracks_map(
                 end
                 tort_val_str = hasproperty(tr, :tortuosity) ?
                     @sprintf("%.2f", tr.tortuosity) : ""
-                hsi_val_str = hasproperty(tr, :mean_hsi) ?
-                    @sprintf("%.3f", tr.mean_hsi) : ""
-                grp_label_str = hasproperty(tr, :group_label) ?
-                    string(tr.group_label) : ""
+                  hsi_val_str = hasproperty(tr, :mean_hsi) ?
+                      @sprintf("%.3f", tr.mean_hsi) : ""
             elseif isa(paths, AbstractVector) && isa(paths[1], AbstractVector)
                 if !isempty(paths[1]) && paths[1][1] isa Integer && !isempty(cents)
                     for u_idx in paths[i]
@@ -2497,9 +2494,8 @@ function leaflet_tracks_map(
                   "type": "Feature",
                   "id": $i,
                   "properties": {
-                    "tag_id": "$tag_id_str",
-                    "group_label": "$grp_label_str",
-                    "n_steps": $n_steps_val,
+                      "tag_id": "$tag_id_str",
+                      "n_steps": $n_steps_val,
                     "duration_days": $(round(dur_days_val, digits=1)),
                     "total_dist": "$dist_val_str",
                     "displacement": "$disp_val_str",
@@ -5240,13 +5236,12 @@ end
 # ==============================================================================
 
 """
-    leaflet_interactive_corridor_dashboard(
-        P::Union{AbstractMatrix{<:Real}, AbstractVector{<:AbstractMatrix{<:Real}}},
-        au::NamedTuple;
-        hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
-        empirical_paths = nothing,
-        group_labels::Vector{String} = String[],
-        title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
+      leaflet_interactive_corridor_dashboard(
+          P::AbstractMatrix{<:Real},
+          au::NamedTuple;
+          hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
+          empirical_paths = nothing,
+          title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
         dark_mode::Bool = false,
         width::String = "100%",
         height::String = "750px",
@@ -5283,7 +5278,7 @@ w_\\pi = \\frac{\\mathbb{P}(\\pi \\mid A \\to B)}{\\max_{\\pi'} \\mathbb{P}(\\pi
 - `au`: Spatial areal unit NamedTuple containing `:centroids` and `:polygons`.
 - `hsi`: Optional spatial habitat suitability index vector of length ``S``.
 - `empirical_paths`: Optional collection of observed mark-recapture trajectories.
-- `group_labels`: Optional labels matching the group transition kernels.
+- `hsi`: Optional habitat suitability vector of length ``S``.
 - `title`: Visualization header title.
 - `dark_mode`: Toggle modern dark theme (default `true`).
 - `width, height`: CSS dimension specifications.
@@ -5298,7 +5293,6 @@ function leaflet_interactive_corridor_dashboard(
     au::NamedTuple;
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
     empirical_paths = nothing,
-    group_labels::Vector{String} = String[],
     title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
     dark_mode::Bool = false,
     width::String = "100%",
@@ -5349,18 +5343,11 @@ function leaflet_interactive_corridor_dashboard(
         lat_center = 45.0
     )
 
-    # Normalize kernel input into group dictionary
-    kernels_dict = Dict{String, Matrix{Float64}}()
-    if P isa AbstractVector
-        for (idx, mat) in enumerate(P)
-            g_lbl = idx <= length(group_labels) ? group_labels[idx] : "Group $idx"
-            kernels_dict[g_lbl] = Matrix{Float64}(mat)
-        end
-    else
-        g_lbl = !isempty(group_labels) ? first(group_labels) : "All"
-        kernels_dict[g_lbl] = Matrix{Float64}(P)
-    end
-    group_names = collect(keys(kernels_dict))
+  # The model is pooled, so there is exactly one kernel. The dict and label
+  # machinery that once held one entry per demographic group is retained only
+  # because the client-side path engine iterates it; it always has one key.
+  kernels_dict = Dict{String, Matrix{Float64}}("Pooled" => Matrix{Float64}(P))
+  group_names = collect(keys(kernels_dict))
 
     # Helper to serialize sparse P matrix into compact JSON lookup
     function _matrix_to_sparse_json(mat::Matrix{Float64})
