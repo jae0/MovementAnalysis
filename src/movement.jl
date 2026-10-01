@@ -2408,14 +2408,33 @@ function construct_stochastic_transition_kernel(
 end
 
 
-function _spatial_node_distance(c1, c2)::Float64
-    x1, y1 = Float64(c1[1]), Float64(c1[2])
-    x2, y2 = Float64(c2[1]), Float64(c2[2])
-    if abs(x1) <= 180.0 && abs(x2) <= 180.0 && abs(y1) <= 90.0 && abs(y2) <= 90.0
-        return haversine_distance(x1, y1, x2, y2)
-    else
-        return sqrt((x1 - x2)^2 + (y1 - y2)^2)
-    end
+"""
+    _spatial_node_distance(c1, c2; coord_space = :unknown) -> Float64
+
+Great-circle or planar distance between two node coordinates, in kilometres.
+
+`coord_space` is authoritative whenever the caller knows it: `:geographic` uses
+haversine on WGS84 degrees, `:planar_km` uses Euclidean distance on a local metric
+frame already in kilometres, and `:unknown` falls back to conservative inference.
+Range is not evidence of degrees — a planar frame in kilometres almost always
+falls inside the `[-180, 180]` degree box, and treating it as longitude/latitude
+collapses the distance to nearly zero.
+
+Both branches return kilometres. `haversine_distance` returns **metres**, so the
+conversion is required here; omitting it made calibrated effective resistance
+1000x too large for any geographic mesh while labelling it kilometres.
+"""
+function _spatial_node_distance(c1, c2; coord_space::Symbol = :unknown)::Float64
+  x1, y1 = Float64(c1[1]), Float64(c1[2])
+  x2, y2 = Float64(c2[1]), Float64(c2[2])
+  space = coord_space
+  if space === :unknown
+    space = _infer_coord_space((c1, c2)) ? :geographic : :planar_km
+  end
+  if space === :geographic
+    return haversine_distance(x1, y1, x2, y2) / 1000.0
+  end
+  return sqrt((x1 - x2)^2 + (y1 - y2)^2)
 end
 
 """

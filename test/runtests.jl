@@ -854,6 +854,52 @@ end
         @test 0.0 <= disp_model.p_val <= 1.0
     end
 
+    @testset "Resistance Distance Units Survive The Merge" begin
+        # A fix in one file whose counterpart lives in another is exactly what a
+        # cross-branch merge can silently break: circuit.jl passes `coord_space`
+        # to `_spatial_node_distance`, which is defined in movement.jl. When the two
+        # halves came from different branches the keyword did not exist and the
+        # failure was a MethodError on the calibration path only.
+        planar = [(10.0, 20.0), (12.0, 20.0), (14.0, 20.0)]
+        @test MovementAnalysis._spatial_node_distance(
+            planar[1], planar[2]; coord_space = :planar_km
+        ) ≈ 2.0 atol = 1e-10
+        @test MovementAnalysis._infer_coord_space(planar) == false
+
+        geo = [(-63.0, 44.0), (-62.0, 44.0)]
+        d = MovementAnalysis._spatial_node_distance(geo[1], geo[2]; coord_space = :geographic)
+        @test 70.0 < d < 90.0            # ~1 degree of longitude at 44 N, in km
+        @test MovementAnalysis._infer_coord_space(geo) == true
+
+        # Known-answer resistance on a path graph: two unit resistances in series.
+        Wp = sparse([0.0 1.0 0.0; 1.0 0.0 1.0; 0.0 1.0 0.0])
+        Lp, _ = build_circuit_laplacian(Wp)
+        Om = effective_resistance_matrix(Lp; W = Wp)
+        @test Om[1, 3] ≈ 2.0 atol = 1e-8
+        @test Om[1, 2] ≈ 1.0 atol = 1e-8
+        @test Om ≈ Om'
+        @test all(Om .>= -1e-12)
+
+        # The calibration path with centroids must run, which is where the
+        # coord_space keyword is actually consumed.
+        Oc = effective_resistance_matrix(
+            Lp; W = Wp, centroids = planar, coord_space = :planar_km
+        )
+        @test all(isfinite, Oc[1, 2])
+        @test 0.0 < Oc[1, 2] < 1e5
+
+        # A sink the source cannot reach carries no current.
+        Pd = zeros(4, 4)
+        Pd[1, 2] = 0.7; Pd[2, 1] = 0.7; Pd[2, 3] = 0.7; Pd[3, 2] = 0.7; Pd[4, 4] = 1.0
+        _, R_ok, I_ok = solve_directed_circuit_voltage(Pd, 1, 3)
+        @test R_ok > 0 && isfinite(R_ok)
+        @test nnz(I_ok) > 0
+        V_bad, R_bad, I_bad = solve_directed_circuit_voltage(Pd, 1, 4)
+        @test R_bad == Inf
+        @test all(iszero, V_bad)
+        @test nnz(I_bad) == 0
+    end
+
     @testset "No HSI overlay by default and transparent choropleth zeros" begin
         # Config default
         @test MovementAnalysisConfig().overlay_hsi === false
