@@ -2670,6 +2670,11 @@ function export_dashboards(
         )
     end
 
+    # The hydro dataset reaches this scope only as loaded.resharded_hydro. It was
+    # read here as a bare `hydro`, which is local to load_movement_data and so was
+    # never in scope at all. Bound once, here, before either panel that reads it.
+    hydro = loaded.resharded_hydro
+
     # 3. Advection Velocity Field
     # When advection or transition kernels are available, render directional drift arrows.
     # Drift vectors are derived from the model-fitted transition kernel (P_kernel)
@@ -2700,6 +2705,8 @@ function export_dashboards(
         end
     end
 
+    # The hydro dataset reaches this scope only as loaded.resharded_hydro; see the
+    # binding above, which also serves the advection panel.
     if hydro !== nothing &&
        all(k -> hasproperty(hydro, k), (:advection_u, :kappa_v))
         A = vec(hydro.advection_u)
@@ -2833,47 +2840,56 @@ function export_dashboards(
 
     # -- Agent-Based Model trajectory dashboard ----------------------------
     # agent_trajectories is a DataFrame with columns: tagid, step, mesh_unit,
-    # group.  Convert to lightweight NamedTuples compatible with leaflet_tracks_map
+    # heading.  Convert to lightweight NamedTuples compatible with leaflet_tracks_map
     # and export, then write a companion CSV.
     if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
         try
             # Build per-agent coordinate sequences grouped by tagid
             agent_rich = NamedTuple[]
+            agent_idx = 0
             for gdf in groupby(agent_trajectories, :tagid)
                 sorted = sort(gdf, :step)
                 nodes  = sorted.mesh_unit
-                grp    = first(sorted.group)
+                agent_idx += 1
                 coords = Tuple{Float64, Float64}[
                     (Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
                     for u in nodes
                     if 1 <= u <= n_units
                 ]
                 length(coords) < 2 && continue
-                color = palette_colors[(grp - 1) % length(palette_colors) + 1]
+                path_dist = sum(
+                    haversine_distance(
+                        coords[h-1][1], coords[h-1][2],
+                        coords[h][1],   coords[h][2]
+                    ) / 1_000.0
+                    for h in 2:length(coords)
+                )
+                end_to_end = haversine_distance(
+                    coords[1][1], coords[1][2],
+                    coords[end][1], coords[end][2]
+                ) / 1_000.0
+                # The kernel is pooled, so every agent shares one transition law and
+                # colouring by group no longer distinguishes anything. Cycle the
+                # palette by agent instead, so overlapping tracks stay separable.
+                color = palette_colors[(agent_idx - 1) % length(palette_colors) + 1]
                 push!(agent_rich, (
                     tagid           = string("agent", first(sorted.tagid)),
                     path            = nodes,
                     coords          = coords,
                     n_steps         = length(coords) - 1,
-                    total_dist_km   = sum(
-                        haversine_distance(
-                            coords[h-1][1], coords[h-1][2],
-                            coords[h][1],   coords[h][2]
-                        ) / 1_000.0
-                        for h in 2:length(coords)
-                    ),
-                    displacement_km = haversine_distance(
-                        coords[1][1], coords[1][2],
-                        coords[end][1], coords[end][2]
-                    ) / 1_000.0,
-                    tortuosity      = 1.0,
+                    total_dist_km   = path_dist,
+                    displacement_km = end_to_end,
+                    # Straight-line over walked distance. Reported as 1.0 when the
+                    # animal returned to its release cell, where the ratio is
+                    # genuinely undefined rather than perfectly untangled.
+                    tortuosity      = end_to_end > 1e-9 ? path_dist / end_to_end : 1.0,
                     mean_hsi        = mean(
                         (1 <= u <= length(hsi_vec)) ? hsi_vec[u] : 0.5
                         for u in nodes
                     ),
                     color           = color,
-                      duration_days   = Float64(length(coords) - 1),
-                  ))
+                    duration_days   = Float64(length(coords) - 1),
+                ))
             end
             if !isempty(agent_rich)
                 agent_file = joinpath(out_dir, "movement_agent_trajectories.html")
@@ -3447,32 +3463,39 @@ function run_movement_analysis(
         end
         n_sim_agents = nrow(loaded.obs_df)
         # Use observed release sites to start agents (column is :release, not :release_unit)
-        start_nodes = loaded.obs_df.release
-        # group_map maps String -> Int; obs_df.group may already be Int group indices
-        obs_groups  = loaded.obs_df.group
-        groups = if eltype(obs_groups) <: Integer
-            # Already integer group indices; use directly
-            Int.(obs_groups)
-        else
-            # String keys: look up via group_map
-            [get(loaded.group_map, string(g), 1) for g in obs_groups]
-        end
+        start_nodes = Int.(loaded.obs_df.release)
+        maximum(start_nodes) <= size(kernels.P_kernel, 1) || throw(BoundsError(
+            kernels.P_kernel,
+            "release unit $(maximum(start_nodes)) exceeds the fitted kernel",
+        ))
+        # Start every agent on heading 1. The kernel is pooled, so there is no
+        # group to start from; heading 1 is the north-centred bin, and any agent
+        # whose first step is non-zero re-derives its heading from that step.
+        start_headings = ones(Int, n_sim_agents)
 
-        # Normalise P_kernel to Vector{SparseMatrixCSC{Float64,Int}} as required by
-        # simulate_agent_trajectories.  construct_stochastic_transition_kernel returns
-        # Matrix{Float64} for scalar parameters (G=1) or Vector{Matrix{Float64}} for
-        # group-vector parameters.
-        agent_kernels = if kernels.P_kernel isa AbstractMatrix
-            [sparse(kernels.P_kernel)]
+        # A persistence kernel projects heading jointly with position and so
+        # needs n_units to decode its (unit, heading) rows; a first-order kernel
+        # has one row per unit. Only the latter is tracked geometrically, which
+        # needs coordinates, so centroids are passed through either way.
+        P_agent = sparse(kernels.P_kernel)
+        n_units = size(P_agent, 1)
+        # _resolve_centroids returns (planar_km, lonlat, mesh_drawing). Headings
+        # want a single coordinate list in a single space, so pick planar km when
+        # it exists and fall back to lon/lat, tagging which was used so bearing_deg
+        # does not have to guess.
+        agent_planar, agent_lonlat, _ = _resolve_centroids(loaded.mesh, n_units)
+        if agent_planar !== nothing
+            agent_centroids, agent_space = agent_planar, :km
+        elseif agent_lonlat !== nothing
+            agent_centroids, agent_space = agent_lonlat, :degrees
         else
-            [sparse(M) for M in kernels.P_kernel]
+            agent_centroids, agent_space = nothing, :unknown
         end
-        n_kernels = length(agent_kernels)
-        # Clamp group indices so they always index into agent_kernels.
-        groups_clamped = clamp.(groups, 1, n_kernels)
 
         agent_trajectories = simulate_agent_trajectories(
-            n_sim_agents, start_nodes, groups_clamped, agent_kernels, 50; seed=params.seed
+            n_sim_agents, start_nodes, start_headings, P_agent, 50;
+            n_units = n_units, centroids = agent_centroids,
+            coord_space = agent_space, seed = params.seed
         )
         if params.verbose
             println("  Simulated $(n_sim_agents) agents for 50 steps.")

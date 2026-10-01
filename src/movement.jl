@@ -6498,11 +6498,13 @@ function export_movement_posterior_dashboard(
         lbl = get(grp_lookup, g, "Group $g")
         c = palette[mod(g - 1, length(palette)) + 1]
 
-        # The draws arrive as one series per parameter, not one column per group,
-        # so `_sample_column` normalises the shape and clamps the group index.
-        a_v = _sample_column(alpha_samples, g)
-        r_v = _sample_column(rho_samples, g)
-        g_v = _sample_column(gamma_samples, g)
+        # The draws arrive as one series per parameter. `_sample_column` takes
+        # that series alone; it was being called with a second group argument,
+        # which is a guaranteed MethodError now that the model is pooled (G == 1)
+        # and took the whole panel down with it.
+        a_v = _sample_column(alpha_samples)
+        r_v = _sample_column(rho_samples)
+        g_v = _sample_column(gamma_samples)
         if isempty(a_v)
             a_v = [Float64(getproperty(kernels, :alpha_hat))]
             r_v = [Float64(getproperty(kernels, :rho_hat))]

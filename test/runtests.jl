@@ -15,6 +15,12 @@ using ForwardDiff
 using ArgParse
 using TOML
 
+# Scratch for tests that must write a real file. It lives inside the package
+# rather than the OS temp directory: mktempdir requires its parent to exist, and
+# the suite must not write outside the workspace.
+const TEST_TMP = joinpath(pkgdir(MovementAnalysis), "test_tmp")
+mkpath(TEST_TMP)
+
 # Stand-ins for the sampler's chain, which wraps each key as `Parameter(name)` or
 # `Extra(name)` and returns a vector-valued parameter as one vector per draw. The
 # test suite pins that layout without paying for a full MCMC fit.
@@ -83,7 +89,7 @@ end
 
         # An absent flag must not displace a value coming from a config file, so
         # the defaults ArgParse fills in are dropped rather than applied.
-        mktempdir() do dir
+        mktempdir(TEST_TMP) do dir
             p = joinpath(dir, "cfg.toml")
             write(p, """
                 species_name = "Snow Crab"
@@ -136,7 +142,7 @@ end
               [:astar, :viterbi]
 
         # `show_help` is a CLI artifact and must not appear in a saved config.
-        mktempdir() do dir
+        mktempdir(TEST_TMP) do dir
             p = joinpath(dir, "c.toml")
             save_config(load_config(cli_args = ["--help"]), p)
             @test !haskey(TOML.parsefile(p), "show_help")
@@ -922,13 +928,30 @@ end
         @test occursin("Depth:", tess_map.html)
         @test occursin("HSI:", tess_map.html)
 
-        # 7. show_map with temporary file export
-        tmp_tess = joinpath(tempdir(), "test_tess_map.html")
+# 7. show_map with temporary file export
+        # Scratch goes inside the project: the suite must not write to the OS
+        # temp directory, which is outside the workspace.
+        tmp_tess = joinpath(mktempdir(TEST_TMP), "test_tess_map.html")
         show_map(tess_map; output_file = tmp_tess)
         @test isfile(tmp_tess)
         rm(tmp_tess; force = true)
     end
 
       include("test_agent_movement.jl")
+
+    @testset "Posterior panel parameter columns resolve" begin
+        # `_sample_column` takes one series and nothing else. The panel used to
+        # call it with a second, group-index argument, which is a guaranteed
+        # MethodError under the pooled model (G == 1). The call sat inside a
+        # `try`, so the panel simply never rendered and nothing failed. This pins
+        # the single-argument contract that the call site now depends on.
+        for series in (Float64[], [1.0, 2.0, 3.0])
+            @test MovementAnalysis._sample_column(series) isa Vector{Float64}
+            @test length(MovementAnalysis._sample_column(series)) == length(series)
+        end
+        # A pooled draw series has no group axis, so passing an index must fail
+        # rather than silently picking a column that no longer exists.
+        @test_throws MethodError MovementAnalysis._sample_column([1.0, 2.0], 1)
+    end
 
 end

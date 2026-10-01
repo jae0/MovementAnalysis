@@ -200,27 +200,41 @@ corruption. Any future check for this must read bytes, not decoded text.
 
 ### Remaining, in order
 
-1. **SSA removal** (stage 3). `src/ssa_movement.jl` and
+Status re-verified against the tree on 2026-10-01, not carried over from
+earlier notes. Several items previously listed as lost are in fact present on
+`reconcile`, which never lost the migration commits.
+
+1. **SSA removal** — **done**, `809b062`. `src/ssa_movement.jl` and
    `test/test_ssa_movement.jl` deleted; `calculate_ssa_transition_row`,
    `ssa_telemetry_turing_model`, and `joint_survey_ssa_telemetry_turing_model`
-   removed from `turing_models.jl`; the include and exports dropped from
-   `MovementAnalysis.jl`; the two fit branches removed from `pipeline.jl`
-   (lines ~1332-1386); `:ssa` and `:ssa_and_survey` removed from
-   `MODEL_MODE_CHOICES` and the mode priority order in `config.jl` (lines ~34,
-   ~63, ~334) and from `model_modes` in `configs/default.toml` (line 33); the
-   SSA tests removed from `runtests.jl`.
-2. **Agent rework** (stage 4). `agent_movement.jl` still takes `groups` and
-   `agent_kernels`, and `pipeline.jl` derives clamped group indices for a
-   5-argument call. Port onto the pooled signature, keeping the per-agent
-   horizon, sampled start nodes, decoupled agent count, and the
-   self-transition-preserving heading fix.
-3. **Sections 3-6** (stage 5). The empirical-HSI transfer, composed mesh index
-   mappings, endpoint validity checks, bathymetry provenance, the exact-horizon
-   router, the bridge and Viterbi fixes, the event-level PPC metric, `tagid`
-   alignment, residence-time allocation, the coordinate contract and encoders,
-   the hydro axis validation, and the stable per-tag seeds. All of these lived
-   in files taken from upstream and have **not** been re-applied.
-4. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
+   removed; include and exports dropped; both fit branches removed; `:ssa` and
+   `:ssa_and_survey` removed from the mode choices, defaults, CLI help,
+   `configs/snowcrab.toml`, and the docs.
+2. **Agent rework** — **done**. `simulate_agent_trajectories` now takes the
+   pooled kernel plus a heading vector instead of a per-group kernel list;
+   `TrackedAgent` carries `heading`, not `group`; the dashboard colours agents
+   by index and computes real tortuosity. Two bugs fixed that the previous
+   wiring would have hit: `_resolve_centroids` returns a 3-tuple and was being
+   passed straight through, and the persistence-kernel state index is
+   position-major (`(i-1)*H + h`), which the first version encoded transposed.
+3. **`persistence.jl` is dead in the live path.** `local_hsi_advantage`,
+   `residency_from_advantage`, `sanitise_hsi`, and `persistence_gain_report` are
+   defined and exported, but nothing in `pipeline.jl` calls them; the fitted
+   kernel is the plain first-order one. The agent projection can consume a
+   persistence kernel, but nothing builds one for it. Either wire it in or say
+   plainly that it is not part of the pipeline yet.
+4. **Sections 3-6, verified individually.** Present: Viterbi, bridge handling,
+   residence-time allocation, the coordinate space contract
+   (`coordinate_space_of`). **Absent**: empirical-HSI transfer, the exact-horizon
+   A* router, stable per-tag seeds, coordinate encoders, `tagid` alignment,
+   bathymetry provenance, composed mesh index mappings.
+5. **Silent-failure audit still owed.** The export phase wraps each dashboard in
+   `try`/`catch` that downgrades any error to a printed note. Three real bugs
+   were hiding in exactly that way (`hydro` unbound, `_sample_column` arity,
+   the `group` column read after removal) and none of them failed a test. The
+   policy hides whole missing panels, so it needs either a fail-fast mode or a
+   count of skipped panels surfaced in the summary.
+6. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
    `ibm` and `backup-premerge` both preserve it. Reset when convenient.
 
 ---
