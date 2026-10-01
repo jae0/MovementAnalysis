@@ -178,32 +178,49 @@ component. The two lines were therefore complementary rather than competing.
 | `731eb60` | Repaired a cross-file break the merge created: `_spatial_node_distance` is defined in `movement.jl` but called from `circuit.jl` with a `coord_space` keyword that did not exist on the upstream half, so calibration would have thrown a `MethodError`. Restored the keyword and the unit fix, with a regression test. |
 | `bf0a986` | Transition kernel made scalar-only; removed the per-group kernel set and the `P_draw[1]` read that silently discarded all but the first group; `_pooled_scalar` rejects longer vectors by name. |
 | `8475a2e` | `TelemetryData` lost its `groups` and `G` fields; `mark_recapture_G` accepted and ignored; `_sample_column` and `_posterior_param_draws` pooled; three posterior-draw loops read the single estimated column. |
+| `14af28f` | Group-axis removal completed: `kernels.G` / `grp_name_lookup` / `group_lookup` no longer read, per-group kernel indexing dropped from the corridor ensemble, the corridor explorer's `group_labels` keyword removed in favour of one `"Pooled"` entry, the `group_label` GeoJSON property and its pipeline sources deleted, and the path-metrics CSV header realigned with its rows. Also restored `src/dashboards.jl`, which an earlier shell write had re-encoded. |
 
-Tests: **300 passing, 0 failing** at `8475a2e`.
+Tests: **301 passing, 0 failing** at `14af28f`. The pooled-model migration
+(section 1 and stage 2) is complete.
+
+### Encoding incident, and the process failure behind it
+
+A shell `Get-Content -Raw` / `WriteAllText` round trip re-encoded
+`src/dashboards.jl` as Windows-1252-read, UTF-8-written, mangling 25 non-ASCII
+characters and breaking the `u"°"` unit literal so the package stopped
+precompiling. The file was restored from `origin/main` and the edits re-applied
+with the edit tool.
+
+This was the **third** time in this work that a shell write was used where the
+project rules require the edit tool, and the first time it caused real damage.
+The rule exists for a reason and I broke it repeatedly. A byte-level scan
+(`C3 82` marker count) confirms no other source file was affected; the alarming
+per-file counts reported earlier were `Get-Content` mis-decoding UTF-8, not
+corruption. Any future check for this must read bytes, not decoded text.
 
 ### Remaining, in order
 
-1. **Finish the group-axis removal** (Stage 2 remainder). Sites still threading a
-   group axis, all of which must land together with the suite green:
-   `movement.jl` `kernels.G` at lines ~5550, ~5956, ~6089, ~6314; `G_eff` and
-   `grp_eff` at ~5796 and ~5827; a `for g in 1:G` loop at ~6505.
-   `pipeline.jl` `kernels.G` at ~1733, ~2234; loops at ~1965 and ~2576.
-   `dashboards.jl` ~6064 writes `:groups => group_names` into map metadata.
-2. **Agent rework** (Stage 4). `agent_movement.jl` still takes `groups` and
-   `agent_kernels`, and `pipeline.jl` ~3525-3544 derives and clamps group indices
-   for a 5-argument call. Port onto the pooled signature, keeping the per-agent
+1. **SSA removal** (stage 3). `src/ssa_movement.jl` and
+   `test/test_ssa_movement.jl` deleted; `calculate_ssa_transition_row`,
+   `ssa_telemetry_turing_model`, and `joint_survey_ssa_telemetry_turing_model`
+   removed from `turing_models.jl`; the include and exports dropped from
+   `MovementAnalysis.jl`; the two fit branches removed from `pipeline.jl`
+   (lines ~1332-1386); `:ssa` and `:ssa_and_survey` removed from
+   `MODEL_MODE_CHOICES` and the mode priority order in `config.jl` (lines ~34,
+   ~63, ~334) and from `model_modes` in `configs/default.toml` (line 33); the
+   SSA tests removed from `runtests.jl`.
+2. **Agent rework** (stage 4). `agent_movement.jl` still takes `groups` and
+   `agent_kernels`, and `pipeline.jl` derives clamped group indices for a
+   5-argument call. Port onto the pooled signature, keeping the per-agent
    horizon, sampled start nodes, decoupled agent count, and the
    self-transition-preserving heading fix.
-3. **SSA removal** (Stage 3). `ssa_movement.jl`, both SSA Turing models,
-   `calculate_ssa_transition_row`, the CLI flags, and the `ssa` / `ssa_and_survey`
-   entries in the `model_modes` list.
-4. **Sections 3-6** (Stage 5). The empirical-HSI transfer, composed mesh index
-   mappings, endpoint validity checks, the bathymetry provenance record, the exact
-   horizon router, the bridge and Viterbi fixes, the event-level PPC metric, the
-   `tagid` alignment, the residence-time allocation, the coordinate contract and
-   encoders, the hydro axis validation, and the stable per-tag seeds. These all
-   lived in files taken from upstream and have **not** been re-applied.
-5. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
+3. **Sections 3-6** (stage 5). The empirical-HSI transfer, composed mesh index
+   mappings, endpoint validity checks, bathymetry provenance, the exact-horizon
+   router, the bridge and Viterbi fixes, the event-level PPC metric, `tagid`
+   alignment, residence-time allocation, the coordinate contract and encoders,
+   the hydro axis validation, and the stable per-tag seeds. All of these lived
+   in files taken from upstream and have **not** been re-applied.
+4. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
    `ibm` and `backup-premerge` both preserve it. Reset when convenient.
 
 ---
