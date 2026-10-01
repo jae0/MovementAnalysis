@@ -27,9 +27,7 @@ struct TelemetryData <: AbstractMatrix{Float64}
     releases::Vector{Int}
     recaps::Vector{Int}
     ks::Vector{Int}
-    groups::Vector{Int}
     covariates::Vector{Float64}
-    G::Int
     max_k::Int
     matrix::Matrix{Float64}
 end
@@ -49,6 +47,11 @@ TelemetryData(input::Union{DataFrame, AbstractMatrix}; kwargs...) =
 Transforms input telemetry data (DataFrame or Matrix) into a validated `TelemetryData`
 structure for movement modeling. Supports both longitudinal event sequences and
 pre-aggregated transition event pairs.
+
+The model is pooled, so no group index is derived and no demographic stratification
+is applied. A `group`/`groups` column, or a fifth matrix column, is ignored; `sex`
+and `mat` style covariates survive only if passed through `covariate`.
+`mark_recapture_G` is accepted and ignored so that older call sites keep working.
 """
 function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
     if telemetry_input isa TelemetryData
@@ -60,18 +63,8 @@ function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
         rec = n_rows > 0 && size(mat, 2) >= 2 ? Int.(mat[:, 2]) : Int[]
         ks  = n_rows > 0 && size(mat, 2) >= 3 ? Int.(mat[:, 3]) : Int[]
         cov = n_rows > 0 && size(mat, 2) >= 4 ? mat[:, 4] : zeros(Float64, n_rows)
-        grp = if size(mat, 2) >= 5
-            Int.(mat[:, 5])
-        elseif !isnothing(mark_recapture_G) && mark_recapture_G > 1 &&
-               all(c -> isinteger(c) && c >= 1, cov)
-            Int.(cov)
-        else
-            ones(Int, n_rows)
-        end
-        G_val = isnothing(mark_recapture_G) ? (isempty(grp) ? 1 : maximum(grp)) :
-            Int(mark_recapture_G)
         max_k_val = isempty(ks) ? 1 : maximum(ks)
-        return TelemetryData(rel, rec, ks, grp, cov, G_val, max_k_val, mat)
+        return TelemetryData(rel, rec, ks, cov, max_k_val, mat)
 
     elseif telemetry_input isa DataFrame
         df = telemetry_input
@@ -82,21 +75,16 @@ function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
             rel_col = hasproperty(df, :release) ? :release : :releases
             rec_col = hasproperty(df, :recapture) ? :recapture : :recaps
             k_col = hasproperty(df, :k) ? :k : (hasproperty(df, :ks) ? :ks : nothing)
-            grp_col = hasproperty(df, :group) ? :group :
-                (hasproperty(df, :groups) ? :groups : nothing)
             cov_col = hasproperty(df, :covariate) ? :covariate :
                 (hasproperty(df, :individual_covariate) ? :individual_covariate : nothing)
 
             rel = Int.(df[!, rel_col])
             rec = Int.(df[!, rec_col])
             ks  = !isnothing(k_col) ? Int.(df[!, k_col]) : ones(Int, nrow(df))
-            grp = !isnothing(grp_col) ? Int.(df[!, grp_col]) : ones(Int, nrow(df))
             cov = !isnothing(cov_col) ? Float64.(df[!, cov_col]) : zeros(Float64, nrow(df))
-            G_val = isnothing(mark_recapture_G) ? (isempty(grp) ? 1 : maximum(grp)) :
-                Int(mark_recapture_G)
             max_k_val = isempty(ks) ? 1 : maximum(ks)
             mat = hcat(Float64.(rel), Float64.(rec), Float64.(ks), cov)
-            return TelemetryData(rel, rec, ks, grp, cov, G_val, max_k_val, mat)
+            return TelemetryData(rel, rec, ks, cov, max_k_val, mat)
         end
 
         time_col = if hasproperty(df, :time)
@@ -130,11 +118,8 @@ function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
         releases = Int[]
         recaps = Int[]
         ks = Int[]
-        groups = Int[]
         covariates = Float64[]
 
-        grp_col = hasproperty(df, :group) ? :group :
-            (hasproperty(df, :groups) ? :groups : nothing)
         cov_col = hasproperty(df, :individual_covariate) ? :individual_covariate :
             (hasproperty(df, :covariate) ? :covariate : nothing)
 
@@ -156,8 +141,6 @@ function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
                 t_rel = _t_val(getproperty(row_rel, time_col))
                 t_rec = _t_val(getproperty(row_rec, time_col))
                 push!(ks, max(1, round(Int, t_rec - t_rel)))
-                grp_val = !isnothing(grp_col) ? Int(getproperty(row_rel, grp_col)) : 1
-                push!(groups, grp_val)
                 cov_val = !isnothing(cov_col) ? Float64(getproperty(row_rel, cov_col)) : 0.0
                 push!(covariates, cov_val)
             end
@@ -169,10 +152,8 @@ function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
         else
             Matrix{Float64}(undef, 0, 4)
         end
-        G_val = isnothing(mark_recapture_G) ? (isempty(groups) ? 1 : maximum(groups)) :
-            Int(mark_recapture_G)
         max_k_val = isempty(ks) ? 1 : maximum(ks)
-        return TelemetryData(releases, recaps, ks, groups, covariates, G_val, max_k_val, mat)
+        return TelemetryData(releases, recaps, ks, covariates, max_k_val, mat)
     else
         error("Unsupported format for mark_recapture_data: $(typeof(telemetry_input)). " *
               "Expected DataFrame or Matrix.")
@@ -5487,54 +5468,49 @@ end
 # =============================================================================
 
 """
-    _sample_column(samples, g::Int) -> Vector{Float64}
+    _sample_column(samples) -> Vector{Float64}
 
-Return group `g`'s posterior draws as a plain vector.
+Return a parameter's posterior draws as a plain vector.
 
-`extract_transition_kernels` returns one draw series per parameter, not one
-column per group, so these arrive as a vector of length `n_draws`. A matrix is
-still accepted so a caller that holds an `n_draws x G` array keeps working, and
-a group index past the end clamps to the last available column.
+`extract_transition_kernels` returns one draw series per parameter, not one column
+per demographic group, so these arrive as a vector of length `n_draws`. A matrix
+is still accepted, in which case its single pooled column is used: the models fit
+one unstratified population, so only column 1 carries estimated values.
 """
-function _sample_column(samples, g::Int)::Vector{Float64}
+function _sample_column(samples)::Vector{Float64}
     samples === nothing && return Float64[]
     if samples isa AbstractVector
         return Float64[Float64(v) for v in samples]
     end
-    ncols = size(samples, 2)
-    ncols == 0 && return Float64[]
-    col = min(g, ncols)
-    return Float64[Float64(v) for v in view(samples, :, col)]
+    size(samples, 2) == 0 && return Float64[]
+    return Float64[Float64(v) for v in view(samples, :, 1)]
 end
 
 """
     _posterior_param_draws(kernels, name::Symbol, default::Float64) -> Matrix{Float64}
 
-Return the posterior draws of a kernel parameter as an `n_draws x G` matrix, so
-downstream code can index a group column uniformly regardless of the shape the
-producer used.
+Return the posterior draws of a kernel parameter as an `n_draws x 1` matrix.
 
-Group 1 always carries the real series; any further groups repeat it, because
-the models fit a single unstratified population and `G` is 1 in practice.
+The trailing axis is retained so that callers can keep indexing draws uniformly,
+but it has length one: the model is pooled and fits a single parameter set, so
+there is no group axis to read.
 """
 function _posterior_param_draws(kernels::NamedTuple, name::Symbol, default::Float64)
-    n_draws, G = if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1), kernels.G
+    n_draws = if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
+        size(kernels.alpha_samples, 1)
     elseif hasproperty(kernels, name) && !isempty(getproperty(kernels, name))
-        size(getproperty(kernels, name), 1), kernels.G
+        size(getproperty(kernels, name), 1)
     else
-        1, kernels.G
+        1
     end
-    out = zeros(Float64, n_draws, G)
+    out = zeros(Float64, n_draws, 1)
     raw = hasproperty(kernels, name) ? getproperty(kernels, name) : nothing
-    for g in 1:G
-        col = _sample_column(raw, g)
-        if isempty(col)
-            out[:, g] .= default
-        else
-            n = min(n_draws, length(col))
-            out[1:n, g] .= col[1:n]
-        end
+    col = _sample_column(raw)
+    if isempty(col)
+        out[:, 1] .= default
+    else
+        n = min(n_draws, length(col))
+        out[1:n, 1] .= col[1:n]
     end
     return out
 end
@@ -5595,15 +5571,15 @@ function path_credible_intervals(
     P_draws = Any[]
     for draw in eval_indices
         # Derived by the same helper the models use, so a per-draw kernel cannot
-        # drift from the likelihood that produced the draw.
+        # drift from the likelihood that produced the draw. Pooled model: one
+        # parameter set per draw, read from the single estimated column.
         alpha_arr, rho_arr = movement_alpha_rho(
-            [v_samples[draw, g] for g in 1:G],
-            [d_samples[draw, g] for g in 1:G])
-        gamma_arr = [g_samples[draw, g] for g in 1:G]
+            [v_samples[draw, 1]], [d_samples[draw, 1]])
+        gamma_val = Float64(g_samples[draw, 1])
 
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = gamma_arr,
+            gamma     = gamma_val,
             residence = rho_arr,
             advection = alpha_arr,
             land_mask = land_mask
@@ -5821,15 +5797,14 @@ function reconstruct_paths_bayesian_ensemble(
     P_draws = Any[]
     for d_idx in draw_indices
         # Derived by the shared helper, so a per-draw kernel cannot drift from the
-        # likelihood that produced the draw.
+        # likelihood that produced the draw. Pooled model: single estimated column.
         alpha_arr, rho_arr = movement_alpha_rho(
-            [chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] for g in 1:G_eff],
-            [chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))] for g in 1:G_eff])
-        gamma_arr = [chn_mat_g[d_idx, min(g, size(chn_mat_g, 2))] for g in 1:G_eff]
+            [chn_mat_v[d_idx, 1]], [chn_mat_d[d_idx, 1]])
+        gamma_val = Float64(chn_mat_g[d_idx, 1])
 
         P_draw = construct_stochastic_transition_kernel(
             W, hsi_vec;
-            gamma     = gamma_arr,
+            gamma     = gamma_val,
             residence = rho_arr,
             advection = alpha_arr,
             land_mask = land_mask
@@ -6136,15 +6111,15 @@ function posterior_predictive_check(
 
     for draw in eval_indices
         # Derived by the same helper the models use, so a per-draw kernel cannot
-        # drift from the likelihood that produced the draw.
+        # drift from the likelihood that produced the draw. Pooled model: single
+        # estimated column.
         alpha_arr, rho_arr = movement_alpha_rho(
-            [v_samples[draw, g] for g in 1:G],
-            [d_samples[draw, g] for g in 1:G])
-        gamma_arr = [g_samples[draw, g] for g in 1:G]
+            [v_samples[draw, 1]], [d_samples[draw, 1]])
+        gamma_val = Float64(g_samples[draw, 1])
 
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = gamma_arr,
+            gamma     = gamma_val,
             residence = rho_arr,
             advection = alpha_arr,
             land_mask = land_mask
