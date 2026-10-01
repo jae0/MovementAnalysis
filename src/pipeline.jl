@@ -6,96 +6,265 @@ const _DepthRangeArg = Union{
 }
 
 
-using RCall
-using Arrow
 using DataFrames
+
+const PooledArrays = DataFrames.PooledArrays
+
+"""
+    _stable_string_hash(s::AbstractString) -> UInt64
+
+Deterministic 64-bit FNV-1a hash of `s`.
+
+Julia's built-in `hash` for strings is salted with a per-process seed, so the
+same input yields a different value in every session. Any seed that has to be
+reproducible from a configured `seed` must be derived with this function
+instead, otherwise stochastic perturbations are not reproducible even when the
+configured seed is fixed.
+"""
+function _stable_string_hash(s::AbstractString)::UInt64
+    h = 0xcbf29ce484222325
+    for b in codeunits(s)
+        h = (h ⊻ UInt64(b)) * 0x00000100000001b3
+    end
+    return h
+end
+
+function _load_snowcrab_sppoly(sppoly_file::AbstractString)
+    isfile(sppoly_file) || return (geometries=LibGEOS.AbstractGeometry[], bounds=nothing)
+    table = JLD2.load(sppoly_file, "sppoly")
+    hasproperty(table, :wkt_geo) ||
+        throw(ArgumentError("Snow crab sppoly file must contain a :wkt_geo column."))
+
+    geometries = LibGEOS.AbstractGeometry[]
+    for wkt in table.wkt_geo
+        ismissing(wkt) && continue
+        geom = LibGEOS.readgeom(String(wkt))
+        if !LibGEOS.isValid(geom)
+            geom = LibGEOS.buffer(geom, 0.0)
+        end
+        LibGEOS.isEmpty(geom) || push!(geometries, geom)
+    end
+    isempty(geometries) &&
+        throw(ArgumentError("Snow crab sppoly file contains no valid geographic polygons."))
+
+    bounds = (
+        west = minimum(LibGEOS.getXMin.(geometries)),
+        south = minimum(LibGEOS.getYMin.(geometries)),
+        east = maximum(LibGEOS.getXMax.(geometries)),
+        north = maximum(LibGEOS.getYMax.(geometries))
+    )
+    return (geometries=geometries, bounds=bounds)
+end
+
+function _snowcrab_mesh_keep_mask(
+    mesh,
+    geometries::AbstractVector,
+    anchor_points::AbstractVector;
+    depths = nothing,
+    depth_range = nothing,
+    bounds = nothing,
+    crs = nothing,
+    datum = WGS84Latest
+)
+    keep = falses(mesh.n_units)
+    polygon_tree = isempty(geometries) ? nothing : LibGEOS.STRtree(collect(geometries))
+    if !isempty(anchor_points)
+        anchor_xy = [lonlat_to_xy_km(
+            point[1], point[2];
+            center_lon=mesh.center_lon, center_lat=mesh.center_lat,
+            crs=crs, datum=datum
+        ) for point in anchor_points]
+        tree = KDTree(hcat([[point[1], point[2]] for point in mesh.centroids_km]...))
+        for (index, point) in enumerate(anchor_xy)
+            nearest = knn(tree, [point[1], point[2]], 1)[1][1]
+            lon, lat = anchor_points[index]
+            point_geom = LibGEOS.Point(lon, lat)
+            in_sppoly = polygon_tree !== nothing && any(
+                polygon -> LibGEOS.intersects(polygon, point_geom),
+                LibGEOS.query(polygon_tree, point_geom)
+            )
+            in_extension = bounds !== nothing &&
+                lon >= bounds.west && lat >= bounds.north
+            (in_sppoly || in_extension) && (keep[nearest] = true)
+        end
+    end
+
+    depth_limits = depth_range === nothing ? nothing : _parse_depth_range(depth_range)
+    if depths !== nothing && length(depths) != mesh.n_units
+        throw(DimensionMismatch("Depth vector must match the snow crab mesh units."))
+    end
+
+    for i in 1:mesh.n_units
+        lon, lat = mesh.centroids_lonlat[i]
+        if polygon_tree !== nothing
+            hex_coords = [[Float64(point[1]), Float64(point[2])]
+                          for point in mesh.polygons_lonlat[i]]
+            hexagon = LibGEOS.Polygon([hex_coords])
+            for polygon in LibGEOS.query(polygon_tree, hexagon)
+                if LibGEOS.intersects(polygon, hexagon) &&
+                   LibGEOS.area(LibGEOS.intersection(polygon, hexagon)) > 1e-12
+                    keep[i] = true
+                    break
+                end
+            end
+        end
+
+        if !keep[i] && depths !== nothing && depth_limits !== nothing && bounds !== nothing
+            depth = Float64(depths[i])
+            keep[i] = isfinite(depth) &&
+                depth_limits[1] <= depth <= depth_limits[2] &&
+                lon >= bounds.west && lat >= bounds.north
+        end
+    end
+    return keep
+end
+
+function _clip_snowcrab_mesh_to_sppoly(
+    mesh,
+    geometries::AbstractVector;
+    crs = nothing,
+    datum = WGS84Latest
+)
+    isempty(geometries) && return mesh
+    tree = LibGEOS.STRtree(collect(geometries))
+    centroids_lonlat = copy(mesh.centroids_lonlat)
+    centroids_km = copy(mesh.centroids_km)
+    polygons_lonlat = copy(mesh.polygons_lonlat)
+    polygons_km = copy(mesh.polygons_km)
+
+    for i in 1:mesh.n_units
+        hex_coords = [[Float64(point[1]), Float64(point[2])] for point in polygons_lonlat[i]]
+        hexagon = LibGEOS.Polygon([hex_coords])
+        clipped = nothing
+        for polygon in LibGEOS.query(tree, hexagon)
+            LibGEOS.intersects(hexagon, polygon) || continue
+            overlap = LibGEOS.intersection(hexagon, polygon)
+            LibGEOS.isEmpty(overlap) && continue
+            LibGEOS.area(overlap) <= 1e-12 && continue
+            clipped = clipped === nothing ? overlap : LibGEOS.union(clipped, overlap)
+        end
+        clipped === nothing && continue
+
+        pieces = filter(
+            piece -> piece isa LibGEOS.Polygon && LibGEOS.area(piece) > 1e-12,
+            LibGEOS.getGeometries(clipped)
+        )
+        isempty(pieces) && continue
+        piece = pieces[argmax(LibGEOS.area.(pieces))]
+        ring = LibGEOS.getCoordinates(LibGEOS.getCoordSeq(LibGEOS.exteriorRing(piece)))
+        polygons_lonlat[i] = [(point[1], point[2]) for point in ring]
+        interior = first(LibGEOS.getCoordinates(
+            LibGEOS.getCoordSeq(LibGEOS.pointOnSurface(piece))
+        ))
+        centroids_lonlat[i] = (interior[1], interior[2])
+        centroids_km[i] = lonlat_to_xy_km(
+            interior[1], interior[2];
+            center_lon=mesh.center_lon, center_lat=mesh.center_lat,
+            crs=crs, datum=datum
+        )
+        polygons_km[i] = [lonlat_to_xy_km(
+            point[1], point[2];
+            center_lon=mesh.center_lon, center_lat=mesh.center_lat,
+            crs=crs, datum=datum
+        ) for point in polygons_lonlat[i]]
+    end
+
+    return merge(mesh, (
+        centroids=centroids_lonlat,
+        centroids_lonlat=centroids_lonlat,
+        centroids_km=centroids_km,
+        polygons=polygons_lonlat,
+        polygons_lonlat=polygons_lonlat,
+        polygons_km=polygons_km
+    ))
+end
+
+function _subset_snowcrab_mesh(mesh, keep::AbstractVector{Bool})
+    length(keep) == mesh.n_units ||
+        throw(DimensionMismatch("Keep mask must match mesh units."))
+    indices = findall(keep)
+    isempty(indices) && throw(ArgumentError("Snow crab domain mask removed every mesh unit."))
+
+    subset = merge(mesh, (
+        centroids = mesh.centroids[indices],
+        centroids_km = mesh.centroids_km[indices],
+        centroids_lonlat = mesh.centroids_lonlat[indices],
+        polygons = hasproperty(mesh, :polygons) ? mesh.polygons[indices] : nothing,
+        polygons_km = hasproperty(mesh, :polygons_km) ? mesh.polygons_km[indices] : nothing,
+        polygons_lonlat = hasproperty(mesh, :polygons_lonlat) ? mesh.polygons_lonlat[indices] : nothing,
+        n_units = length(indices),
+        W = mesh.W[indices, indices],
+        radius_km = mesh.radius_km,
+        areas_km2 = hasproperty(mesh, :areas_km2) ? mesh.areas_km2[indices] : nothing
+    ))
+    if hasproperty(mesh, :W_raw)
+        subset = merge(subset, (W_raw=mesh.W_raw[indices, indices],))
+    end
+    if hasproperty(mesh, :land_mask)
+        subset = merge(subset, (land_mask=mesh.land_mask[indices],))
+    end
+    return subset, indices
+end
+
+function _construct_snowcrab_domain(
+    tagging::DataFrame,
+    sppoly_file::AbstractString;
+    radius_km::Real,
+    land_polygons,
+    crs,
+    datum
+)
+    sppoly = _load_snowcrab_sppoly(sppoly_file)
+    anchors = Tuple{Float64, Float64}[]
+    for row in eachrow(tagging)
+        if !ismissing(row.lon) && !ismissing(row.lat) &&
+           isfinite(Float64(row.lon)) && isfinite(Float64(row.lat))
+            push!(anchors, (Float64(row.lon), Float64(row.lat)))
+        end
+    end
+    unique!(anchors)
+
+    bounds = sppoly.bounds
+    extent_points = copy(anchors)
+    if bounds !== nothing
+        append!(extent_points, [
+            (bounds.west, bounds.south), (bounds.west, bounds.north),
+            (bounds.east, bounds.south), (bounds.east, bounds.north)
+        ])
+    end
+    isempty(extent_points) && throw(ArgumentError("No valid snow crab input locations found."))
+
+    candidate = construct_full_movement_domain(
+        first.(extent_points), last.(extent_points);
+        radius_km=radius_km, land_polygons=land_polygons, crs=crs, datum=datum
+    )
+    keep = _snowcrab_mesh_keep_mask(
+        candidate, sppoly.geometries, anchors; bounds=bounds, crs=crs, datum=datum
+    )
+    mesh, _ = _subset_snowcrab_mesh(candidate, keep)
+    mesh = _clip_snowcrab_mesh_to_sppoly(
+        mesh, sppoly.geometries; crs=crs, datum=datum
+    )
+    return merge(mesh, (
+        sppoly_geometries = sppoly.geometries,
+        sppoly_bounds = bounds,
+        anchor_points_lonlat = anchors
+    ))
+end
 
 """
     r_to_ipc(filepath::AbstractString)
 
-Read tabular R data by utilizing an R session to convert it to a temporary 
-Arrow IPC (Feather v2) file, which is then parsed into Julia.
-
-This method achieves extremely high performance by writing the exact in-memory 
-representation to disk. Julia reads the bytes into memory and constructs the 
-DataFrame pointing directly at those bytes (zero-copy parsing), avoiding 
-both memory duplication and deserialization CPU overhead.
-
-# Analytical Assumptions
-- **Tabular Data Requirement**: IPC exclusively supports tabular data. The R object 
-  stored in the file must be a `data.frame`, `tibble`, or `data.table`.
-- **Single Object extraction**: For `.rda` files, this extracts only the first 
-  variable loaded alphabetically.
-- **Garbage Collection**: The raw bytes of the file are held in a Julia byte array. 
-  These bytes will remain in memory until the returned DataFrame is garbage collected.
-
-# Arguments
-- `filepath::AbstractString`: The path to the R data file.
-
-# Returns
-- A `DataFrame` containing the deserialized tabular data.
-
-# Dependencies
-- Julia packages: `RCall`, `Arrow`, `DataFrames`.
-- R packages: `qs` and `arrow` must be installed.
+Converts R serialized tabular data using the optional `RCall` extension.
+Load `RCall` before importing R data files.
 """
 function r_to_ipc(filepath::AbstractString)
-    if !isfile(filepath)
-        error("File not found: ", filepath)
-    end
-    
-    # Generate a temporary file path for the IPC intermediate
-    temp_ipc = tempname() * ".arrow"
-    
-    try
-        # Execute the R logic inside a local environment
-        R"""
-        local({
-            filepath <- $(filepath)
-            outpath <- $(temp_ipc)
-            
-            ext <- tolower(tools::file_ext(filepath))
-            
-            # 1. Parse the R serialization format
-            if (ext %in% c("rdz", "qs")) {
-                obj <- qs::qread(filepath)
-            } else if (ext == "rds") {
-                obj <- readRDS(filepath)
-            } else if (ext %in% c("rda", "rdata")) {
-                env <- new.env()
-                load(filepath, envir = env)
-                vars <- ls(env)
-                if (length(vars) == 0) stop("No objects found in .rda file")
-                obj <- env[[vars[1]]]
-            } else {
-                stop(paste("Unsupported file extension:", ext))
-            }
-            
-            # 2. Validate tabular structure
-            if (!is.data.frame(obj)) {
-                stop("Object is not a data.frame. IPC requires tabular data.")
-            }
-            
-            # 3. Export to intermediate Arrow IPC
-            # zstd provides excellent block-level compression to minimize disk IO time
-            arrow::write_ipc_file(obj, outpath, compression = "zstd")
-        })
-        """
-        
-        # Read the raw bytes from disk into memory. This avoids Windows file-locking 
-        # issues that occur if we were to memory-map the file directly from disk.
-        ipc_bytes = read(temp_ipc)
-        
-        # Construct the Arrow Table from the in-memory byte array, and wrap it in a 
-        # DataFrame without copying the underlying columns (zero-copy parsing).
-        return DataFrame(Arrow.Table(ipc_bytes), copycols=false)
-        
-    finally
-        # Safely delete the temporary file
-        if isfile(temp_ipc)
-            rm(temp_ipc)
-        end
-    end
+    extension = Base.get_extension(@__MODULE__, :MovementAnalysisRCallExt)
+    extension === nothing && throw(ArgumentError(
+        "Reading R serialized files requires the optional RCall dependency. " *
+        "Load RCall before importing R data files."
+    ))
+    return extension.convert_r_data(filepath)
 end
 
 
@@ -147,7 +316,6 @@ and stratifies event pairs into 4 biological demographic categories.
   - `month_lookup::Dict`: Mapping of `(year, month)` to column indices.
   - `years::Vector{Int}`: Survey year span.
   - `obs::DataFrame`: Extracted release-recapture event pairs.
-  - `group_lookup::Dict`: Stratum string to integer ID mapping.
   - `land_mask::Vector{Bool}`: Terrestrial barrier indicator vector.
 """
 function snowcrab_movement_data(;
@@ -214,6 +382,17 @@ function snowcrab_movement_data(;
         joinpath(dir, "sppoly.jld2")
     end
 
+    snowcrab_mesh = if pre_mapped !== nothing
+        pre_mapped
+    elseif isfile(actual_sppoly)
+        _construct_snowcrab_domain(
+            tagging, actual_sppoly;
+            radius_km=radius_km, land_polygons=:maritimes, crs=crs, datum=datum
+        )
+    else
+        nothing
+    end
+
     return prepare_movement_data(
         tagging;
         hsi_file      = isfile(actual_hsi) ? actual_hsi : nothing,
@@ -225,7 +404,7 @@ function snowcrab_movement_data(;
         datum         = datum,
         ref_doy       = ref_doy,
         verbose       = verbose,
-        pre_mapped    = pre_mapped
+        pre_mapped    = snowcrab_mesh
     )
 end
 
@@ -237,63 +416,65 @@ end
 #         ", land: ", sum(sc_data.land_mask), ")")
 
 
-"""
-    movement_parameters_snowcrab() -> NamedTuple
-
-Returns the analysis configuration for Scotian Shelf snow crab
-(*Chionoecetes opilio*), overriding generic defaults with species-specific
-biology and real empirical data settings.
-
-Three demographic groups drive distinct movement strategies:
-
-    Group         | alpha (advection) | rho (fidelity) | gamma (HSI)
-    Mature Female |       0.25        |      0.60      |    0.80
-    Mature Male   |       0.65        |      0.15      |    1.50
-    Immature      |       0.30        |      0.35      |    0.50
-
-Mature females exhibit high site fidelity (rho = 0.60) during multi-year
-egg brooding. Mature males are most dispersive (alpha = 0.65, rho = 0.15)
-during active mating migrations. Immatures show diffusive benthic
-exploration.
-
-Species-specific overrides applied over `movement_parameters_default`:
-- `data_source`: `:snowcrab` (real empirical mark-recapture data).
-- `depth_range`: `(50.0, 500.0)` m -- principal benthic habitat zone.
-- All four optional diagnostics are enabled.
-- `n_stochastic_draws`: 15 -- balanced resolution for real data.
-"""
-function movement_parameters_snowcrab()
-    defaults = movement_parameters_default()
-    return merge(defaults, (
-        data_source         = :snowcrab,
-        model_mode          = "telemetry",
-        depth_range         = (25.0, 400.0),
-        reshard_hex         = false,
-        hex_radius_km       = 5.0,
-        use_hydrodynamics   = true,
-        max_paths           = 25,
-        path_method         = :astar,
-        n_stochastic_draws  = 100,
-        hsi_se              = 0.08,
-        n_samples           = 500,
-        n_warmup            = 100,
-        seed                = 42,
-        render_html         = true,
-        output_dir          = normpath(joinpath(@__DIR__, "..", "..", "output")),
-        group_labels        = String["Mature Female", "Mature Male", "Immature"],
-        group_alpha         = Float64[0.25, 0.65, 0.30],
-        group_rho           = Float64[0.60, 0.15, 0.35],
-        group_gamma         = Float64[0.80, 1.50, 0.50],
-        species_name        = "Snow Crab",
-    ))
-end
-
-
-
-
 # =============================================================================
 # Parameter Functions
 # =============================================================================
+
+function _bundled_config_path(name::AbstractString)
+    return normpath(joinpath(@__DIR__, "..", "configs", name))
+end
+
+function _load_movement_config(config_path::AbstractString)
+    path = abspath(config_path)
+    raw = TOML.parsefile(path)
+    valid_keys = Set(keys(TOML.parsefile(_bundled_config_path("default.toml"))))
+    unknown_keys = sort!(collect(setdiff(Set(keys(raw)), valid_keys)))
+    isempty(unknown_keys) || throw(ArgumentError(
+        "Unknown parameter names in $path: $(join(unknown_keys, ", ")). " *
+        "Use names defined in configs/default.toml."
+    ))
+    values = Dict{Symbol, Any}(Symbol(key) => value for (key, value) in raw)
+
+    if haskey(values, :depth_range)
+        range = values[:depth_range]
+        values[:depth_range] = isempty(range) ? nothing :
+            (Float64(range[1]), Float64(range[2]))
+    end
+    for key in (:data_source, :model_mode, :time_interval, :path_method,
+                :depth_barrier_mode, :cmap, :bathymetry_source, :rest_advantage_form)
+        haskey(values, key) && (values[key] = Symbol(values[key]))
+    end
+    for key in (:region_labels,)
+        haskey(values, key) && (values[key] = String.(values[key]))
+    end
+    for key in (:region_labels, :region_map, :data_dir, :tagging_file, :hsi_file,
+                :sppoly_file)
+        if haskey(values, key) && isempty(values[key])
+            values[key] = nothing
+        end
+    end
+    for key in (:output_dir, :data_dir, :tagging_file, :hsi_file, :sppoly_file)
+        if haskey(values, key) && values[key] !== nothing
+            value = String(values[key])
+            values[key] = normpath(isabspath(value) ? value : joinpath(dirname(path), value))
+        end
+    end
+
+    return (; values...)
+end
+
+"""
+    movement_parameters_snowcrab() -> NamedTuple
+
+Loads the generic parameters from `configs/default.toml` and overlays the
+species-specific settings in `configs/snowcrab.toml`.
+"""
+function movement_parameters_snowcrab()
+    return merge(
+        movement_parameters_default(),
+        _load_movement_config(_bundled_config_path("snowcrab.toml"))
+    )
+end
 
 """
     movement_parameters_default() -> NamedTuple
@@ -321,15 +502,16 @@ species-specific parameter function:
 - `n_stochastic_draws::Int`: Monte Carlo draws per stochastic path.
 - `hsi_se::Real`: Observation standard error on HSI (sigma).
 - `n_samples::Int`: MCMC posterior draw count.
-- `n_warmup::Int`: MCMC warmup iteration count.
+- `n_warmup::Int`: Initial draws discarded as burn-in. Metropolis-Hastings does not
+  adapt, so this is a burn-in discard, not a tuning phase. It was previously
+  declared here and in `configs/default.toml` but never applied to the sampler.
 - `seed::Int`: Random seed for reproducibility.
 - `render_html::Bool`: Export interactive HTML dashboards.
 - `output_dir::String`: Output directory for all artifacts.
 - `verbose::Bool`: Enable progress logging.
-- `group_labels::Vector{String}`: Biological group display names.
-- `group_alpha::Vector{Float64}`: Per-group advection weight alpha_g.
-- `group_rho::Vector{Float64}`: Per-group site fidelity rho_g.
-- `group_gamma::Vector{Float64}`: Per-group HSI gradient strength gamma_g.
+- `advection::Real`: Fallback pooled advection fraction when no posterior is fitted.
+- `residence::Real`: Fallback pooled residence probability when no posterior is fitted.
+- `gamma::Real`: Fallback pooled habitat sensitivity when no posterior is fitted.
 - `species_name::String`: Display name used in dashboard titles.
 - `adaptive_mesh::Bool`: Use adaptive multiresolution hexagonal mesh.
 - `coarse_radius_km::Real`: Cell radius for offshore/coarse units (km).
@@ -343,45 +525,7 @@ species-specific parameter function:
 - `region_map`: Spatial mapping assigning mesh units to regions.
 """
 function movement_parameters_default()
-    return (
-        data_source         = :simulate,
-        model_mode          = "telemetry",
-        reshard_hex         = false,
-        hex_radius_km       = 5.0,
-        use_hydrodynamics   = false,
-        depth_range         = nothing,
-        max_paths           = 1000,
-        path_method         = :astar,
-        smooth_paths        = true,
-        compute_circuit     = true,
-        compute_stochastic  = true,
-        compute_bottlenecks = true,
-        compute_wavelets    = true,
-        n_stochastic_draws  = 10,
-        hsi_se              = 0.08,
-        propagate_hsi_error = true,
-        n_samples           = 200,
-        n_warmup            = 100,
-        seed                = 42,
-        render_html         = true,
-        output_dir          = normpath(joinpath(@__DIR__, "..", "..", "output")),
-        verbose             = true,
-        group_labels        = String["All"],
-        group_alpha         = Float64[0.40],
-        group_rho           = Float64[0.25],
-        group_gamma         = Float64[1.00],
-        species_name        = "Animal",
-        adaptive_mesh        = false,
-        coarse_radius_km     = 25.0,
-        fine_radius_km       = 8.0,
-        dynamic_kernels      = false,
-        hmm_smoothing        = false,
-        compute_validation   = true,
-        run_bayesian_ensemble = false,
-        resume_from_checkpoint = false,
-        region_labels        = nothing,
-        region_map           = nothing,
-    )
+    return _load_movement_config(_bundled_config_path("default.toml"))
 end
  
 
@@ -412,6 +556,26 @@ function _parse_depth_range(
         return (Float64(depth_range[1]), Float64(depth_range[2]))
     end
     return nothing
+end
+
+"""
+    _snowcrab_land_polygons(data) -> Union{Nothing, Vector}
+
+Returns the survey-derived terrestrial barrier geometries carried on the loaded
+snow crab dataset (`data.mesh.sppoly_geometries`), or `nothing` when the dataset
+carries no survey geometry.
+
+Mesh constructors that accept `land_polygons` expect geometry collections and use
+the sentinels `:none`/`:maritimes`. Passing a Boolean land mask there is not
+merely redundant, it is reinterpreted as a polygon collection and discarded.
+"""
+function _snowcrab_land_polygons(data)
+    m = get(data, :mesh, nothing)
+    m === nothing && return nothing
+    hasproperty(m, :sppoly_geometries) || return nothing
+    polys = m.sppoly_geometries
+    (polys === nothing || isempty(polys)) && return nothing
+    return collect(polys)
 end
 
 """
@@ -655,9 +819,9 @@ traversal barriers.
   `use_hydrodynamics`, `depth_range`, `seed`, `verbose`.
 
 # Returns
-`NamedTuple` with fields: `data`, `mesh`, `W`, `hsi_vec`, `obs_df`,
-`survey_df`, `group_map`, `land_mask`, `n_spatial`, `resharded_hydro`,
-`resharded_depths`, `parsed_depth_range`.
+`NamedTuple` with fields: `data`, `mesh`, `W`, `hsi_vec`, `monthly_hsi`,
+`month_lookup`, `years`, `obs_df`, `survey_df`, `land_mask`, `n_spatial`,
+`resharded_hydro`, `resharded_depths`, `parsed_depth_range`.
 """
 function load_movement_data(params)::NamedTuple
     verbose = params.verbose
@@ -674,6 +838,8 @@ function load_movement_data(params)::NamedTuple
         sc_rad = params.hex_radius_km != 10.0 ? params.hex_radius_km : 15.0
         try
             kw = Dict{Symbol, Any}(:radius_km => sc_rad, :verbose => verbose)
+            kw[:time_interval] = get(params, :time_interval, :daily)
+            kw[:ref_doy] = get(params, :ref_doy, 182)
             if hasproperty(params, :data_dir) && !isnothing(params.data_dir)
                 kw[:data_dir] = params.data_dir
             end
@@ -702,8 +868,6 @@ function load_movement_data(params)::NamedTuple
     hsi_vec   = data.hsi_vec
     obs_df    = data.obs
     survey_df = hasproperty(data, :survey_df) ? data.survey_df : nothing
-    group_map = hasproperty(data, :group_lookup) ?
-                data.group_lookup : Dict(1 => "All")
     land_mask = hasproperty(data, :land_mask) ? data.land_mask : nothing
     n_spatial = mesh.n_units
 
@@ -714,12 +878,38 @@ function load_movement_data(params)::NamedTuple
             println("    Land      : $(sum(land_mask))")
         end
         println("  Mark-recapture obs : $(nrow(obs_df))")
-        println("  Biological groups  : $(length(group_map))")
     end
 
     # -- 1b. LibGEOS Hexagonal Resharding & Hydrodynamics --------------------
     resharded_hydro  = nothing
     resharded_depths = nothing
+
+    # Composed unit-index mappings, one entry per mesh stage. Each stage records
+    # the complete map from the immediately preceding mesh's index space onto the
+    # next one, so an index is never looked up in a mesh it does not belong to.
+    # `to_final` is the composition of every stage, mapping each source unit
+    # directly onto the final mesh.
+    src_cents_0 = collect(mesh.centroids_lonlat)
+    unit_mapping = (
+        source_centroids = src_cents_0,
+        to_final = collect(1:length(src_cents_0)),
+        stages = [(
+            name     = :source,
+            n_units  = length(src_cents_0),
+            to_next  = collect(1:length(src_cents_0)),
+        )],
+    )
+
+    # Bathymetry provenance is tracked explicitly so that HSI derived from a
+    # synthetic shelf model is never reported as if it were empirical snowcrab
+    # input. The empirical observation HSI is always carried across mesh changes
+    # by transfer; only bathymetry-derived quantities come from the hydro dataset.
+    bathymetry_provenance = (
+        requested_source = :none,
+        resolved_source  = :none,
+        file_backed      = false,
+        hsi_origin       = :none,
+    )
 
     if params.reshard_hex || params.use_hydrodynamics
         verbose && println(
@@ -730,11 +920,38 @@ function load_movement_data(params)::NamedTuple
         min_lon, max_lon = extrema(cents_lon)
         min_lat, max_lat = extrema(cents_lat)
 
+        bathy_req = get(params, :bathymetry_source, :synthetic)
+        bathy_req = bathy_req === nothing ? :synthetic : Symbol(bathy_req)
         bathy = load_open_bathymetry(;
-            lon_range      = (min_lon - 0.2, max_lon + 0.2),
-            lat_range      = (min_lat - 0.2, max_lat + 0.2),
-            resolution_deg = 0.08
+            source           = bathy_req,
+            lon_range        = (min_lon - 0.2, max_lon + 0.2),
+            lat_range        = (min_lat - 0.2, max_lat + 0.2),
+            resolution_deg   = 0.08
         )
+        bathymetry_provenance = (
+            requested_source = bathy_req,
+            resolved_source  = Symbol(get(bathy, :source, bathy_req)),
+            file_backed      = Bool(get(bathy, :loaded_from_file, false)),
+            hsi_origin       = :none,
+        )
+        bathy_is_empirical = bathymetry_provenance.resolved_source in
+                            (:empirical, :synthetic) &&
+                            bathymetry_provenance.file_backed
+        if bathymetry_provenance.file_backed
+            verbose && println(
+                "  Bathymetry source: $(bathymetry_provenance.resolved_source) " *
+                "(file-backed)."
+            )
+        else
+            @warn "Bathymetry is not file-backed (source = " *
+                  "$(bathymetry_provenance.requested_source)); HSI and depth " *
+                  "derived from it are synthetic and must not be reported as " *
+                  "empirical input."
+            verbose && println(
+                "  Bathymetry source: $(bathymetry_provenance.requested_source) " *
+                "(synthetic)."
+            )
+        end
         hydro = extract_hydrodynamic_dataset(bathy;
             depth_levels = [0.0, 25.0, 50.0, 100.0, 175.0],
             times        = [1.0]
@@ -751,50 +968,124 @@ function load_movement_data(params)::NamedTuple
         P_transfer       = compute_network_transfer_matrix(
             bathy.au, fine_mesh; method = :area_weighted
         )
+        fine_depths = reshard_spatial_field(P_transfer, bathy.depths)
+        if Symbol(params.data_source) == :snowcrab &&
+           hasproperty(data.mesh, :sppoly_geometries) &&
+           !isempty(data.mesh.sppoly_geometries) &&
+           !isnothing(data.mesh.sppoly_bounds)
+            keep_fine = _snowcrab_mesh_keep_mask(
+                fine_mesh, data.mesh.sppoly_geometries,
+                data.mesh.anchor_points_lonlat;
+                depths=fine_depths,
+                depth_range=params.depth_range,
+                bounds=data.mesh.sppoly_bounds
+            )
+            fine_mesh, fine_indices = _subset_snowcrab_mesh(fine_mesh, keep_fine)
+            fine_mesh = _clip_snowcrab_mesh_to_sppoly(
+                fine_mesh, data.mesh.sppoly_geometries
+            )
+            P_transfer = P_transfer[fine_indices, :]
+            fine_depths = fine_depths[fine_indices]
+        end
         resharded_hydro  = reshard_spatial_field(P_transfer, hydro)
-        resharded_depths = reshard_spatial_field(P_transfer, bathy.depths)
+        resharded_depths = fine_depths
 
         mesh      = fine_mesh
         W         = fine_mesh.W
         land_mask = identify_land_units(
             fine_mesh.centroids_lonlat; depth = resharded_depths
         )
-        W, hsi_vec = apply_land_barrier(
-            fine_mesh.W, resharded_hydro.hsi, land_mask
+
+        # Carry the loaded empirical HSI onto the refined mesh instead of
+        # replacing it with bathymetry-derived HSI. `obs_hsi_source` is the HSI
+        # that is actually attached to the observation records, and it has the
+        # same length as the source mesh, so the transfer is one hop.
+        hsi_vec = resharded_hydro.hsi
+        hsi_origin = :bathymetry_derived
+        if bathy_is_empirical && length(data.hsi_vec) == length(data.mesh.centroids_lonlat)
+            hsi_vec = reshard_spatial_field(
+                data.hsi_vec, data.mesh, fine_mesh
+            )
+            hsi_origin = :empirical_transferred
+        end
+        bathymetry_provenance = merge(
+            bathymetry_provenance, (hsi_origin = hsi_origin,)
         )
-        sever_land_crossing_edges!(W, fine_mesh.centroids_lonlat)
+        verbose && println("  HSI origin: $hsi_origin")
+
+        W, hsi_vec = apply_land_barrier(fine_mesh.W, hsi_vec, land_mask)
+        sever_land_crossing_edges!(
+            W, fine_mesh.centroids_lonlat;
+            land_polygons = _snowcrab_land_polygons(data)
+        )
         n_spatial  = fine_mesh.n_units
 
-        # Remap mark-recapture observations to active marine units
+        # Remap mark-recapture observations to active marine units. Both the
+        # endpoints and the survey rows are remapped from the immediately
+        # preceding mesh (the source mesh), and the unit mapping is retained.
         obs_df       = copy(obs_df)
         fine_cents   = fine_mesh.centroids_lonlat
         marine_mask  = .!land_mask .& (vec(sum(W; dims = 2)) .> 0)
         marine_units = let mu = findall(marine_mask)
             isempty(mu) ? collect(1:n_spatial) : mu
         end
+        if isempty(marine_units)
+            throw(ArgumentError(
+                "Resharding left no navigable marine unit; observation endpoints " *
+                "cannot be placed. Check bathymetry_source, hex_radius_km, and " *
+                "depth_range."
+            ))
+        end
         marine_cents = fine_cents[marine_units]
 
-        orig_rel = [data.mesh.centroids_lonlat[r] for r in obs_df.release]
-        orig_rec = [data.mesh.centroids_lonlat[r] for r in obs_df.recapture]
-        rel_sub  = map_to_units(
-            [c[1] for c in orig_rel], [c[2] for c in orig_rel], marine_cents
+        # Endpoints are still indexed against the source mesh here, so they are
+        # remapped from the source centroids onto the fine mesh.
+        rel_sub = map_to_units(
+            [Float64(c[1]) for c in src_cents_0[obs_df.release]],
+            [Float64(c[2]) for c in src_cents_0[obs_df.release]],
+            marine_cents
         )
-        rec_sub  = map_to_units(
-            [c[1] for c in orig_rec], [c[2] for c in orig_rec], marine_cents
+        rec_sub = map_to_units(
+            [Float64(c[1]) for c in src_cents_0[obs_df.recapture]],
+            [Float64(c[2]) for c in src_cents_0[obs_df.recapture]],
+            marine_cents
         )
         obs_df.release   = marine_units[rel_sub]
         obs_df.recapture = marine_units[rec_sub]
 
+        # Complete source -> fine mapping over every source unit. The destination
+        # must be the marine subset, so the result is a valid fine index.
+        src_to_marine_sub = map_to_units(
+            [Float64(c[1]) for c in src_cents_0],
+            [Float64(c[2]) for c in src_cents_0],
+            marine_cents
+        )
+        src_to_marine = [marine_units[src_to_marine_sub[i]]
+                         for i in 1:length(src_cents_0)]
+        unit_mapping = merge(
+            unit_mapping,
+            (
+                to_final = [src_to_marine[unit_mapping.to_final[i]]
+                            for i in 1:length(src_cents_0)],
+                stages = vcat(
+                    unit_mapping.stages,
+                    [(
+                        name     = :fine,
+                        n_units  = fine_mesh.n_units,
+                        to_next  = src_to_marine,
+                    )],
+                ),
+            )
+        )
+
         if !isnothing(survey_df) && hasproperty(survey_df, :s_idx)
             survey_df       = copy(survey_df)
-            orig_surv       = [data.mesh.centroids_lonlat[s]
-                                for s in survey_df.s_idx]
-            surv_sub        = map_to_units(
-                [c[1] for c in orig_surv],
-                [c[2] for c in orig_surv],
+            surf_sub        = map_to_units(
+                [Float64(c[1]) for c in src_cents_0[survey_df.s_idx]],
+                [Float64(c[2]) for c in src_cents_0[survey_df.s_idx]],
                 marine_cents
             )
-            survey_df.s_idx = marine_units[surv_sub]
+            survey_df.s_idx = marine_units[surf_sub]
             survey_df.depth = resharded_depths[survey_df.s_idx]
         end
         verbose && println("  Resharding complete.")
@@ -805,32 +1096,82 @@ function load_movement_data(params)::NamedTuple
         verbose && println(
             "\n[Phase 1b-ii] Constructing adaptive multiresolution domain..."
         )
-        cents_lon = [Float64(c[1]) for c in mesh.centroids_lonlat]
-        cents_lat = [Float64(c[2]) for c in mesh.centroids_lonlat]
-        rc = Float64(get(params, :coarse_radius_km, 25.0))
-        rf = Float64(get(params, :fine_radius_km, 8.0))
+        # The multiresolution constructor expects barrier POLYGONS. Passing the
+        # Boolean land mask here was silently interpreted as a polygon collection
+        # and discarded the snowcrab survey geometry.
+        mesh_prev = mesh
+        adaptive_polygons = _snowcrab_land_polygons(data)
         mesh = construct_adaptive_multiresolution_domain(
-            cents_lon, cents_lat;
-            coarse_radius_km = rc,
-            fine_radius_km   = rf,
-            land_polygons    = land_mask !== nothing ? land_mask : :none
+            [Float64(c[1]) for c in mesh.centroids_lonlat],
+            [Float64(c[2]) for c in mesh.centroids_lonlat];
+            coarse_radius_km = Float64(get(params, :coarse_radius_km, 25.0)),
+            fine_radius_km   = Float64(get(params, :fine_radius_km, 8.0)),
+            land_polygons    = adaptive_polygons
         )
         W = mesh.W
         land_mask = mesh.land_mask
         n_spatial = mesh.n_units
-        hsi_vec = ones(Float64, n_spatial)
 
-        # Remap release/recapture locations to nearest multiresolution units
-        cents_xy = [[c[1], c[2]] for c in mesh.centroids_km]
-        tree_m = KDTree(hcat(cents_xy...))
-        orig_rel_c = [data.mesh.centroids_km[r] for r in obs_df.release]
-        orig_rec_c = [data.mesh.centroids_km[r] for r in obs_df.recapture]
-        obs_df.release = [
-            knn(tree_m, [c[1], c[2]], 1)[1][1] for c in orig_rel_c
-        ]
-        obs_df.recapture = [
-            knn(tree_m, [c[1], c[2]], 1)[1][1] for c in orig_rec_c
-        ]
+        # Carry HSI across the fine -> adaptive mesh hop. The adaptive mesh has a
+        # different unit count and its own centroids, so a transfer is required;
+        # replacing HSI with a constant would discard the habitat signal entirely.
+        hsi_vec = reshard_spatial_field(
+            collect(Float64, hsi_vec), mesh_prev, mesh
+        )
+        W, hsi_vec = apply_land_barrier(W, hsi_vec, land_mask)
+
+        # Remap from the immediately preceding mesh (the fine mesh), not the
+        # original source mesh: obs_df already holds fine-mesh indices here.
+        mult_cents = mesh.centroids_lonlat
+        mult_marine = findall(
+            i -> !land_mask[i] && vec(sum(W; dims = 2))[i] > 0, 1:n_spatial
+        )
+        if isempty(mult_marine)
+            throw(ArgumentError(
+                "Adaptive multiresolution mesh left no navigable marine unit; " *
+                "observation endpoints cannot be placed. Check coarse_radius_km, " *
+                "fine_radius_km, and the land polygons."
+            ))
+        end
+        mult_marine_cents = mult_cents[mult_marine]
+        prev_cents = mesh_prev.centroids_lonlat
+        rel_sub = map_to_units(
+            [Float64(c[1]) for c in prev_cents[obs_df.release]],
+            [Float64(c[2]) for c in prev_cents[obs_df.release]],
+            mult_marine_cents
+        )
+        rec_sub = map_to_units(
+            [Float64(c[1]) for c in prev_cents[obs_df.recapture]],
+            [Float64(c[2]) for c in prev_cents[obs_df.recapture]],
+            mult_marine_cents
+        )
+        obs_df.release   = mult_marine[rel_sub]
+        obs_df.recapture = mult_marine[rec_sub]
+
+        # Complete fine -> adaptive mapping over every unit of the previous mesh.
+        prev_cents_all = collect(mesh_prev.centroids_lonlat)
+        prev_to_mult_sub = map_to_units(
+            [Float64(c[1]) for c in prev_cents_all],
+            [Float64(c[2]) for c in prev_cents_all],
+            mult_marine_cents
+        )
+        prev_to_mult = [mult_marine[prev_to_mult_sub[i]]
+                        for i in 1:length(prev_cents_all)]
+        unit_mapping = merge(
+            unit_mapping,
+            (
+                to_final = [prev_to_mult[unit_mapping.to_final[i]]
+                            for i in 1:length(src_cents_0)],
+                stages = vcat(
+                    unit_mapping.stages,
+                    [(
+                        name     = :adaptive,
+                        n_units  = n_spatial,
+                        to_next  = prev_to_mult,
+                    )],
+                ),
+            )
+        )
         verbose && println(
             "  Multiresolution mesh: $n_spatial units " *
             "(Fine: $(count(mesh.is_fine)))"
@@ -1025,9 +1366,57 @@ function load_movement_data(params)::NamedTuple
         end
     end
 
+    # -- 1d. Observation Endpoint Validity (runs after every mesh stage) ------
+    # Each refinement, adaptive, and depth stage can leave an endpoint on a land
+    # or isolated unit. This check is unconditional so a defect introduced in an
+    # earlier stage is caught even when no depth filter was requested.
+    n_spatial == length(land_mask) == size(W, 1) || error(
+        "Inconsistent spatial state: n_spatial=$n_spatial, " *
+        "land_mask=$(length(land_mask)), W=$(size(W, 1))."
+    )
+    length(hsi_vec) == n_spatial || error(
+        "HSI length $(length(hsi_vec)) does not match n_spatial=$n_spatial; " *
+        "the habitat field was not carried across the mesh transformation."
+    )
+
+    if nrow(obs_df) > 0
+        node_degree = vec(sum(W; dims = 2))
+        n_ev = nrow(obs_df)
+        in_range = falses(n_ev)
+        on_marine = falses(n_ev)
+        for i in 1:n_ev
+            r = obs_df.release[i]
+            c = obs_df.recapture[i]
+            ok_range = 1 <= r <= n_spatial && 1 <= c <= n_spatial
+            in_range[i] = ok_range
+            ok_range || continue
+            on_marine[i] = !land_mask[r] && !land_mask[c] &&
+                           node_degree[r] > 0 && node_degree[c] > 0
+        end
+        usable = in_range .& on_marine
+        n_invalid = count(.!usable)
+        if n_invalid > 0
+            @warn "Dropping $n_invalid of $n_ev mark-recapture events whose " *
+                  "endpoints are not on navigable marine units after mesh " *
+                  "transformation."
+            verbose && for i in findall(.!usable)
+                reason = in_range[i] ? "non-marine or isolated" : "out-of-range"
+                println("    tagid=$(obs_df.tagid[i])  k=$(obs_df.k[i])  " *
+                        "rel=$(obs_df.release[i])  rec=$(obs_df.recapture[i])  " *
+                        "$reason")
+            end
+            obs_df = obs_df[usable, :]
+        end
+        nrow(obs_df) > 0 || error(
+            "No mark-recapture event has both endpoints on a navigable marine " *
+            "unit after mesh transformation. Check bathymetry_source, " *
+            "hex_radius_km, depth_range, and the land polygons."
+        )
+    end
+
     # Forward monthly HSI and lookup from data for time-varying kernel support
     monthly_hsi  = hasproperty(data, :monthly_hsi)  ? data.monthly_hsi  : Matrix{Float64}(undef, 0, 0)
-    month_lookup = hasproperty(data, :month_lookup)  ? data.month_lookup  : Dict{Tuple{Int,Int}, Int}()
+    month_lookup = hasproperty(data, :month_lookup)  ? data.month_lookup  : Dict{Tuple{Int, Int}, Int}()
     years_vec    = hasproperty(data, :years)         ? data.years         : Int[]
 
     return (
@@ -1040,18 +1429,48 @@ function load_movement_data(params)::NamedTuple
         years              = years_vec,
         obs_df             = obs_df,
         survey_df          = survey_df,
-        group_map          = group_map,
         land_mask          = land_mask,
         n_spatial          = n_spatial,
         resharded_hydro    = resharded_hydro,
         resharded_depths   = resharded_depths,
         parsed_depth_range = parsed_depth_range,
+        bathymetry_provenance = bathymetry_provenance,
+        unit_mapping       = unit_mapping,
     )
 end
 
 # =============================================================================
 # Phase 2: Model Fitting
 # =============================================================================
+
+"""
+    _sample_pooled_chain(rng, model, params, verbose)
+
+Draw the posterior for a pooled model, honouring `n_warmup`.
+
+`n_warmup` was previously declared in `configs/default.toml`, documented, and
+parsed by the CLI, but never passed to the sampler: every reported chain was the
+raw output of `sample(rng, model, MH(), n_samples)`, which includes the burn-in
+trajectory. For a three-parameter posterior that is an arbitrary amount of
+unburned chain feeding every downstream corridor, path, and circuit result.
+
+Metropolis-Hastings has no adaptation, so this discards `n_warmup` initial draws
+as a burn-in rather than tuning anything. That is stated rather than implied,
+because a burn-in discard and an adaptation-based warmup are not the same thing
+and only the latter would make the chain's convergence meaningful on its own.
+"""
+function _sample_pooled_chain(rng, model, params, verbose::Bool)
+    n_samples = Int(get(params, :n_samples, 200))
+    n_warmup = max(0, Int(get(params, :n_warmup, 0)))
+    if verbose
+        println("  Sampling $n_samples draws (MH, burn-in discarded: $n_warmup).")
+    end
+    n_warmup == 0 && return sample(rng, model, MH(), n_samples; progress = false)
+    return sample(
+        rng, model, MH(), n_samples + n_warmup;
+        discard_initial = n_warmup, progress = false
+    )
+end
 
 """
     fit_movement_models(loaded, params) -> NamedTuple
@@ -1072,72 +1491,18 @@ Supported model modes (set via `params.model_mode`):
   `n_samples`, `seed`, `verbose`.
 
 # Returns
+"""
 `NamedTuple` with `models::Dict` and `chains::Dict`.
 """
+
 function fit_movement_models(loaded, params)::NamedTuple
     verbose   = params.verbose
     mode_str  = lowercase(string(params.model_mode))
     fit_tel   = mode_str in ("telemetry", "both")
     fit_joint = mode_str in ("telemetry_and_survey", "both")
-    fit_ssa   = mode_str in ("ssa", "ssa_telemetry", "both_ssa")
-    fit_ssa_joint = mode_str in ("ssa_and_survey", "joint_ssa", "both_ssa")
     rng       = MersenneTwister(params.seed)
     models    = Dict{Symbol, Any}()
     chains    = Dict{Symbol, Any}()
-
-    # -- Continuous-Time SSA Telemetry Model ---------------------------------
-    if fit_ssa
-        verbose && println("\n[Phase 2] Fitting Continuous-Time SSA Telemetry model...")
-        verbose && println(
-            "  recapture ~ Categorical(exp(Q_g * dt)[release, :])"
-        )
-        obs_df     = loaded.obs_df
-        releases   = Int.(obs_df.release)
-        recaptures = Int.(obs_df.recapture)
-        dts        = Float64.(obs_df.k)
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
-
-        m_ssa = ssa_telemetry_turing_model(
-            releases, recaptures, dts, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
-        )
-        models[:ssa_telemetry] = m_ssa
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn_ssa = sample(rng, m_ssa, MH(), params.n_samples; progress = false)
-        chains[:ssa_telemetry] = chn_ssa
-        verbose && println("  SSA telemetry model complete.")
-    end
-
-    # -- Continuous-Time Joint Survey + SSA Telemetry Model ------------------
-    if fit_ssa_joint && !isnothing(loaded.survey_df)
-        verbose && println("\n[Phase 2] Fitting Continuous-Time Joint Survey + SSA Telemetry model...")
-        
-        obs_df     = loaded.obs_df
-        releases   = Int.(obs_df.release)
-        recaptures = Int.(obs_df.recapture)
-        dts        = Float64.(obs_df.k)
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
-
-        survey_df  = loaded.survey_df
-        counts     = Int.(round.(survey_df.density))
-        depths     = hasproperty(survey_df, :depth) ?
-                     Float64.(survey_df.depth) : zeros(Float64, length(counts))
-
-        m_ssa_j = joint_survey_ssa_telemetry_turing_model(
-            counts, depths,
-            releases, recaptures, dts, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
-        )
-        models[:ssa_and_survey] = m_ssa_j
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn_ssa_j = sample(rng, m_ssa_j, MH(), params.n_samples; progress = false)
-        chains[:ssa_and_survey] = chn_ssa_j
-        verbose && println("  Joint SSA model complete.")
-    end
 
     # -- Pure Telemetry Model ------------------------------------------------
     if fit_tel
@@ -1149,17 +1514,15 @@ function fit_movement_models(loaded, params)::NamedTuple
         releases   = Int.(obs_df.release)
         recaptures = Int.(obs_df.recapture)
         ks         = Int.(round.(obs_df.k))
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
 
         m_tel = pure_telemetry_turing_model(
-            releases, recaptures, ks, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+            releases, recaptures, ks,
+            loaded.W, loaded.hsi_vec, loaded.land_mask;
+            rest_coupling = Float64(get(params, :rest_coupling, 0.0)),
+            rest_advantage_form = get(params, :rest_advantage_form, :difference),
         )
         models[:telemetry] = m_tel
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn = sample(rng, m_tel, MH(), params.n_samples; progress = false)
+        chn = _sample_pooled_chain(rng, m_tel, params, verbose)
         chains[:telemetry] = chn
         verbose && println("  Pure telemetry model complete.")
     end
@@ -1175,9 +1538,6 @@ function fit_movement_models(loaded, params)::NamedTuple
         releases   = Int.(obs_df.release)
         recaptures = Int.(obs_df.recapture)
         ks         = Int.(round.(obs_df.k))
-        groups     = hasproperty(obs_df, :group) ?
-                     Int.(obs_df.group) : ones(Int, length(releases))
-        G          = isempty(groups) ? 1 : maximum(groups)
 
         survey_df  = loaded.survey_df
         counts     = Int.(round.(survey_df.density))
@@ -1186,12 +1546,13 @@ function fit_movement_models(loaded, params)::NamedTuple
 
         m_joint = joint_survey_telemetry_turing_model(
             counts, depths,
-            releases, recaptures, ks, groups,
-            loaded.W, loaded.hsi_vec, loaded.land_mask, G
+            releases, recaptures, ks,
+            loaded.W, loaded.hsi_vec, loaded.land_mask;
+            rest_coupling = Float64(get(params, :rest_coupling, 0.0)),
+            rest_advantage_form = get(params, :rest_advantage_form, :difference),
         )
         models[:telemetry_and_survey] = m_joint
-        verbose && println("  Sampling $(params.n_samples) draws...")
-        chn_j = sample(rng, m_joint, MH(), params.n_samples; progress = false)
+        chn_j = _sample_pooled_chain(rng, m_joint, params, verbose)
         chains[:telemetry_and_survey] = chn_j
         verbose && println("  Joint model complete.")
     end
@@ -1206,34 +1567,25 @@ end
 """
     extract_transition_kernels(loaded, fitted, params) -> NamedTuple
 
-Phase 3 of the pipeline. Extracts posterior mean parameters (alpha, rho,
-gamma) from MCMC chains and constructs group-stratified stochastic
-transition kernels:
+Phase 3 of the pipeline. Extracts pooled posterior parameters and constructs
+one transition kernel for all observations:
 
-    P_g = (1 - rho_g)[(1 - alpha_g) T_diff + alpha_g A_g(eta)] + rho_g I
-
-When MCMC posteriors do not resolve group-level differences, biological
-priors from `params.group_*` are applied directly as informed defaults.
+    P = (1 - rho)[(1 - alpha) T_diff + alpha A(eta)] + rho I
 
 # Arguments
 - `loaded`: Output of `load_movement_data`.
 - `fitted`: Output of `fit_movement_models`.
-- `params`: Configuration NamedTuple. Relevant keys: `group_labels`,
-  `group_alpha`, `group_rho`, `group_gamma`, `verbose`.
+- `params`: Configuration NamedTuple with fallback `advection`, `residence`,
+  and `gamma` values.
 
 # Returns
-`NamedTuple` with: `P_kernel`, `grp_name_lookup`, `alpha_hat`,
-`rho_hat`, `gamma_hat`, `G`.
+`NamedTuple` with one `P_kernel` and scalar parameter estimates/samples.
 """
 function extract_transition_kernels(loaded, fitted, params)::NamedTuple
     verbose = params.verbose
     chains  = fitted.chains
 
-    active_chain = if haskey(chains, :ssa_telemetry)
-        chains[:ssa_telemetry]
-    elseif haskey(chains, :ssa_and_survey)
-        chains[:ssa_and_survey]
-    elseif haskey(chains, :telemetry)
+    active_chain = if haskey(chains, :telemetry)
         chains[:telemetry]
     elseif haskey(chains, :telemetry_and_survey)
         chains[:telemetry_and_survey]
@@ -1243,195 +1595,51 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
         nothing
     end
 
-    # Build integer-keyed group name lookup from the loaded group_map
-    grp_name_lookup = Dict{Int, String}()
-    for (k, v) in loaded.group_map
-        if k isa String && v isa Integer
-            grp_name_lookup[v] = k
-        elseif k isa Integer && v isa String
-            grp_name_lookup[k] = v
-        else
-            grp_name_lookup[Int(v)] = string(k)
+    if active_chain === nothing
+        alpha_samples = [clamp(Float64(get(params, :advection, 0.4)), 0.0, 1.0)]
+        rho_samples = [clamp(Float64(get(params, :residence, 0.25)), 0.01, 0.95)]
+        gamma_samples = [Float64(get(params, :gamma, 1.0))]
+    else
+        function posterior_draws(parameter::Symbol, fallback::Float64)
+            parameter in keys(active_chain) || return [fallback]
+            values = vec(Float64.(Array(active_chain[parameter])))
+            return isempty(values) ? [fallback] : values
         end
+        velocity_samples = posterior_draws(:velocity, 0.3)
+        diffusion_samples = posterior_draws(:diffusion, 0.1)
+        gamma_samples = posterior_draws(:gamma, Float64(get(params, :gamma, 1.0)))
+        n_draws = minimum((length(velocity_samples), length(diffusion_samples), length(gamma_samples)))
+        velocity_samples = velocity_samples[1:n_draws]
+        diffusion_samples = diffusion_samples[1:n_draws]
+        gamma_samples = gamma_samples[1:n_draws]
+        total_samples = velocity_samples .+ diffusion_samples .+ 1e-6
+        alpha_samples = clamp.(velocity_samples ./ total_samples, 0.0, 1.0)
+        rho_samples = clamp.(1.0 ./ (1.0 .+ total_samples), 0.01, 0.95)
     end
-    G = isempty(grp_name_lookup) ?
-        length(params.group_labels) : maximum(keys(grp_name_lookup))
-
-    # Extract posterior mean vector for a named parameter prefix
-    function _extract_mean_vec(prefix::String, G_count::Int, defval::Float64)
-        vals     = fill(defval, G_count)
-        if active_chain === nothing
-            return vals
-        end
-        chn_keys = keys(active_chain)
-        found    = false
-        for g in 1:G_count
-            matches = filter(
-                k -> occursin(prefix, string(k)) &&
-                     (G_count == 1 || occursin("[$g]", string(k))),
-                chn_keys
-            )
-            if !isempty(matches)
-                raw = Array(active_chain[first(matches)])
-                m   = raw isa AbstractMatrix{<:Real} ?
-                      vec(mean(raw; dims = 1)) : mean(raw)
-                if m isa AbstractVector && length(m) >= g
-                    vals[g] = Float64(m[g])
-                elseif m isa AbstractVector && !isempty(m)
-                    vals[g] = Float64(m[1])
-                elseif m isa Real
-                    vals[g] = Float64(m)
-                end
-                found = true
-            end
-        end
-        # Fallback: any matching key vectorised across groups
-        if !found || all(v -> v == defval, vals)
-            fall = filter(k -> occursin(prefix, string(k)), chn_keys)
-            if !isempty(fall)
-                raw = Array(active_chain[first(fall)])
-                m   = raw isa AbstractMatrix{<:Real} ?
-                      vec(mean(raw; dims = 1)) : mean(raw)
-                if m isa AbstractVector && length(m) == G_count
-                    vals .= Float64.(m)
-                elseif m isa Real
-                    vals .= fill(Float64(m), G_count)
-                end
-            end
-        end
-        return vals
-    end
-
-    v_mean = _extract_mean_vec("velocity",  G, 0.3)
-    d_mean = _extract_mean_vec("diffusion", G, 0.1)
-    g_mean = _extract_mean_vec("gamma",     G, 1.0)
-
-    tot       = v_mean .+ d_mean .+ 1e-6
-    alpha_hat = clamp.(v_mean ./ tot,        0.0,  1.0)
-    rho_hat   = clamp.(1.0 ./ (1.0 .+ tot), 0.01, 0.95)
-
-    # Apply biological priors when MCMC posteriors are uninformative
-    n_groups = min(G, length(params.group_labels))
-    for g in 1:n_groups
-        lbl = lowercase(get(grp_name_lookup, g, params.group_labels[g]))
-        if all(v -> v ≈ 0.3, v_mean)
-            alpha_hat[g] = params.group_alpha[
-                min(g, length(params.group_alpha))
-            ]
-            rho_hat[g]   = params.group_rho[
-                min(g, length(params.group_rho))
-            ]
-            g_mean[g]    = params.group_gamma[
-                min(g, length(params.group_gamma))
-            ]
-        else
-            # Label-based soft overrides for known demographic group names
-            if occursin("female", lbl)
-                alpha_hat[g] = 0.25
-                rho_hat[g]   = 0.60
-                g_mean[g]    = 0.80
-            elseif occursin("male", lbl)
-                alpha_hat[g] = 0.65
-                rho_hat[g]   = 0.15
-                g_mean[g]    = 1.50
-            elseif occursin("immature", lbl)
-                alpha_hat[g] = 0.30
-                rho_hat[g]   = 0.35
-                g_mean[g]    = 0.50
-            end
-        end
-    end
+    alpha_hat = mean(alpha_samples)
+    rho_hat = mean(rho_samples)
+    gamma_hat = mean(gamma_samples)
 
     if verbose
-        println("\n[Phase 3] Posterior parameters ($G group(s)):")
-        for g in 1:G
-            lbl = get(grp_name_lookup, g, "Group $g")
-            println(
-                "  $lbl: alpha=$(round(alpha_hat[g]; digits=4)), " *
-                "rho=$(round(rho_hat[g]; digits=4)), " *
-                "gamma=$(round(g_mean[g]; digits=4))"
-            )
-        end
+        println("\n[Phase 3] Pooled posterior parameters:")
+        println("  alpha=$(round(alpha_hat; digits=4)), rho=$(round(rho_hat; digits=4)), gamma=$(round(gamma_hat; digits=4))")
     end
 
     P_kernel = construct_stochastic_transition_kernel(
         loaded.W, loaded.hsi_vec;
-        gamma     = g_mean,
+        gamma     = gamma_hat,
         residence = rho_hat,
         advection = alpha_hat,
+        rest_coupling = Float64(get(params, :rest_coupling, 0.0)),
+        rest_advantage_form = get(params, :rest_advantage_form, :difference),
         land_mask = loaded.land_mask
     )
 
-    # Extract posterior draws across chains for uncertainty quantification
-    chn_keys = keys(active_chain)
-    raw_arr  = Array(active_chain)
-    n_draws  = max(1, size(raw_arr, 1))
-    alpha_samples = zeros(Float64, n_draws, G)
-    rho_samples   = zeros(Float64, n_draws, G)
-    gamma_samples = zeros(Float64, n_draws, G)
-
-    for g in 1:G
-        v_matches = filter(
-            k -> occursin("velocity", string(k)) &&
-                 (G == 1 || occursin("[$g]", string(k))),
-            chn_keys
-        )
-        d_matches = filter(
-            k -> occursin("diffusion", string(k)) &&
-                 (G == 1 || occursin("[$g]", string(k))),
-            chn_keys
-        )
-        g_matches = filter(
-            k -> occursin("gamma", string(k)) &&
-                 (G == 1 || occursin("[$g]", string(k))),
-            chn_keys
-        )
-
-        if !isempty(v_matches) && !isempty(d_matches)
-            v_draws = vec(Array(active_chain[first(v_matches)]))
-            d_draws = vec(Array(active_chain[first(d_matches)]))
-            for s in 1:min(n_draws, length(v_draws), length(d_draws))
-                v_raw = v_draws[s]
-                v_val = v_raw isa AbstractArray ?
-                        (length(v_raw) >= g ? v_raw[g] : v_raw[1]) : v_raw
-                d_raw = d_draws[s]
-                d_val = d_raw isa AbstractArray ?
-                        (length(d_raw) >= g ? d_raw[g] : d_raw[1]) : d_raw
-                tot = Float64(v_val) + Float64(d_val) + 1e-6
-                alpha_samples[s, g] = clamp(Float64(v_val) / tot, 0.0, 1.0)
-                rho_samples[s, g]   = clamp(1.0 / (1.0 + tot), 0.01, 0.95)
-            end
-        else
-            rng_p = MersenneTwister(params.seed + g * 11)
-            alpha_samples[:, g] = clamp.(
-                alpha_hat[g] .+ 0.04 .* randn(rng_p, n_draws), 0.01, 0.99
-            )
-            rho_samples[:, g] = clamp.(
-                rho_hat[g] .+ 0.04 .* randn(rng_p, n_draws), 0.01, 0.99
-            )
-        end
-
-        if !isempty(g_matches)
-            g_draws = vec(Array(active_chain[first(g_matches)]))
-            for s in 1:min(n_draws, length(g_draws))
-                g_raw = g_draws[s]
-                g_val = g_raw isa AbstractArray ?
-                        (length(g_raw) >= g ? g_raw[g] : g_raw[1]) : g_raw
-                gamma_samples[s, g] = Float64(g_val)
-            end
-        else
-            rng_g = MersenneTwister(params.seed + g * 23)
-            gamma_samples[:, g] = g_mean[g] .+ 0.12 .* randn(rng_g, n_draws)
-        end
-    end
-
     return (
         P_kernel        = P_kernel,
-        grp_name_lookup = grp_name_lookup,
         alpha_hat       = alpha_hat,
         rho_hat         = rho_hat,
-        gamma_hat       = g_mean,
-        G               = G,
+        gamma_hat       = gamma_hat,
         alpha_samples   = alpha_samples,
         rho_samples     = rho_samples,
         gamma_samples   = gamma_samples,
@@ -1476,8 +1684,6 @@ function reconstruct_paths_and_diagnostics(
     land_mask   = loaded.land_mask
     n_spatial   = loaded.n_spatial
     P_kernel    = kernels.P_kernel
-    G           = kernels.G
-    grp_nlookup = kernels.grp_name_lookup
 
     cents_planar, cents_lonlat, cents_mesh =
         _resolve_centroids(loaded.mesh, n_spatial)
@@ -1511,7 +1717,7 @@ function reconstruct_paths_and_diagnostics(
         )
     end
 
-    P_seg_cache = Dict{Tuple{Float64, Int}, Any}()
+    P_seg_cache = Dict{Float64, Any}()
 
     reconstructed_paths     = Dict{String, Vector{Int}}()
     reconstructed_corridors = Dict{String, Matrix{Float64}}()
@@ -1522,13 +1728,60 @@ function reconstruct_paths_and_diagnostics(
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
 
-        grp = hasproperty(sub_obs, :group) ? first(sub_obs.group) : 1
-        P_k = P_kernel isa AbstractVector ?
-              P_kernel[clamp(grp, 1, length(P_kernel))] : P_kernel
+                P_k = P_kernel
 
-        # Concatenate multi-segment trajectories for this individual
-        full_path = if get(params, :hmm_smoothing, false) && nrow(sub_obs) > 1
-            # Global multi-segment Hidden Markov Model Viterbi smoothing
+        # Concatenate multi-segment trajectories for this individual.
+        # Segment-wise routing is the default reconstruction. HMM smoothing, when
+        # enabled, replaces it only if a global decode actually succeeded; an
+        # inadmissible decode falls back here rather than storing a fabricated path.
+        fpath = Int[sub_obs.release[1]]
+        for row in eachrow(sub_obs)
+            # Select the monthly HSI slice for this segment's release time
+            t_rel  = hasproperty(row, :rel_time) ? row.rel_time : NaN
+            hsi_row = isnan(t_rel) ? hsi_vec :
+                      _resolve_hsi_for_time(loaded, t_rel)
+
+            # Build a segment-specific kernel if HSI differs from the
+            # pre-computed P_k (time-varying case)
+            P_seg = if hsi_row === hsi_vec
+                P_k
+            else
+                get!(P_seg_cache, Float64(t_rel)) do
+            construct_stochastic_transition_kernel(
+                W, hsi_row;
+                gamma     = kernels.gamma_hat,
+                residence = kernels.rho_hat,
+                advection = kernels.alpha_hat,
+                rest_coupling = Float64(get(params, :rest_coupling, 0.0)),
+                rest_advantage_form = get(params, :rest_advantage_form, :difference),
+                land_mask = land_mask
+            )
+                end
+            end
+
+            seg = if hasproperty(loaded.mesh, :is_fine)
+                astar_multiresolution_path(
+                    loaded.mesh, row.release, row.recapture;
+                    hsi = hsi_row, land_mask = land_mask
+                )
+            else
+                predict_path(
+                    P_seg, row.release, row.recapture, row.k;
+                    centroids = cents_mesh,
+                    method    = params.path_method,
+                    land_mask = land_mask
+                )
+            end
+            if isempty(seg)
+                @warn "Path reconstruction: no valid route for tag $tid " *
+                      "($(row.release) -> $(row.recapture), k=$(row.k)); " *
+                      "the segment is omitted rather than padded."
+                continue
+            end
+            append!(fpath, seg[2:end])
+        end
+
+        if get(params, :hmm_smoothing, false) && nrow(sub_obs) > 1
             times = Int[1]
             cum_t = 1
             locs = Any[sub_obs.release[1]]
@@ -1541,57 +1794,15 @@ function reconstruct_paths_and_diagnostics(
                 times, locs, P_k;
                 mesh = loaded.mesh, land_mask = land_mask
             )
-            res_hmm.path
-        else
-            fpath = Int[sub_obs.release[1]]
-            for row in eachrow(sub_obs)
-                # Select the monthly HSI slice for this segment's release time
-                t_rel  = hasproperty(row, :rel_time) ? row.rel_time : NaN
-                hsi_row = isnan(t_rel) ? hsi_vec :
-                          _resolve_hsi_for_time(loaded, t_rel)
-
-                # Build a segment-specific kernel if HSI differs from the
-                # pre-computed P_k (time-varying case)
-                P_seg = if hsi_row === hsi_vec
-                    P_k
-                else
-                    get!(P_seg_cache, (Float64(t_rel), grp)) do
-                        a_hat = kernels.alpha_hat isa AbstractVector ?
-                            kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
-                            kernels.alpha_hat
-                        r_hat = kernels.rho_hat isa AbstractVector ?
-                            kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
-                            kernels.rho_hat
-                        g_hat = kernels.gamma_hat isa AbstractVector ?
-                            kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
-                            kernels.gamma_hat
-                        construct_stochastic_transition_kernel(
-                            W, hsi_row;
-                            gamma     = g_hat,
-                            residence = r_hat,
-                            advection = a_hat,
-                            land_mask = land_mask
-                        )
-                    end
-                end
-
-                seg = if hasproperty(loaded.mesh, :is_fine)
-                    astar_multiresolution_path(
-                        loaded.mesh, row.release, row.recapture;
-                        hsi = hsi_row, land_mask = land_mask
-                    )
-                else
-                    predict_path(
-                        P_seg, row.release, row.recapture, row.k;
-                        centroids = cents_mesh,
-                        method    = params.path_method,
-                        land_mask = land_mask
-                    )
-                end
-                append!(fpath, seg[2:end])
+            if get(res_hmm, :valid, true) && !isempty(res_hmm.path)
+                fpath = res_hmm.path
+            else
+                @warn "Path reconstruction: HMM smoothing could not decode tag $tid; " *
+                      "the segment-wise route is used instead."
             end
-            fpath
         end
+
+        full_path = fpath
         if params.smooth_paths && cents_mesh !== nothing
             full_path = smooth_marine_path(full_path, cents_mesh)
         end
@@ -1610,29 +1821,21 @@ function reconstruct_paths_and_diagnostics(
         n_hsi_m   = prop_hsi ? min(params.n_stochastic_draws, 5) : 1
 
         corr_accum = nothing
+        n_valid_corr = 0
         for d in 1:n_hsi_m
             P_eval = if prop_hsi && d > 1
                 rng_d = MersenneTwister(
-                    params.seed + abs(hash(string(tid))) % 10_000 + d
+                    params.seed + Int(_stable_string_hash(string(tid)) % 10_000) + d
                 )
                 hsi_d = clamp.(
                     hsi_first .+ randn(rng_d, n_spatial) .* params.hsi_se,
                     0.001, 1.0
                 )
-                a_hat = kernels.alpha_hat isa AbstractVector ?
-                        kernels.alpha_hat[clamp(grp, 1, length(kernels.alpha_hat))] :
-                        kernels.alpha_hat
-                r_hat = kernels.rho_hat isa AbstractVector ?
-                        kernels.rho_hat[clamp(grp, 1, length(kernels.rho_hat))] :
-                        kernels.rho_hat
-                g_hat = kernels.gamma_hat isa AbstractVector ?
-                        kernels.gamma_hat[clamp(grp, 1, length(kernels.gamma_hat))] :
-                        kernels.gamma_hat
                 construct_stochastic_transition_kernel(
                     W, hsi_d;
-                    gamma     = g_hat,
-                    residence = r_hat,
-                    advection = a_hat,
+                    gamma     = kernels.gamma_hat,
+                    residence = kernels.rho_hat,
+                    advection = kernels.alpha_hat,
                     land_mask = land_mask
                 )
             else
@@ -1651,12 +1854,17 @@ function reconstruct_paths_and_diagnostics(
                     first_row.k; land_mask = land_mask
                 )
             end
-            if corr_accum === nothing
-                corr_accum = zeros(Float64, size(corr_d)...)
+            if !any(isnan, corr_d)
+                if corr_accum === nothing
+                    corr_accum = zeros(Float64, size(corr_d)...)
+                end
+                corr_accum .+= corr_d
+                n_valid_corr += 1
             end
-            corr_accum .+= corr_d
         end
-        reconstructed_corridors[string(tid)] = corr_accum ./ n_hsi_m
+        reconstructed_corridors[string(tid)] = n_valid_corr > 0 ?
+            corr_accum ./ n_valid_corr :
+            (isnothing(corr_accum) ? zeros(Float64, n_spatial, max(1, first_row.k) + 1) : fill(NaN, size(corr_accum)))
 
         # Optional stochastic least-cost path ensemble
         if params.compute_stochastic && cents_planar !== nothing
@@ -1672,7 +1880,7 @@ function reconstruct_paths_and_diagnostics(
                     centroids_lonlat = cents_lonlat,
                     smooth           = params.smooth_paths,
                     seed             = Int(
-                        params.seed + abs(hash(string(tid))) % 10_000
+                        params.seed + Int(_stable_string_hash(string(tid)) % 10_000)
                     )
                 )
                 stochastic_paths[string(tid)] = stoch_res
@@ -1688,10 +1896,8 @@ function reconstruct_paths_and_diagnostics(
             end
         end
 
-        grp_lbl = haskey(grp_nlookup, grp) ?
-                  " [$(grp_nlookup[grp])]" : ""
         verbose && println(
-            "  Tag $tid$grp_lbl: " *
+            "  Tag $tid: " *
             "$(length(full_path)) units " *
             "($(first(full_path)) -> $(last(full_path)))"
         )
@@ -1705,30 +1911,15 @@ function reconstruct_paths_and_diagnostics(
         n_obs              = nrow(obs_df)
         tag_sample_indices = Int[]
 
-        if G > 1 && hasproperty(obs_df, :group)
-            for g in 1:G
-                cand = findall(
-                    i -> obs_df.group[i] == g &&
-                         obs_df.release[i] != obs_df.recapture[i] &&
-                         (land_mask === nothing ||
-                          (!land_mask[obs_df.release[i]] &&
-                           !land_mask[obs_df.recapture[i]])),
-                    1:n_obs
-                )
-                n_take = min(10, length(cand))
-                n_take > 0 && append!(tag_sample_indices, cand[1:n_take])
-            end
-        else
-            cand = findall(
-                i -> obs_df.release[i] != obs_df.recapture[i] &&
-                     (land_mask === nothing ||
-                      (!land_mask[obs_df.release[i]] &&
-                       !land_mask[obs_df.recapture[i]])),
-                1:n_obs
-            )
-            n_take = min(25, length(cand))
-            n_take > 0 && append!(tag_sample_indices, cand[1:n_take])
-        end
+        cand = findall(
+            i -> obs_df.release[i] != obs_df.recapture[i] &&
+                 (land_mask === nothing ||
+                  (!land_mask[obs_df.release[i]] &&
+                   !land_mask[obs_df.recapture[i]])),
+            1:n_obs
+        )
+        n_take = min(25, length(cand))
+        n_take > 0 && append!(tag_sample_indices, cand[1:n_take])
         isempty(tag_sample_indices) &&
             append!(tag_sample_indices, collect(1:min(10, n_obs)))
 
@@ -1979,6 +2170,62 @@ end
 # and are exported by the core MovementAnalysis module.
 
 
+function _agent_trajectories_to_paths(agent_trajectories, mesh, hsi_vec)
+    agent_trajectories === nothing && return NamedTuple[]
+    centroids = hasproperty(mesh, :centroids_lonlat) ?
+        mesh.centroids_lonlat : mesh.centroids
+    paths = NamedTuple[]
+
+    for agent_rows in groupby(agent_trajectories, :tagid)
+        rows = sort(agent_rows, :step)
+        units = Int.(rows.mesh_unit)
+        length(units) < 2 && continue
+        coords = Tuple{Float64, Float64}[centroids[u] for u in units if 1 <= u <= length(centroids)]
+        length(coords) < 2 && continue
+        distance_km = sum(
+            haversine_distance(coords[i - 1][1], coords[i - 1][2], coords[i][1], coords[i][2]) / 1000.0
+            for i in 2:length(coords)
+        )
+        displacement_km = haversine_distance(
+            first(coords)[1], first(coords)[2], last(coords)[1], last(coords)[2]
+        ) / 1000.0
+        valid_units = filter(u -> 1 <= u <= length(hsi_vec), units)
+        push!(paths, (
+            tagid = "Agent $(first(rows.tagid))",
+            path = units,
+            coords = coords,
+            n_steps = length(coords) - 1,
+            total_dist_km = distance_km,
+            displacement_km = displacement_km,
+            tortuosity = displacement_km > 0.01 ? distance_km / displacement_km : 1.0,
+            mean_hsi = isempty(valid_units) ? NaN : mean(hsi_vec[valid_units]),
+            color = "#f97316",
+            trajectory_kind = "Agent simulation"
+        ))
+    end
+    return paths
+end
+
+function _write_agent_simulation_summary(paths, statistics, output_dir::AbstractString)
+    isempty(paths) && return nothing
+    mkpath(output_dir)
+    summary_file = joinpath(output_dir, "agent_simulation_summary.csv")
+    open(summary_file, "w") do io
+        write(io, "agent_id,steps,total_dist_km,displacement_km,efficiency,tortuosity,bearing_deg\n")
+        for (i, path) in enumerate(paths)
+            write(io, string(
+                path.tagid, ",", path.n_steps, ",",
+                round(path.total_dist_km; digits=3), ",",
+                round(path.displacement_km; digits=3), ",",
+                round(statistics.path_efficiency[i]; digits=4), ",",
+                round(statistics.tortuosity[i]; digits=4), ",",
+                round(statistics.bearings_deg[i]; digits=1), "\n"
+            ))
+        end
+    end
+    return summary_file
+end
+
 """
     export_dashboards(loaded, kernels, path_results, diagnostics, params)
 
@@ -1994,7 +2241,8 @@ rendering errors so the pipeline is never aborted. Exports:
 - Multi-scale SGWT wavelet decomposition dashboard.
 """
 function export_dashboards(
-    loaded, kernels, path_results, diagnostics, params
+    loaded, kernels, path_results, diagnostics, params;
+    agent_paths::AbstractVector{<:NamedTuple} = NamedTuple[]
 )::Union{NamedTuple, Nothing}
     params.render_html || return nothing
     verbose = params.verbose
@@ -2007,8 +2255,6 @@ function export_dashboards(
     hsi_vec     = loaded.hsi_vec
     obs_df      = loaded.obs_df
     P_kernel    = kernels.P_kernel
-    G           = kernels.G
-    grp_nlookup = kernels.grp_name_lookup
     spp         = params.species_name
 
     # Use the resolved centroids from path reconstruction so node
@@ -2058,7 +2304,7 @@ function export_dashboards(
     #
     # Convert raw Dict{String, Vector{Int}} into NamedTuples with
     # centroid coordinates, per-path distance, displacement,
-    # tortuosity, mean HSI, and a per-group colour assignment.
+    # tortuosity and mean HSI.
     palette_colors = [
         "#38bdf8", "#f43f5e", "#10b981", "#fbbf24",
         "#a78bfa", "#fb923c", "#22d3ee", "#e879f9",
@@ -2068,7 +2314,8 @@ function export_dashboards(
     path_vels      = Float64[]
     path_bearings  = Float64[]
 
-    for (tid, node_vec) in path_results.paths
+    for (path_index, tid) in enumerate(keys(path_results.paths))
+        node_vec = path_results.paths[tid]
         length(node_vec) < 2 && continue
 
         # Coordinate series via resolved centroids
@@ -2104,13 +2351,9 @@ function export_dashboards(
             for u in node_vec
         ])
 
-        # Look up the group-specific colour for this tag
         sub_obs = filter(:tagid => ==(tid), obs_df)
-        grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
-              first(sub_obs.group) : 1
-        grp_lbl = get(grp_nlookup, grp, "Group $grp")
         color = palette_colors[
-            (grp - 1) % length(palette_colors) + 1
+            (path_index - 1) % length(palette_colors) + 1
         ]
 
         # Duration in time steps (sum of k across segments)
@@ -2127,8 +2370,6 @@ function export_dashboards(
             mean_hsi        = mean_h,
             color           = color,
             duration_days   = Float64(k_total),
-            group           = grp,
-            group_label     = grp_lbl,
         ))
 
         push!(path_dists_km, total_dist)
@@ -2157,12 +2398,11 @@ function export_dashboards(
         "#c4b5fd", "#fdba74", "#67e8f9", "#f0abfc",
     ]
     n_ibm_added = 0
-    for (tid, stoch_res) in path_results.stochastic_paths
+    for (path_index, tid) in enumerate(keys(path_results.stochastic_paths))
+        stoch_res = path_results.stochastic_paths[tid]
         stoch_res isa StochasticAStarResult || continue
         sub_obs = filter(:tagid => ==(tid), obs_df)
-        grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
-              first(sub_obs.group) : 1
-        base_color = ibm_palette[(grp - 1) % length(ibm_palette) + 1]
+        base_color = ibm_palette[(path_index - 1) % length(ibm_palette) + 1]
 
         for (r_idx, node_vec) in enumerate(stoch_res.all_paths)
             length(node_vec) < 2 && continue
@@ -2199,8 +2439,6 @@ function export_dashboards(
                 duration_days   = Float64(
                     !isempty(sub_obs) ? sum(sub_obs.k) : 1
                 ),
-                group           = grp,
-                group_label     = "IBM Realization",
             ))
             n_ibm_added += 1
         end
@@ -2229,8 +2467,6 @@ function export_dashboards(
             )
 
             sub_obs = filter(:tagid => ==(tid), obs_df)
-            grp = !isempty(sub_obs) && hasproperty(sub_obs, :group) ?
-                  first(sub_obs.group) : 1
 
             push!(all_paths_rich, (
                 tagid           = string(tid) * "_forward_ibm",
@@ -2251,8 +2487,6 @@ function export_dashboards(
                 duration_days   = Float64(
                     !isempty(sub_obs) ? sum(sub_obs.k) : 1
                 ),
-                group           = grp,
-                group_label     = "IBM Forward Walk",
             ))
         end
     end
@@ -2261,7 +2495,7 @@ function export_dashboards(
     try
         html_file = joinpath(out_dir, "movement_paths_dashboard.html")
         map_obj = leaflet_tracks_map(
-            all_paths_rich, au_mesh;
+            vcat(all_paths_rich, agent_paths), au_mesh;
             empirical_paths     = emp_tracks,
             max_paths           = max(100, length(all_paths_rich)),
             max_empirical_paths = max(500, length(emp_tracks)),
@@ -2273,6 +2507,27 @@ function export_dashboards(
         verbose && println("  Paths dashboard: $html_file")
     catch e
         verbose && println("  (Leaflet paths note: $e)")
+    end
+
+    # -- Forward projection explorer (agent mode) ------------------
+    if get(params, :model_mode, "telemetry") == "agent"
+        try
+            html_file = joinpath(out_dir, "forward_projection_map.html")
+            map_obj = leaflet_forward_projection_map(
+                kernels.P_kernel, au_mesh;
+                hsi      = hsi_vec,
+                n_paths  = 40,
+                n_steps  = 20,
+                seed     = params.seed,
+                title    = "$spp Forward Movement Projection",
+                subtitle = "Click a unit to project synthetic trajectories forward " *
+                           "from it and accumulate expected visit frequency",
+            )
+            save_html(map_obj, html_file)
+            verbose && println("  Forward projection map: $html_file")
+        catch e
+            verbose && println("  (Forward projection note: $e)")
+        end
     end
 
     # -- Movement ecology statistics & phenology ----------------------
@@ -2346,12 +2601,10 @@ function export_dashboards(
     # -- Interactive two-click corridor explorer -----------------------------
     try
         corr_file  = joinpath(out_dir, "movement_interactive_corridor.html")
-        grp_labels = [get(grp_nlookup, g, "Group $g") for g in 1:G]
         corr_map   = leaflet_interactive_corridor_dashboard(
             P_kernel, au_mesh;
             hsi             = hsi_vec,
             empirical_paths = emp_tracks,
-            group_labels    = grp_labels,
             title           = "$spp Dynamic Migration Corridor" *
                               reshard_lbl * depth_lbl
         )
@@ -2686,36 +2939,61 @@ function run_movement_analysis(
         (loaded_, fitted_, kernels_)
     end
     
+    # -- Agent-Based Forward Projection -------------------------------------
+    # In agent mode the telemetry model is fitted as usual, so the projection runs
+    # on an estimated kernel rather than on configured constants. Forward
+    # projection conditions on the release unit only, unlike the backward
+    # reconstruction, which is conditioned on both observed endpoints.
     agent_trajectories = nothing
+    agent_paths = NamedTuple[]
+    agent_movement_stats = nothing
+    agent_space_use = nothing
+    agent_summary_file = nothing
     if params.model_mode == "agent"
         if params.verbose
-            println("\n[Phase 2b] Simulating Agent-Based Movement Alternative Model...")
+            println(
+                "\n[Phase 2b] Forward-projecting synthetic agents from the fitted kernel..."
+            )
         end
-        n_sim_agents = min(100, nrow(loaded.obs_df))
-        # Use observed release sites to start agents (column is :release, not :release_unit)
-        start_nodes = loaded.obs_df.release[1:n_sim_agents]
-        # group_map maps String -> Int; obs_df.group may already be Int group indices
-        obs_groups  = loaded.obs_df.group[1:n_sim_agents]
-        groups = if eltype(obs_groups) <: Integer
-            # Already integer group indices; use directly
-            Int.(obs_groups)
-        else
-            # String keys: look up via group_map
-            [get(loaded.group_map, string(g), 1) for g in obs_groups]
-        end
-
-        agent_trajectories = simulate_agent_trajectories(
-            n_sim_agents, start_nodes, groups, kernels.P_kernel, 50; seed=params.seed
+        n_sim_agents = Int(get(params, :n_agent_projections, 200))
+        release_pool = Int.(loaded.obs_df.release)
+        duration_pool = max.(1, Int.(round.(loaded.obs_df.k)))
+        agent_trajectories = forward_project_agents(
+            release_pool, duration_pool;
+            n_agents = n_sim_agents,
+            transition_kernel = sparse(kernels.P_kernel),
+            seed = params.seed,
+            centroids = _resolve_centroids(loaded.mesh),
+            persistence = Float64(get(params, :persistence, 0.0))
         )
+        agent_space_use = forward_space_use(agent_trajectories, loaded.n_spatial)
         if params.verbose
-            println("  Simulated $(n_sim_agents) agents for 50 steps.")
+            n_visited = count(>(0), agent_space_use.visits)
+            println(
+                "  Projected $(n_sim_agents) agents over empirical durations; " *
+                "$n_visited of $(loaded.n_spatial) units visited."
+            )
         end
+        agent_paths = _agent_trajectories_to_paths(
+            agent_trajectories, loaded.mesh, loaded.hsi_vec
+        )
+        agent_path_lookup = Dict(path.tagid => path.path for path in agent_paths)
+        agent_movement_stats = compute_movement_statistics(
+            agent_paths, (paths=agent_path_lookup,), loaded; params=params
+        )
+        agent_summary_file = _write_agent_simulation_summary(
+            agent_paths, agent_movement_stats, params.output_dir
+        )
+        params.verbose && !isnothing(agent_summary_file) &&
+            println("  Agent summary CSV: $agent_summary_file")
     end
     
     path_res    = reconstruct_paths_and_diagnostics(loaded, kernels, params)
     diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
     validation  = execute_validation_analyses(loaded, fitted, kernels, params)
-    dashboards  = export_dashboards(loaded, kernels, path_res, diagnostics, params)
+    dashboards  = export_dashboards(
+        loaded, kernels, path_res, diagnostics, params; agent_paths=agent_paths
+    )
 
     if params.verbose
         println("\n" * "=" ^ 72)
@@ -2736,6 +3014,9 @@ function run_movement_analysis(
         wavelets           = diagnostics.wavelets,
         validation_analyses = validation,
         agent_trajectories = agent_trajectories,
+        agent_movement_stats = agent_movement_stats,
+        agent_space_use    = agent_space_use,
+        agent_summary_file = agent_summary_file,
         movement_stats     = !isnothing(dashboards) && hasproperty(dashboards, :movement_stats) ?
                              dashboards.movement_stats : nothing,
         phenology          = !isnothing(dashboards) && hasproperty(dashboards, :phenology) ?

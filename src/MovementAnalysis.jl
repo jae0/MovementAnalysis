@@ -17,6 +17,7 @@ using StatsBase
 using Distributions
 using Random
 using Dates
+using TOML
 using DataFrames
 using Printf
 
@@ -35,8 +36,8 @@ using Turing
 
 # Source modules in logical dependency order
 include("spatial_utils.jl")
-include("ssa_movement.jl")
 include("turing_models.jl")
+include("persistence.jl")
 include("movement.jl")
 include("circuit.jl")
 include("graph_wavelets.jl")
@@ -61,23 +62,15 @@ export
     summarize_sample_matrix,
     reshard_spatial_field,
 
-    # Continuous-Time SSA Movement Models (Master Equation)
-    SSAMovementParams,
-    calculate_ssa_utility,
-    construct_ssa_generator,
-    calculate_ssa_transition_matrix,
-    simulate_gillespie_trajectories,
-    generate_ssa_movement_data,
-
     # Probabilistic Turing Models
     pure_telemetry_turing_model,
     joint_survey_telemetry_turing_model,
-    ssa_telemetry_turing_model,
-    joint_survey_ssa_telemetry_turing_model,
 
     # Agent-Based Model Alternative
     CrabAgent,
     simulate_agent_trajectories,
+    forward_project_agents,
+    forward_space_use,
 
     # Telemetry & Mark-Recapture Data Structures
     TelemetryData,
@@ -93,6 +86,14 @@ export
 
     # Kernel Construction & Transition Probabilities
     build_sparse_transition_kernel,
+    build_persistent_transition_kernel,
+    persistent_unit_marginal,
+    persistence_gain_report,
+    bearing_deg,
+    coordinate_space_of,
+    local_hsi_advantage,
+    residency_from_advantage,
+    sanitise_hsi,
     construct_stochastic_transition_kernel,
     construct_dynamic_transition_kernels,
     calculate_multistep_transition,
@@ -188,6 +189,7 @@ export
     leaflet_spacetime_map,
     leaflet_movement_dashboard,
     leaflet_interactive_corridor_dashboard,
+    leaflet_forward_projection_map,
     leaflet_dispersal_kernel,
     leaflet_step_diagnostics,
     leaflet_regional_connectivity,

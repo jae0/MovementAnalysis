@@ -16,12 +16,15 @@ Data & Model:
       --simulate             Shorthand for --data-source=simulate.
       --snowcrab             Shorthand: snowcrab preset + all diagnostics.
   -m, --model-mode=<mode>   'telemetry' (default), 'telemetry_and_survey',
-                             'ssa', 'ssa_and_survey', or 'both'.
+                             or 'both'.
       --telemetry            Shorthand for --model-mode=telemetry.
       --joint, --survey      Shorthand for telemetry_and_survey.
-      --ssa                  Shorthand for continuous-time SSA model.
-      --ssa-joint            Shorthand for joint survey + SSA model.
       --agent                Shorthand for agent-based alternative model.
+      --n-agents=<N>         Synthetic agents to forward-project (default: 200).
+      --persistence=<k>      Directional persistence for agents (default: 0.0).
+      --rest-coupling=<b>     Couple stay probability to local HSI (default: 0.0).
+      --rest-advantage-form=<f>  difference | ratio | log_ratio | exp_difference |
+                              exp_ratio | exp_log_ratio (default: difference).
       --both                 Shorthand for --model-mode=both.
 
 Domain Resharding:
@@ -63,6 +66,7 @@ MCMC:
 Output & UI:
       --no-html              Disable HTML export.
   -o, --output-dir=<path>    Output directory (default: <repo>/output).
+    --config=<path>        TOML config file (overrides the selected preset).
       --tagging-file=<path>  Explicit tagging data file path (.jld2, .rds, .rdz).
       --hsi-file=<path>      Explicit HSI data file path.
       --sppoly-file=<path>   Explicit spatial polygon data file path.
@@ -136,10 +140,6 @@ function parse_movement_cli_args(args = ARGS)::NamedTuple
             opts[:model_mode] = "telemetry"
         elseif key in ("--joint", "--survey")
             opts[:model_mode] = "telemetry_and_survey"
-        elseif key == "--ssa"
-            opts[:model_mode] = "ssa"
-        elseif key in ("--ssa-joint", "--joint-ssa")
-            opts[:model_mode] = "ssa_and_survey"
         elseif key == "--agent"
             opts[:model_mode] = "agent"
         elseif key == "--both"
@@ -156,14 +156,6 @@ function parse_movement_cli_args(args = ARGS)::NamedTuple
             opts[:fine_radius_km] = parse(Float64, fv())
         elseif key == "--species-name"
             opts[:species_name] = String(fv())
-        elseif key == "--group-labels"
-            opts[:group_labels] = String.(split(fv(), ','))
-        elseif key == "--group-alpha"
-            opts[:group_alpha] = parse.(Float64, split(fv(), ','))
-        elseif key == "--group-rho"
-            opts[:group_rho] = parse.(Float64, split(fv(), ','))
-        elseif key == "--group-gamma"
-            opts[:group_gamma] = parse.(Float64, split(fv(), ','))
         elseif key in ("--hydro", "--use-hydrodynamics")
             opts[:use_hydrodynamics] = has_inline ? !_is_false(inline_val) : true
         elseif key == "--no-hydro"
@@ -236,22 +228,32 @@ function parse_movement_cli_args(args = ARGS)::NamedTuple
             opts[:propagate_hsi_error] = false
         elseif key in ("--n-draws", "--stochastic-draws")
             opts[:n_stochastic_draws] = parse(Int, fv())
+        elseif key in ("--n-agents", "--agent-projections")
+            opts[:n_agent_projections] = parse(Int, fv())
+        elseif key in ("--persistence", "--kappa")
+            opts[:persistence] = parse(Float64, fv())
+        elseif key in ("--rest-coupling", "--kappa-rest")
+            opts[:rest_coupling] = parse(Float64, fv())
+        elseif key in ("--rest-advantage-form", "--rest-form")
+            opts[:rest_advantage_form] = String(fv())
         elseif key in ("--render-html", "--html")
             opts[:render_html] = has_inline ? !_is_false(inline_val) : true
         elseif key in ("--no-render-html", "--no-html")
             opts[:render_html] = false
         elseif key == "--resume"
             opts[:resume_from_checkpoint] = true
-        elseif key in ("--dark-mode")
+        elseif key == "--dark-mode"
             opts[:dark_mode] = true
-        elseif key in ("--light-mode")
+        elseif key == "--light-mode"
             opts[:dark_mode] = false
         elseif key in ("--palette", "--cmap")
             opts[:cmap] = Symbol(fv())
-        elseif key in ("--font")
+        elseif key == "--font"
             opts[:font] = String(fv())
         elseif key == "--tagging-file"
             opts[:tagging_file] = String(fv())
+        elseif key == "--config"
+            opts[:config_path] = String(fv())
         elseif key == "--hsi-file"
             opts[:hsi_file] = String(fv())
         elseif key == "--sppoly-file"
@@ -278,12 +280,19 @@ Base.@ccallable function julia_main()::Cint
         if get(cli, :help, false)
             print_movement_help()
         else
+            config = haskey(cli, :config_path) ?
+                _load_movement_config(cli.config_path) : nothing
+            source = haskey(cli, :data_source) ? cli.data_source :
+                (config !== nothing ? get(config, :data_source, :simulate) : :simulate)
             base_params = (
-                haskey(cli, :data_source) && cli.data_source == :snowcrab ?
+                source == :snowcrab ?
                 movement_parameters_snowcrab() :
                 movement_parameters_default()
             )
-            run_movement_analysis(merge(base_params, cli))
+            configured_params = config === nothing ? base_params : merge(base_params, config)
+            cli_params = Dict{Symbol, Any}(pairs(cli))
+            pop!(cli_params, :config_path, nothing)
+            run_movement_analysis(merge(configured_params, (; cli_params...)))
         end
     catch e
         @error "Pipeline failed" exception=(e, catch_backtrace())

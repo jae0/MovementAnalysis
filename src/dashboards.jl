@@ -225,6 +225,9 @@ function _map_val_to_hex(
     t = clamp(t, 0.0, 1.0)
 
     n_colors = length(palette)
+    if n_colors == 0
+        return "#888888"
+    end
     if n_colors == 1
         return palette[1]
     end
@@ -244,15 +247,18 @@ end
 """
     _is_geographic_coordinates(coords)::Bool
 
-Infers whether spatial coordinates are in geographic `(lon, lat)` space versus abstract
-planar cartesian `(x, y)` space.
+Conservative fallback inference of whether a point set is in geographic
+`(lon, lat)` degrees or local planar `(x, y)` space. This exists only for
+callers that have no declared CRS; where a mesh is available its
+`centroids_lonlat` / `centroids_km` field is authoritative and this function
+should not be reached.
 
-# Mathematical & Heuristic Criteria:
-1. Hard WGS84 bounding box: Longitudes must strictly reside within `[-180, 180]`,
-   and Latitudes within `[-90, 90]`.
-2. Planar origin check: Non-negative coordinates starting near `(0, 0)` with synthetic
-   extents (e.g. `[0, 100]`, `[0, 10]`, `[0, 1]`) are classified as planar.
-3. Marine regional domain checks (Scotian Shelf, Atlantic Canada, Pacific, Europe).
+# Criteria
+A point set is inferred geographic only if it is inside the WGS84 bounding box
+*and* matches one of the known marine regions. Range alone is not evidence:
+kilometre-valued local planar frames routinely fall inside `[-180, 180]`, so a
+range test misclassifies them. Callers that know better should pass the answer
+explicitly (the transformer builder accepts an `is_geo` override).
 """
 function _is_geographic_coordinates(coords)::Bool
     if isempty(coords)
@@ -272,26 +278,17 @@ function _is_geographic_coordinates(coords)::Bool
     min_x, max_x = minimum(xs), maximum(xs)
     min_y, max_y = minimum(ys), maximum(ys)
 
-    # 1. Hard limits for WGS84 Geographic degrees
+    # Outside WGS84 bounds: definitely not degrees.
     if min_y < -90.0 || max_y > 90.0 || min_x < -180.0 || max_x > 180.0
         return false
     end
 
-    # 2. Planar Cartesian origin check: non-negative coordinates starting near (0, 0)
-    # Synthetic domains like [0, 100], [0, 10], [0, 1], [1, N]
-    if min_x >= 0.0 && min_y >= 0.0 && (min_x < 5.0 || min_y < 5.0) && (max_x <= 100.0 && max_y <= 100.0)
-        return false
-    end
-
-    # 3. Known marine fisheries regions (Atlantic Canada, Scotian Shelf, Pacific, Europe)
+    # Known marine regions only. Anything else is treated as planar, because a
+    # false positive silently renders a plausible-looking map in the wrong place
+    # while a false negative is visible and can be overridden by the caller.
     if (min_x <= -20.0 && max_x <= -10.0 && min_y >= 30.0 && max_y <= 85.0) ||
        (min_x >= 100.0 && max_x <= 180.0 && min_y >= -50.0 && max_y <= 70.0) ||
        (min_x >= -180.0 && max_x <= -50.0 && min_y >= -60.0 && max_y <= 75.0)
-        return true
-    end
-
-    # 4. Standard degrees span check
-    if (max_x - min_x > 0.1 || max_y - min_y > 0.1) && (min_x < -5.0 || max_x > 5.0 || min_y > 15.0 || min_y < -15.0)
         return true
     end
 
@@ -539,12 +536,14 @@ end
 
 function _transform_point(tf::CoordinateTransformer, pt)::Tuple{Float64, Float64}
     x, y = float(pt[1]), float(pt[2])
-    # 1. If coordinate is already in standard geographic WGS84 range
-    if -180.0 <= x <= 180.0 && -90.0 <= y <= 90.0
-        return (x, y)
-    end
 
-    # 2. CoordRefSystems transformation mode
+    # 1. The declared transformation mode is authoritative and is consulted
+    #    before any magnitude heuristic. A range test applied first would return
+    #    kilometre-valued planar coordinates unchanged, because local metric
+    #    frames almost always fall inside the WGS84 degree box, and would
+    #    silently bypass the fitted local projection below.
+
+    # 2. Explicit projected CRS
     if tf.mode == :utm || tf.mode == :crs
         if !isnothing(tf.crs_type)
             try
@@ -562,15 +561,189 @@ function _transform_point(tf::CoordinateTransformer, pt)::Tuple{Float64, Float64
         return utm_to_lonlat(x, y; zone=tf.utm_zone, is_km=tf.utm_is_km, northern=tf.northern)
     end
 
-    # 3. If explicit geographic mode
+    # 3. Declared geographic
     if tf.is_geo
         return (x, y)
     end
 
-    # 4. Fallback planar isometric projection
+    # 4. Declared planar: always project through the fitted local frame, even
+    #    when the values happen to sit inside the degree box.
+    if tf.mode == :planar
+        return _planar_to_lonlat(tf, x, y)
+    end
+
+    # 5. Undeclared mode: a range test is the only available evidence, and it is
+    #    only safe in this branch because no mode was asserted.
+    if -180.0 <= x <= 180.0 && -90.0 <= y <= 90.0
+        return (x, y)
+    end
+    return _planar_to_lonlat(tf, x, y)
+end
+
+@inline function _planar_to_lonlat(tf::CoordinateTransformer, x::Float64, y::Float64)::Tuple{Float64, Float64}
     lon = (x - tf.x_mean) * tf.scale + tf.lon_center
     lat = (y - tf.y_mean) * tf.scale + tf.lat_center
     return (lon, lat)
+end
+
+const _KM_PER_DEG_LAT = 111.32
+
+"""
+    _metric_offset_km(space, ci, cj) -> (east_km, north_km)
+
+Local metric displacement from node `ci` to node `cj`, in kilometres.
+
+A degree of longitude is not the same physical length as a degree of latitude
+except at the equator: at 44 N one is about 0.72 of the other. Vector components
+taken as raw coordinate differences therefore carry a `cos(latitude)` error in
+both the rendered length and the bearing of every arrow on a geographic map.
+Working in kilometres removes that.
+"""
+@inline function _metric_offset_km(space::Symbol, ci, cj)::Tuple{Float64, Float64}
+    dlon = Float64(cj[1]) - Float64(ci[1])
+    dlat = Float64(cj[2]) - Float64(ci[2])
+    if space === :geographic
+        return (dlon * _KM_PER_DEG_LAT * cosd(Float64(ci[2])), dlat * _KM_PER_DEG_LAT)
+    end
+    return (dlon, dlat)
+end
+
+"""
+    _km_to_map_offset(space, ci, east_km, north_km) -> (dx_map, dy_map)
+
+Inverse of [`_metric_offset_km`](@ref): express a physical kilometre offset in
+the map's own coordinate units, so a rendered vector has the length and bearing
+its physical magnitude implies.
+"""
+@inline function _km_to_map_offset(space::Symbol, ci, east_km::Real, north_km::Real)::Tuple{Float64, Float64}
+    if space === :geographic
+        kx = _KM_PER_DEG_LAT * cosd(Float64(ci[2]))
+        kx = abs(kx) > 1e-9 ? kx : _KM_PER_DEG_LAT
+        return (Float64(east_km) / kx, Float64(north_km) / _KM_PER_DEG_LAT)
+    end
+    return (Float64(east_km), Float64(north_km))
+end
+
+"""
+    _resolve_centroids(au) -> Vector{Tuple{Float64, Float64}}
+
+Node centroids from a partition, honouring the declared coordinate space.
+
+`centroids_lonlat` is WGS84 `(lon, lat)` and takes precedence over a bare
+`centroids` field, matching the mesh contract used by `_resolve_is_geo`. Map
+types that read `au.centroids` directly would otherwise disagree with their
+siblings about which field is authoritative.
+"""
+@inline function _resolve_centroids(au)::Vector{Tuple{Float64, Float64}}
+    if hasproperty(au, :centroids_lonlat) && au.centroids_lonlat !== nothing &&
+       !isempty(au.centroids_lonlat)
+        return collect(Tuple{Float64, Float64}, au.centroids_lonlat)
+    elseif hasproperty(au, :centroids) && au.centroids !== nothing &&
+           !isempty(au.centroids)
+        return collect(Tuple{Float64, Float64}, au.centroids)
+    end
+    return Tuple{Float64, Float64}[]
+end
+
+"""
+    _resolve_is_geo(au, is_geo) -> Union{Bool, Nothing}
+
+Single source of truth for the coordinate space of a rendered map.
+
+An explicit `is_geo` always wins. Otherwise the mesh declaration is used:
+a partition carrying `centroids_lonlat` is geographic and one carrying
+`centroids_km` is planar. Only when the mesh says nothing does this fall
+through to `nothing`, which lets `_build_coordinate_transformer` apply its
+conservative inference.
+
+Every map type resolves its space through this function so that a choropleth,
+graph, track layer, corridor, current field, and hydrodynamic panel cannot
+disagree about whether the same mesh is geographic.
+"""
+function _resolve_is_geo(au, is_geo)::Union{Bool, Nothing}
+    is_geo !== nothing && return is_geo
+    au === nothing && return nothing
+    if hasproperty(au, :centroids_lonlat) && au.centroids_lonlat !== nothing
+        return true
+    end
+    if hasproperty(au, :centroids_km) && au.centroids_km !== nothing
+        return false
+    end
+    return nothing
+end
+
+"""
+    _json_string(s) -> String
+
+Encodes `s` as a JSON string literal, surrounding quotes included.
+
+Any caller-supplied value embedded in generated GeoJSON must pass through this
+rather than string interpolation. A species name, tag label, date, or dataset
+path containing a quote, a backslash, a control character, or a `</script>`
+sequence would otherwise emit invalid JSON or terminate the enclosing script
+block. `<`, `>`, and `&` are emitted as `\\u` escapes, which is valid JSON and
+also prevents a `</script>` breakout.
+"""
+function _json_string(s)::String
+    io = IOBuffer()
+    print(io, '"')
+    for c in string(s)
+        if c == '"'
+            print(io, "\\\"")
+        elseif c == '\\'
+            print(io, "\\\\")
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        elseif c == '\b'
+            print(io, "\\b")
+        elseif c == '\f'
+            print(io, "\\f")
+        elseif c == '<'
+            print(io, "\\u003c")
+        elseif c == '>'
+            print(io, "\\u003e")
+        elseif c == '&'
+            print(io, "\\u0026")
+        elseif c < ' '
+            print(io, "\\u", lpad(string(UInt32(c); base = 16), 4, '0'))
+        else
+            print(io, c)
+        end
+    end
+    print(io, '"')
+    return String(take!(io))
+end
+
+"""
+    _js_escape_content(s) -> String
+
+Escapes `s` for embedding inside an existing single-quoted JavaScript string
+literal in generated markup. Used for popup titles and labels that are already
+surrounded by quotes in the template, where injecting a further pair of quotes
+would terminate the literal early.
+"""
+function _js_escape_content(s)::String
+    io = IOBuffer()
+    for c in string(s)
+        if c == '\'' || c == '\\'
+            print(io, '\\', c)
+        elseif c == '\n'
+            print(io, "\\n")
+        elseif c == '\r'
+            print(io, "\\r")
+        elseif c == '\t'
+            print(io, "\\t")
+        elseif c == '<' || c == '>' || c == '&'
+            print(io, "\\u", lpad(string(UInt32(c); base = 16), 4, '0'))
+        else
+            print(io, c)
+        end
+    end
+    return String(take!(io))
 end
 
 function _transform_polygon(tf::CoordinateTransformer, poly)
@@ -1016,7 +1189,7 @@ function leaflet_choropleth(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=_resolve_is_geo(au, is_geo), lon_center=0.0, lat_center=0.0)
 
     # Build GeoJSON Features
     features_json = String[]
@@ -1061,7 +1234,7 @@ function leaflet_choropleth(
         extra_json = String[]
         if !isnothing(extra_props) && haskey(extra_props, i)
             for (k, v) in pairs(extra_props[i])
-                push!(extra_json, "\"$k\": \"$v\"")
+                push!(extra_json, string(_json_string(string(k)), ": ", _json_string(v)))
             end
         end
         extra_str = !isempty(extra_json) ? ", " * join(extra_json, ", ") : ""
@@ -1184,8 +1357,8 @@ function leaflet_choropleth(
         });
         var props = feature.properties;
         var popupContent = '<div class="ma-popup">' +
-          '<div class="ma-popup-title">$(tooltip_prefix) #' + props.unit_id + '</div>' +
-          '<div class="ma-popup-row"><span class="ma-popup-label">$(colorbar_label):</span><span class="ma-popup-val">' + props.value_str + '</span></div>'$(orig_row_js) +
+          '<div class="ma-popup-title">$(_js_escape_content(tooltip_prefix)) #' + props.unit_id + '</div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">$(_js_escape_content(colorbar_label)):</span><span class="ma-popup-val">' + props.value_str + '</span></div>'$(orig_row_js) +
           '</div>';
         layer.bindPopup(popupContent);
       }
@@ -1291,7 +1464,7 @@ function leaflet_spatial_graph(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=_resolve_is_geo(au, is_geo), lon_center=0.0, lat_center=0.0)
 
     all_lats = Float64[]
     all_lngs = Float64[]
@@ -1703,12 +1876,17 @@ function leaflet_advection_arrows(
     height::String = "650px",
     kwargs...
 )::LeafletMap
-    S = length(au.centroids)
+    cents = _resolve_centroids(au)
+    S = length(cents)
     vx = zeros(Float64, S)
     vy = zeros(Float64, S)
 
     wkt_str = !isnothing(wkt) ? string(wkt) : _extract_wkt(au)
-    tf = _build_coordinate_transformer(au.centroids; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(cents; wkt=wkt_str, is_geo=_resolve_is_geo(au, is_geo), lon_center=0.0, lat_center=0.0)
+
+    # Vector components are built in kilometres, not in raw coordinate differences,
+    # so magnitudes and bearings are physical on both geographic and planar meshes.
+    space = tf.is_geo ? :geographic : :planar_km
 
     if !isnothing(hsi) && hasproperty(au, :W) && !isnothing(au.W)
         W = au.W
@@ -1717,16 +1895,15 @@ function leaflet_advection_arrows(
         hsi_vec = Float64.(hsi)
 
         for i in 1:S
-            ci = au.centroids[i]
+            ci = cents[i]
             for j_idx in nzrange(W, i)
                 j = rows[j_idx]
                 i == j && continue
-                cj = au.centroids[j]
+                cj = cents[j]
                 dh = hsi_vec[j] - hsi_vec[i]
                 if dh > 0.0
-                    dx = cj[1] - ci[1]
-                    dy = cj[2] - ci[2]
-                    dist = sqrt(dx^2 + dy^2) + 1e-9
+                    ex, ny = _metric_offset_km(space, ci, cj)
+                    dist = hypot(ex, ny) + 1e-9
                     weight = if relationship == :exponential
                         vals[j_idx] * exp(dh)
                     elseif relationship == :logistic
@@ -1734,8 +1911,8 @@ function leaflet_advection_arrows(
                     else
                         vals[j_idx] * dh
                     end
-                    vx[i] += weight * (dx / dist)
-                    vy[i] += weight * (dy / dist)
+                    vx[i] += weight * (ex / dist)
+                    vy[i] += weight * (ny / dist)
                 end
             end
         end
@@ -1743,13 +1920,14 @@ function leaflet_advection_arrows(
         vy .*= Float64(velocity)
     elseif !isnothing(Gamma)
         for i in 1:S
-            ci = au.centroids[i]
+            ci = cents[i]
             for j in 1:S
                 i == j && continue
-                cj = au.centroids[j]
+                cj = cents[j]
                 p_ij = Gamma[i, j]
-                vx[i] += p_ij * (cj[1] - ci[1])
-                vy[i] += p_ij * (cj[2] - ci[2])
+                ex, ny = _metric_offset_km(space, ci, cj)
+                vx[i] += p_ij * ex
+                vy[i] += p_ij * ny
             end
         end
     end
@@ -1758,11 +1936,13 @@ function leaflet_advection_arrows(
     max_sp = maximum(speeds)
     speed_cutoff = max_sp > 1e-12 ? quantile(speeds, clamp(min_speed_quantile, 0.0, 0.5)) : 0.0
 
-    # Determine average nearest centroid spacing
+    # Nearest-centroid spacing, also in kilometres so the arrow scale is physical.
     dists = Float64[]
     for i in 1:min(S, 25)
-        ci = au.centroids[i]
-        nn_d = minimum([sqrt((cj[1]-ci[1])^2 + (cj[2]-ci[2])^2) for (j, cj) in enumerate(au.centroids) if j != i])
+        ci = cents[i]
+        nn_d = minimum([
+            hypot(_metric_offset_km(space, ci, cj)...) for (j, cj) in enumerate(cents) if j != i
+        ])
         push!(dists, nn_d)
     end
     avg_spacing = !isempty(dists) ? mean(dists) : 1.0
@@ -1776,10 +1956,10 @@ function leaflet_advection_arrows(
     for i in 1:S
         sp = speeds[i]
         if sp >= speed_cutoff && max_sp > 1e-12
-            c0_trans = _transform_point(tf, au.centroids[i])
-            dx_trans = vx[i] * scale_fac * tf.scale
-            dy_trans = vy[i] * scale_fac * tf.scale
-            x1, y1 = c0_trans[1] + dx_trans, c0_trans[2] + dy_trans
+            c0_trans = _transform_point(tf, cents[i])
+            dlon, dlat = _km_to_map_offset(space, cents[i], vx[i] * scale_fac, vy[i] * scale_fac)
+            x1, y1 = c0_trans[1] + dlon * tf.scale, c0_trans[2] + dlat * tf.scale
+            # True compass bearing: atan2 over an (east, north) basis.
             ang_deg = rad2deg(atan(vy[i], vx[i]))
             rot_deg = 90.0 - ang_deg
             sp_str = @sprintf("%.4f", sp)
@@ -1858,8 +2038,8 @@ function leaflet_advection_arrows(
         var p = feature.properties;
         layer.bindPopup('<div class="ma-popup">' +
           '<div class="ma-popup-title">Advective Drift (Unit #' + p.unit_id + ')</div>' +
-          '<div class="ma-popup-row"><span class="ma-popup-label">Drift Speed:</span><span class="ma-popup-val">' + p.speed_str + '</span></div>' +
-          '<div class="ma-popup-row"><span class="ma-popup-label">Heading:</span><span class="ma-popup-val">' + p.angle_deg + '°</span></div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Drift Magnitude (km-weighted):</span><span class="ma-popup-val">' + p.speed_str + '</span></div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Bearing (deg from N):</span><span class="ma-popup-val">' + p.angle_deg + '°</span></div>' +
           '</div>');
       }
     }).addTo(map);
@@ -1884,8 +2064,8 @@ function leaflet_advection_arrows(
         var p = feature.properties;
         layer.bindPopup('<div class="ma-popup">' +
           '<div class="ma-popup-title">Advective Drift (Unit #' + p.unit_id + ')</div>' +
-          '<div class="ma-popup-row"><span class="ma-popup-label">Drift Speed:</span><span class="ma-popup-val">' + p.speed_str + '</span></div>' +
-          '<div class="ma-popup-row"><span class="ma-popup-label">Heading:</span><span class="ma-popup-val">' + p.angle_deg + '°</span></div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Drift Magnitude (km-weighted):</span><span class="ma-popup-val">' + p.speed_str + '</span></div>' +
+          '<div class="ma-popup-row"><span class="ma-popup-label">Bearing (deg from N):</span><span class="ma-popup-val">' + p.angle_deg + '°</span></div>' +
           '</div>');
       }
     }).addTo(map);
@@ -2007,7 +2187,7 @@ function leaflet_tracks_map(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=_resolve_is_geo(au, is_geo), lon_center=0.0, lat_center=0.0)
 
     all_lats = Float64[]
     all_lngs = Float64[]
@@ -2027,10 +2207,10 @@ function leaflet_tracks_map(
             dist_val_str = ""
             disp_val_str = ""
             tort_val_str = ""
-            grp_label_str = ""
             hsi_val_str = ""
             start_date_str = ""
             end_date_str = ""
+            kind_val = "Reconstructed"
 
             if isa(paths, AbstractMatrix)
                 n_steps = size(paths, 2)
@@ -2064,8 +2244,9 @@ function leaflet_tracks_map(
                     @sprintf("%.2f", tr.tortuosity) : ""
                 hsi_val_str = hasproperty(tr, :mean_hsi) ?
                     @sprintf("%.3f", tr.mean_hsi) : ""
-                grp_label_str = hasproperty(tr, :group_label) ?
-                    string(tr.group_label) : ""
+                if hasproperty(tr, :trajectory_kind)
+                    kind_val = string(tr.trajectory_kind)
+                end
             elseif isa(paths, AbstractVector) && isa(paths[1], AbstractVector)
                 if !isempty(paths[1]) && paths[1][1] isa Integer && !isempty(cents)
                     for u_idx in paths[i]
@@ -2106,32 +2287,39 @@ function leaflet_tracks_map(
                   "type": "Feature",
                   "id": $i,
                   "properties": {
-                    "tag_id": "$tag_id_str",
-                    "group_label": "$grp_label_str",
+                    "tag_id": $(_json_string(tag_id_str)),
                     "n_steps": $n_steps_val,
                     "duration_days": $(round(dur_days_val, digits=1)),
-                    "total_dist": "$dist_val_str",
-                    "displacement": "$disp_val_str",
-                    "tortuosity": "$tort_val_str",
-                    "mean_hsi": "$hsi_val_str",
-                    "start_date": "$start_date_str",
-                    "end_date": "$end_date_str",
-                    "color": "$t_col"
+                    "total_dist": $(_json_string(dist_val_str)),
+                    "displacement": $(_json_string(disp_val_str)),
+                    "tortuosity": $(_json_string(tort_val_str)),
+                    "mean_hsi": $(_json_string(hsi_val_str)),
+                    "start_date": $(_json_string(start_date_str)),
+                    "end_date": $(_json_string(end_date_str)),
+                    "color": $(_json_string(t_col)),
+                    "kind": $(_json_string(kind_val)),
+                    "simulated": $(kind_val == "Reconstructed" ? "false" : "true")
                   },
                   "geometry": { "type": "LineString", "coordinates": [$coord_str] }
                 }""")
 
+                # A forward projection has no recapture event, so its terminal
+                # marker must not be labelled as one.
+                is_sim = kind_val != "Reconstructed"
+                start_label = is_sim ? "Projected start" : "Release (Start)"
+                end_label = is_sim ? "Projected endpoint" : "Recapture (End)"
+
                 p_start = coords_trans[1]
                 push!(starts_json, """{
                   "type": "Feature",
-                  "properties": { "tag_id": "$tag_id_str", "date": "$start_date_str", "type": "Release (Start)" },
+                  "properties": { "tag_id": $(_json_string(tag_id_str)), "date": $(_json_string(start_date_str)), "type": $(_json_string(start_label)) },
                   "geometry": { "type": "Point", "coordinates": [$(p_start[1]), $(p_start[2])] }
                 }""")
 
                 p_end = coords_trans[end]
                 push!(ends_json, """{
                   "type": "Feature",
-                  "properties": { "tag_id": "$tag_id_str", "date": "$end_date_str", "type": "Recapture (End)" },
+                  "properties": { "tag_id": $(_json_string(tag_id_str)), "date": $(_json_string(end_date_str)), "type": $(_json_string(end_label)) },
                   "geometry": { "type": "Point", "coordinates": [$(p_end[1]), $(p_end[2])] }
                 }""")
             end
@@ -2337,10 +2525,14 @@ function leaflet_tracks_map(
     if (tracksData.features.length > 0) {
       var trackLayer = L.geoJSON(tracksData, {
         style: function(feature) {
+          // Reconstructed trajectories are solid; forward projections are dashed,
+          // so the two remain distinguishable in greyscale and for colour-vision
+          // deficiencies, where hue alone would not separate them.
           return {
             color: feature.properties.color,
-            weight: 2.8,
-            opacity: 0.85
+            weight: feature.properties.simulated ? 2.0 : 2.8,
+            opacity: feature.properties.simulated ? 0.75 : 0.85,
+            dashArray: feature.properties.simulated ? '5,4' : null
           };
         },
         onEachFeature: function(feature, layer) {
@@ -2351,13 +2543,17 @@ function leaflet_tracks_map(
           layer.on('mouseout', function() {
             trackLayer.resetStyle(layer);
           });
-          var tTitle = (p.tag_id.startsWith('Tag') ||
-                        p.tag_id.startsWith('Method') ||
-                        p.tag_id.startsWith('Path')) ?
-                        p.tag_id : 'Snow Crab Tag #' + p.tag_id;
+          var tTitle = p.simulated ? p.tag_id :
+            (p.tag_id.startsWith('Tag') ||
+             p.tag_id.startsWith('Method') ||
+             p.tag_id.startsWith('Path')) ?
+             p.tag_id : 'Snow Crab Tag #' + p.tag_id;
           var popupHtml = '<div class="ma-popup">' +
             '<div class="ma-popup-title" style="color: ' + p.color + '">' +
             tTitle + '</div>' +
+            '<div class="ma-popup-row">' +
+            '<span class="ma-popup-label">Trajectory:</span>' +
+            '<span class="ma-popup-val">' + (p.kind || 'Reconstructed') + '</span></div>' +
             '<div class="ma-popup-row">' +
             '<span class="ma-popup-label">State-Space Steps:</span>' +
             '<span class="ma-popup-val">' + p.n_steps + '</span></div>';
@@ -2393,14 +2589,15 @@ function leaflet_tracks_map(
           }
           if (p.end_date && p.end_date != '') {
             popupHtml += '<div class="ma-popup-row">' +
-              '<span class="ma-popup-label">Recapture:</span>' +
+              '<span class="ma-popup-label">' +
+              (p.simulated ? 'Projected to:' : 'Recapture:') + '</span>' +
               '<span class="ma-popup-val">' + p.end_date + '</span></div>';
           }
           popupHtml += '</div>';
           layer.bindPopup(popupHtml);
         }
       }).addTo(map);
-      overlayLayers["Estimated Movement Paths (Markov Bridges)"] = trackLayer;
+      overlayLayers["Movement Paths: Bridges (solid) & Projections (dashed)"] = trackLayer;
     }
 
     // 4. Start Markers (Green Circles)
@@ -2711,7 +2908,7 @@ function leaflet_spacetime_map(
         end
     end
 
-    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(all_raw_pts; wkt=wkt_str, is_geo=_resolve_is_geo(au, is_geo), lon_center=0.0, lat_center=0.0)
 
     # Compute global min and max across all time slices
     all_vals = Float64[]
@@ -3805,6 +4002,7 @@ function leaflet_hydrodynamic_dashboard(
     height::String = "750px",
     wkt = nothing,
     is_geo::Union{Nothing, Bool} = nothing,
+    provenance::Union{Nothing, Symbol} = nothing,
     quiver_scale::Real = 1.0
 )::LeafletMap
     # Auto-detect argument order: either (au, hydro_data) or (hydro_data, au)
@@ -3832,60 +4030,103 @@ function leaflet_hydrodynamic_dashboard(
 
     S = length(cents)
     wkt_str = !isnothing(wkt) ? string(wkt) : _extract_wkt(au)
-    tf = _build_coordinate_transformer(cents; wkt=wkt_str, is_geo=is_geo, lon_center=0.0, lat_center=0.0)
+    tf = _build_coordinate_transformer(cents; wkt=wkt_str, is_geo=_resolve_is_geo(au, is_geo), lon_center=0.0, lat_center=0.0)
 
     # 2. Extract multi-depth hydrodynamic variables
-    depth_levels = hasproperty(hydro_data, :depths) ? Float64.(hydro_data.depths) : [-2.5, -25.0, -50.0, -100.0]
+    #
+    # Axes are validated rather than assumed. Hydrodynamic arrays arrive as
+    # (cell, depth) or (depth, cell); a field whose cell axis does not match the
+    # mesh used to be replaced wholesale by the default, so a transposed or
+    # differently-ordered array rendered as a plausible flat field with no
+    # indication that the data had been discarded.
+    depth_levels = hasproperty(hydro_data, :depths) ? Float64.(hydro_data.depths) : Float64[]
+    synthetic_depths = isempty(depth_levels)
+    if synthetic_depths
+        @warn "leaflet_hydrodynamic_dashboard: the hydro dataset carries no " *
+              ":depths field; the depth axis is being assumed to be " *
+              "$(Float64[-2.5, -25.0, -50.0, -100.0]) m and may not match the data."
+        depth_levels = [-2.5, -25.0, -50.0, -100.0]
+    end
     nz = length(depth_levels)
 
-    to_2d(field, def_val) = begin
-        if field === nothing
-            return fill(def_val, S, nz)
-        elseif ndims(field) == 1
-            if length(field) == S
-                return repeat(Float64.(field), 1, nz)
-            else
-                return fill(def_val, S, nz)
-            end
-        elseif ndims(field) == 2
-            if size(field, 1) == S
-                f_cols = size(field, 2)
-                if f_cols == nz
-                    return Float64.(field)
-                else
-                    res = fill(def_val, S, nz)
-                    for k in 1:min(nz, f_cols)
-                        res[:, k] .= Float64.(field[:, k])
-                    end
-                    return res
-                end
-            else
-                return fill(def_val, S, nz)
-            end
-        else
-            return fill(def_val, S, nz)
-        end
+    # Provenance: a hydrodynamic field derived from synthetic bathymetry must not
+    # be captioned as though it were an empirical observation.
+    hydro_provenance = isnothing(provenance) ? :unknown : Symbol(provenance)
+    if hydro_provenance === :synthetic
+        @warn "leaflet_hydrodynamic_dashboard: rendering a SYNTHETIC hydrodynamic " *
+              "field (source bathymetry is not file-backed). The dashboard is " *
+              "labelled accordingly and must not be reported as empirical input."
+        title = title * " [SYNTHETIC FIELDS]"
     end
 
-    T_2d = to_2d(hasproperty(hydro_data, :temperature) ? hydro_data.temperature : nothing, 5.0)
-    S_2d = to_2d(hasproperty(hydro_data, :salinity) ? hydro_data.salinity : nothing, 32.5)
+    function to_2d(field, def_val, label)
+        field === nothing && return fill(def_val, S, nz)
+        if ndims(field) == 1
+            if length(field) == S
+                return repeat(Float64.(field), 1, nz)
+            end
+            @warn "leaflet_hydrodynamic_dashboard: $label has length " *
+                  "$(length(field)) but the mesh has $S cells; rendering the " *
+                  "default ($def_val) at every depth."
+            return fill(def_val, S, nz)
+        elseif ndims(field) == 2
+            n1, n2 = size(field)
+            if n1 == S && n2 == nz
+                return Float64.(field)
+            elseif n2 == S && n1 == nz
+                @warn "leaflet_hydrodynamic_dashboard: $label is stored as " *
+                      "(depth x cell) = $(n1)x$(n2); transposing to match the mesh."
+                return Float64.(permutedims(field))
+            elseif n1 == S
+                @warn "leaflet_hydrodynamic_dashboard: $label has $n2 depth " *
+                      "level(s) but depth_levels has $nz; the unmatched " *
+                      "level(s) are filled with the default ($def_val)."
+                res = fill(def_val, S, nz)
+                for k in 1:min(nz, n2)
+                    res[:, k] .= Float64.(field[:, k])
+                end
+                return res
+            elseif n2 == S
+                @warn "leaflet_hydrodynamic_dashboard: $label is stored as " *
+                      "(depth x cell) = $(n1)x$(n2) with $n1 depth level(s) " *
+                      "against $nz; transposing and filling the unmatched " *
+                      "level(s) with the default ($def_val)."
+                res = fill(def_val, S, nz)
+                for k in 1:min(nz, n1)
+                    res[:, k] .= Float64.(field[k, :])
+                end
+                return res
+            end
+            @warn "leaflet_hydrodynamic_dashboard: $label has shape " *
+                  "$((n1, n2)), which matches neither the mesh ($S cells) nor " *
+                  "the depth axis ($nz levels); rendering the default " *
+                  "($def_val) at every depth."
+            return fill(def_val, S, nz)
+        end
+        @warn "leaflet_hydrodynamic_dashboard: $label has $(ndims(field)) " *
+              "dimensions; expected 1 or 2. Rendering the default ($def_val)."
+        return fill(def_val, S, nz)
+    end
+
+    T_2d = to_2d(hasproperty(hydro_data, :temperature) ? hydro_data.temperature : nothing, 5.0, "temperature")
+    S_2d = to_2d(hasproperty(hydro_data, :salinity) ? hydro_data.salinity : nothing, 32.5, "salinity")
 
     N2_field = hasproperty(hydro_data, :stratification_N2) ? hydro_data.stratification_N2 :
                (hasproperty(hydro_data, :N2) ? hydro_data.N2 :
                (hasproperty(hydro_data, :stratification) ? hydro_data.stratification : nothing))
-    N2_2d = to_2d(N2_field, 1e-4)
+    N2_2d = to_2d(N2_field, 1e-4, "stratification")
 
     diff_field = hasproperty(hydro_data, :diffusivity_v) ? hydro_data.diffusivity_v :
                  (hasproperty(hydro_data, :kappa_v) ? hydro_data.kappa_v :
                  (hasproperty(hydro_data, :diffusivity) ? hydro_data.diffusivity : nothing))
-    diff_2d = to_2d(diff_field, 1e-3)
+    diff_2d = to_2d(diff_field, 1e-3, "diffusivity")
 
     u_field = hasproperty(hydro_data, :u) ? hydro_data.u :
               (hasproperty(hydro_data, :advection_u) ? hydro_data.advection_u : nothing)
     v_field = hasproperty(hydro_data, :v) ? hydro_data.v :
               (hasproperty(hydro_data, :advection_v) ? hydro_data.advection_v : nothing)
-    u_2d = to_2d(u_field, 0.0)
-    v_2d = to_2d(v_field, 0.0)
+    u_2d = to_2d(u_field, 0.0, "u velocity")
+    v_2d = to_2d(v_field, 0.0, "v velocity")
     spd_2d = hypot.(u_2d, v_2d) .* 100.0 # convert m/s to cm/s
 
     bathy_vec = if hasproperty(hydro_data, :depths_vec) && length(hydro_data.depths_vec) == S
@@ -4309,7 +4550,13 @@ function leaflet_hydrodynamic_dashboard(
         title=title,
         width=width,
         height=height,
-        metadata=Dict(:n_units=>S, :n_depths=>nz, :depths=>depth_levels)
+        metadata=Dict(
+            :n_units => S,
+            :n_depths => nz,
+            :depths => depth_levels,
+            :depths_assumed => synthetic_depths,
+            :provenance => hydro_provenance,
+        )
     )
 end
 
@@ -4320,12 +4567,19 @@ end
 
 """
     leaflet_interactive_corridor_dashboard(
-        P::Union{AbstractMatrix{<:Real}, AbstractVector{<:AbstractMatrix{<:Real}}},
+        P::AbstractMatrix{<:Real},
         au::NamedTuple;
         hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
         empirical_paths = nothing,
-        group_labels::Vector{String} = String[],
+        wkt::Union{Nothing, AbstractString} = nothing,
+        is_geo::Union{Nothing, Bool} = nothing,
         title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
+        dark_mode::Bool = false,
+        width::String = "100%",
+        height::String = "750px",
+        k_default::Int = 4,
+        max_paths_render::Int = 30,
+    )
         dark_mode::Bool = false,
         width::String = "100%",
         height::String = "750px",
@@ -4358,11 +4612,13 @@ w_\\pi = \\frac{\\mathbb{P}(\\pi \\mid A \\to B)}{\\max_{\\pi'} \\mathbb{P}(\\pi
 ```
 
 # Arguments
-- `P`: Row-stochastic transition matrix (or vector of matrices for multiple biological groups).
+- `P`: Row-stochastic transition matrix for the single pooled kernel.
 - `au`: Spatial areal unit NamedTuple containing `:centroids` and `:polygons`.
 - `hsi`: Optional spatial habitat suitability index vector of length ``S``.
 - `empirical_paths`: Optional collection of observed mark-recapture trajectories.
-- `group_labels`: Optional labels matching the group transition kernels.
+- `wkt`: Optional CRS well-known text describing the partition's projection.
+- `is_geo`: Optional explicit coordinate-space override. When omitted it is taken
+  from the partition's declared `centroids_lonlat` / `centroids_km` field.
 - `title`: Visualization header title.
 - `dark_mode`: Toggle modern dark theme (default `true`).
 - `width, height`: CSS dimension specifications.
@@ -4373,11 +4629,12 @@ w_\\pi = \\frac{\\mathbb{P}(\\pi \\mid A \\to B)}{\\max_{\\pi'} \\mathbb{P}(\\pi
 - `LeafletMap`: Self-contained HTML dashboard with embedded client-side Markov path engine.
 """
 function leaflet_interactive_corridor_dashboard(
-    P::Union{AbstractMatrix{<:Real}, AbstractVector{<:AbstractMatrix{<:Real}}},
+    P::AbstractMatrix{<:Real},
     au::NamedTuple;
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
     empirical_paths = nothing,
-    group_labels::Vector{String} = String[],
+    wkt::Union{Nothing, AbstractString} = nothing,
+    is_geo::Union{Nothing, Bool} = nothing,
     title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
     dark_mode::Bool = false,
     width::String = "100%",
@@ -4423,21 +4680,15 @@ function leaflet_interactive_corridor_dashboard(
     tf = _build_coordinate_transformer(
         all_raw_pts;
         wkt = wkt_str,
+        is_geo = _resolve_is_geo(au, is_geo),
         lon_center = -60.0,
         lat_center = 45.0
     )
 
-    # Normalize kernel input into group dictionary
-    kernels_dict = Dict{String, Matrix{Float64}}()
-    if P isa AbstractVector
-        for (idx, mat) in enumerate(P)
-            g_lbl = idx <= length(group_labels) ? group_labels[idx] : "Group $idx"
-            kernels_dict[g_lbl] = Matrix{Float64}(mat)
-        end
-    else
-        g_lbl = !isempty(group_labels) ? first(group_labels) : "All"
-        kernels_dict[g_lbl] = Matrix{Float64}(P)
-    end
+    # The movement model is pooled, so there is exactly one kernel. The dict and
+    # label machinery that once held one entry per demographic group is retained
+    # only because the client-side path engine iterates it; it always has one key.
+    kernels_dict = Dict{String, Matrix{Float64}}("All" => Matrix{Float64}(P))
     group_names = collect(keys(kernels_dict))
 
     # Helper to serialize sparse P matrix into compact JSON lookup
@@ -4989,15 +5240,16 @@ function leaflet_interactive_corridor_dashboard(
         return item.seq[item.seq.length - 1] === end;
       });
 
-      // If exact step reach is empty, fallback to paths that reached destination at intermediate steps
+      // Only routes that arrive at the destination on the final step count. When
+      // none do, the request is unsatisfiable at this horizon: a route that merely
+      // passed through the destination earlier is not a k-step arrival and must
+      // not be rendered as one.
       if (validPaths.length === 0) {
-        validPaths = beam.filter(function(item) {
-          return item.seq.indexOf(end) !== -1;
-        });
-      }
-
-      if (validPaths.length === 0) {
-        updateStatus("<span style='color:#f87171;'>No viable path found</span> from #" + start + " to #" + end + " in " + k + " steps. Try increasing the <b>k</b> slider.");
+        updateStatus(
+          "<span style='color:#f87171;'>No valid " + k + "-step path</span> from #" +
+          start + " to #" + end + ". The destination is not reachable in exactly " +
+          k + " step(s) under this kernel; try a different <b>k</b>."
+        );
         document.getElementById('paths_count_badge').style.display = 'none';
         return;
       }
@@ -6143,3 +6395,484 @@ function leaflet_graph_wavelet_dashboard(
         )
     )
 end
+
+"""
+    leaflet_forward_projection_map(
+        P::AbstractMatrix{<:Real},
+        au::NamedTuple;
+        hsi = nothing,
+        n_paths::Int = 40,
+        n_steps::Int = 20,
+        seed::Int = 20240,
+        title::String = "Forward Movement Projection",
+        subtitle::String = "Click a unit to project synthetic trajectories forward from it",
+        dark_mode::Bool = false,
+        width::String = "100%",
+        height::String = "750px",
+        wkt = nothing,
+        is_geo::Union{Nothing, Bool} = nothing,
+        kwargs...
+    )::LeafletMap
+
+Interactive projection explorer: click any unit and the map draws trajectories
+projected **forward** from it under the pooled kernel `P`, accumulating an
+expected visit frequency per unit.
+
+# Forward versus backward
+
+This is the complement of the corridor explorer
+(`leaflet_interactive_corridor_dashboard`), and the distinction matters. That map
+reconstructs a path between two *chosen* endpoints, so every route it draws is
+conditioned on arriving at the recapture unit. This map projects from one origin
+and conditions on nothing, so a projected track may pass through units a bridge
+between the same endpoints could not reach. The accumulated visit frequency is
+therefore an unconditioned space-use estimate, whereas a bridge residence
+distribution is conditioned on the recapture event.
+
+# Accumulation
+
+Visit counts accumulate across clicks and the polygon fill switches to the
+accumulated probability, which makes the map an exploration tool for expected
+space use under the fitted kernel rather than a one-shot drawing.
+
+# Interpolation
+
+Kernel entries, centroids, and titles are embedded through the JSON and JS
+encoders, so a caption containing quotes cannot break the generated script.
+Projection randomness comes from a seeded generator in the page, so a given
+`seed`, `n_paths`, and `n_steps` reproduce the same trajectories.
+
+# Arguments
+- `P`: Row-stochastic pooled transition kernel of size ``S \\times S``.
+- `au`: Partition providing `:centroids` or `:centroids_lonlat` and `:polygons`.
+- `hsi`: Optional background habitat suitability of length ``S``.
+- `n_paths`: Trajectories drawn per click.
+- `n_steps`: Steps per trajectory.
+- `seed`: Seed for the in-page generator.
+- `title`, `subtitle`: Header text.
+- `dark_mode`, `width`, `height`, `wkt`, `is_geo`, `kwargs...`: As for the other
+  map types.
+
+# Returns
+- `LeafletMap`: Self-contained HTML dashboard.
+"""
+function leaflet_forward_projection_map(
+    P::AbstractMatrix{<:Real},
+    au::NamedTuple;
+    hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    n_paths::Int = 40,
+    n_steps::Int = 20,
+    seed::Int = 20240,
+    title::String = "Forward Movement Projection",
+    subtitle::String = "Click a unit to project synthetic trajectories forward from it",
+    dark_mode::Bool = false,
+    width::String = "100%",
+    height::String = "750px",
+    wkt = nothing,
+    is_geo::Union{Nothing, Bool} = nothing,
+    kwargs...
+)::LeafletMap
+
+    S = size(P, 1)
+    size(P, 2) == S || throw(DimensionMismatch(
+        "P must be square, got $(size(P))."
+    ))
+    n_paths >= 1 || throw(ArgumentError("n_paths must be at least 1."))
+    n_steps >= 0 || throw(ArgumentError("n_steps must be non-negative."))
+
+    cents_raw = _resolve_centroids(au)
+    length(cents_raw) == S || throw(DimensionMismatch(
+        "Kernel has $S units but the partition supplies $(length(cents_raw)) centroids."
+    ))
+
+    polys_raw = if hasproperty(au, :polygons) && au.polygons !== nothing &&
+                  !isempty(au.polygons)
+        collect(au.polygons)
+    elseif hasproperty(au, :polygons_lonlat) && au.polygons_lonlat !== nothing &&
+           !isempty(au.polygons_lonlat)
+        collect(au.polygons_lonlat)
+    else
+        Vector{Vector{Tuple{Float64, Float64}}}()
+    end
+
+    wkt_str = !isnothing(wkt) ? string(wkt) : _extract_wkt(au)
+    tf = _build_coordinate_transformer(
+        cents_raw; wkt = wkt_str,
+        is_geo = _resolve_is_geo(au, is_geo), lon_center = 0.0, lat_center = 0.0
+    )
+
+    kernel_parts = String[]
+    for i in 1:S
+        nbrs = String[]
+        for j in 1:S
+            p = Float64(P[i, j])
+            p > 1e-6 && push!(nbrs, string("[", j, ",", round(p, digits = 6), "]"))
+        end
+        push!(kernel_parts, string("\"", i, "\":[", join(nbrs, ","), "]"))
+    end
+    kernel_json = "{" * join(kernel_parts, ",") * "}"
+
+    cents_parts = String[]
+    for (i, c) in enumerate(cents_raw)
+        t = _transform_point(tf, c)
+        push!(cents_parts,
+            string("\"", i, "\":[", round(t[1], digits = 6), ", ",
+                   round(t[2], digits = 6), "]"))
+    end
+    cents_json = "{" * join(cents_parts, ",") * "}"
+
+    has_hsi = !isnothing(hsi) && length(hsi) == S
+    hsi_vals = has_hsi ? Float64.(hsi) : fill(NaN, S)
+    pal_hsi = _resolve_palette(:viridis)
+    hsi_finite = has_hsi ? filter(isfinite, hsi_vals) : Float64[]
+    hsi_vmin = isempty(hsi_finite) ? 0.0 : minimum(hsi_finite)
+    hsi_vmax = isempty(hsi_finite) ? 1.0 : maximum(hsi_finite)
+
+    polys_json = String[]
+    for (i, poly) in enumerate(polys_raw)
+        length(poly) < 3 && continue
+        trans = _transform_polygon(tf, poly)
+        length(trans) < 3 && continue
+        coords = [
+            string("[", round(pt[1], digits = 6), ", ", round(pt[2], digits = 6), "]")
+            for pt in trans
+        ]
+        (coords[1] != coords[end]) && push!(coords, coords[1])
+        h_col = has_hsi ? _map_val_to_hex(hsi_vals[i], hsi_vmin, hsi_vmax, pal_hsi) : "#1e293b"
+        h_str = has_hsi ? @sprintf("%.3f", hsi_vals[i]) : "N/A"
+        push!(polys_json, """{
+          "type": "Feature",
+          "properties": {
+            "unit_id": $i,
+            "hsi": $(_json_string(h_str)),
+            "base_color": $(_json_string(h_col))
+          },
+          "geometry": { "type": "Polygon", "coordinates": [$(join(coords, ","))] }
+        }""")
+    end
+    polys_collection = isempty(polys_json) ?
+        "{\"type\":\"FeatureCollection\",\"features\":[]}" :
+        "{\"type\":\"FeatureCollection\",\"features\":[$(join(polys_json, ",\n"))]}"
+
+    all_lats = Float64[]
+    all_lngs = Float64[]
+    for c in cents_raw
+        t = _transform_point(tf, c)
+        push!(all_lngs, t[1])
+        push!(all_lats, t[2])
+    end
+    bounds = isempty(all_lats) ? "[]" :
+        string("[[", round(minimum(all_lats) - 0.35, digits = 5), ",",
+               round(minimum(all_lngs) - 0.55, digits = 5), "],[",
+               round(maximum(all_lats) + 0.35, digits = 5), ",",
+               round(maximum(all_lngs) + 0.55, digits = 5), "]]")
+
+    body_bg = dark_mode ? "#0b1329" : "#eef2f7"
+    text_main = dark_mode ? "#f8fafc" : "#0f172a"
+    text_muted = dark_mode ? "#94a3b8" : "#475569"
+    panel_bg = dark_mode ? "rgba(15,23,42,0.9)" : "rgba(255,255,255,0.94)"
+    border_main = dark_mode ? "rgba(255,255,255,0.14)" : "rgba(15,23,42,0.16)"
+
+    title_js = _js_escape_content(title)
+    subtitle_js = _js_escape_content(subtitle)
+
+    html_content = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>$(_js_escape_content(title))</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <style>
+    :root {
+      --bg-main: $body_bg;
+      --panel-bg: $panel_bg;
+      --text-main: $text_main;
+      --text-muted: $text_muted;
+      --border-main: $border_main;
+      --accent: #38bdf8;
+      --proj-color: #f97316;
+      --font-main: 'Segoe UI', system-ui, sans-serif;
+      --font-mono: ui-monospace, 'Cascadia Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: var(--font-main);
+      background: var(--bg-main);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+    .ma-header {
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border-main);
+      padding: 12px 20px;
+    }
+    .ma-title { font-size: 1.15rem; font-weight: 700; }
+    .ma-subtitle { font-size: 0.82rem; color: var(--text-muted); margin-top: 2px; }
+    .ma-main { position: relative; flex: 1 1 auto; }
+    #map { position: absolute; inset: 0; }
+    .ma-panel {
+      position: absolute;
+      top: 14px; left: 14px;
+      z-index: 1000;
+      width: 268px;
+      background: var(--panel-bg);
+      border: 1px solid var(--border-main);
+      border-radius: 10px;
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.28);
+      font-size: 0.8rem;
+    }
+    .ma-panel h2 {
+      font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--text-muted); margin-bottom: 8px; font-weight: 700;
+    }
+    .ma-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 3px 0; gap: 10px;
+    }
+    .ma-row .k { color: var(--text-muted); }
+    .ma-row .v { font-family: var(--font-mono); font-weight: 700; }
+    .ma-field { margin-top: 10px; }
+    .ma-field label {
+      display: flex; justify-content: space-between;
+      font-size: 0.72rem; color: var(--text-muted); margin-bottom: 3px;
+    }
+    .ma-field input[type=range] { width: 100%; accent-color: var(--proj-color); }
+    .ma-buttons { display: flex; gap: 6px; margin-top: 12px; }
+    .ma-buttons button {
+      flex: 1 1 0;
+      font: inherit; font-size: 0.76rem; font-weight: 600;
+      padding: 7px 6px; cursor: pointer;
+      color: var(--text-main);
+      background: rgba(127,127,127,0.14);
+      border: 1px solid var(--border-main);
+      border-radius: 7px;
+    }
+    .ma-buttons button:hover { background: rgba(127,127,127,0.26); }
+    .ma-note {
+      margin-top: 10px; font-size: 0.7rem; line-height: 1.45;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border-main); padding-top: 8px;
+    }
+    .ma-swatch {
+      display: inline-block; width: 20px; height: 0; vertical-align: middle;
+      border-top: 2px dashed var(--proj-color); margin-right: 5px;
+    }
+    .ma-legend-scale {
+      margin-top: 8px; height: 8px; border-radius: 4px;
+      background: linear-gradient(90deg, #440154, #21908c, #fde725);
+    }
+  </style>
+</head>
+<body>
+  <div class="ma-header">
+    <div class="ma-title">$title_js</div>
+    <div class="ma-subtitle">$subtitle_js</div>
+  </div>
+  <div class="ma-main">
+    <div id="map"></div>
+    <div class="ma-panel">
+      <h2>Projection</h2>
+      <div class="ma-row"><span class="k">Origin unit</span><span class="v" id="origin">none</span></div>
+      <div class="ma-row"><span class="k">Paths drawn</span><span class="v" id="drawn">0</span></div>
+      <div class="ma-row"><span class="k">Units touched</span><span class="v" id="touched">0</span></div>
+      <div class="ma-field">
+        <label><span>Paths per click</span><span id="npaths_lbl">$n_paths</span></label>
+        <input type="range" id="npaths" min="1" max="200" value="$n_paths" />
+      </div>
+      <div class="ma-field">
+        <label><span>Steps ahead</span><span id="nsteps_lbl">$n_steps</span></label>
+        <input type="range" id="nsteps" min="1" max="120" value="$n_steps" />
+      </div>
+      <div class="ma-buttons">
+        <button id="reroll">Re-roll</button>
+        <button id="clear">Clear</button>
+      </div>
+      <div class="ma-field">
+        <label><span>Unit fill</span><span>HSI / visit prob.</span></label>
+        <div class="ma-legend-scale"></div>
+      </div>
+      <div class="ma-note">
+        <span class="ma-swatch"></span>Projected trajectory (unconditioned on recapture).
+        Click a unit to accumulate expected visit frequency.
+      </div>
+    </div>
+  </div>
+  <script>
+    var P = $kernel_json;
+    var CENTS = $cents_json;
+    var SEED0 = $seed;
+    var PAL = ['#f97316','#fbbf24','#10b981','#38bdf8','#a78bfa','#f43f5e','#84cc16','#e11d48'];
+
+    var map = L.map('map', { scrollWheelZoom: true }).setView([0, 0], 3);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors', maxZoom: 18
+    }).addTo(map);
+
+    var visitCount = {};
+    var projections = 0;
+    var touched = {};
+    var originUnit = null;
+    var pathLayer = L.layerGroup().addTo(map);
+    var markerLayer = L.layerGroup().addTo(map);
+    var rngState = SEED0 >>> 0;
+
+    function nextRandom() {
+      rngState = (rngState + 0x6D2B79F5) >>> 0;
+      var t = rngState;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    }
+
+    function ramp(t) {
+      t = Math.max(0, Math.min(1, t));
+      var stops = [[0.10,[68,1,84]],[0.35,[59,82,139]],[0.60,[33,145,140]],
+                   [0.82,[94,201,98]],[1.0,[253,231,37]]];
+      for (var i = 0; i < stops.length - 1; i++) {
+        if (t <= stops[i+1][0]) {
+          var f = (t - stops[i][0]) / (stops[i+1][0] - stops[i][0]);
+          var a = stops[i][1], b = stops[i+1][1];
+          return 'rgb(' + Math.round(a[0] + f*(b[0]-a[0])) + ',' +
+                          Math.round(a[1] + f*(b[1]-a[1])) + ',' +
+                          Math.round(a[2] + f*(b[2]-a[2])) + ')';
+        }
+      }
+      return 'rgb(253,231,37)';
+    }
+
+    var unitLayer = L.geoJSON($polys_collection, {
+      style: function(feature) {
+        var visits = visitCount[feature.properties.unit_id] || 0;
+        if (projections > 0 && visits > 0) {
+          return {
+            color: '#0f172a', weight: 0.5,
+            fillColor: ramp(Math.min(1, visits / projections)), fillOpacity: 0.75
+          };
+        }
+        return {
+          color: '#0f172a', weight: 0.5,
+          fillColor: feature.properties.base_color, fillOpacity: 0.55
+        };
+      },
+      onEachFeature: function(feature, layer) {
+        var uid = feature.properties.unit_id;
+        layer.on('click', function() { project(uid); });
+        layer.bindTooltip('#' + uid + '  HSI ' + feature.properties.hsi, { sticky: true });
+        layer.on('mouseover', function() { layer.setStyle({ weight: 2.2 }); });
+        layer.on('mouseout', function() { unitLayer.resetStyle(layer); });
+      }
+    }).addTo(map);
+    map.fitBounds($bounds);
+
+    function stepOnce(unit) {
+      var row = P[unit];
+      if (!row || row.length === 0) return unit;
+      var r = nextRandom(), acc = 0;
+      for (var i = 0; i < row.length; i++) {
+        acc += row[i][1];
+        if (r <= acc) return row[i][0];
+      }
+      return row[row.length - 1][0];
+    }
+
+    function repaintUnits() {
+      unitLayer.eachLayer(function(l) {
+        var id = l.feature.properties.unit_id;
+        var visits = visitCount[id] || 0;
+        if (projections > 0 && visits > 0) {
+          l.setStyle({
+            fillColor: ramp(Math.min(1, visits / projections)), fillOpacity: 0.75
+          });
+        } else {
+          l.setStyle({ fillColor: l.feature.properties.base_color, fillOpacity: 0.55 });
+        }
+      });
+    }
+
+    function project(uid) {
+      if (!CENTS[uid]) return;
+      var nPaths = parseInt(document.getElementById('npaths').value, 10);
+      var nSteps = parseInt(document.getElementById('nsteps').value, 10);
+      pathLayer.clearLayers();
+
+      for (var p = 0; p < nPaths; p++) {
+        var seq = [uid];
+        var u = uid;
+        for (var s = 0; s < nSteps; s++) {
+          u = stepOnce(u);
+          seq.push(u);
+          visitCount[u] = (visitCount[u] || 0) + 1;
+          touched[u] = 1;
+        }
+        var latlngs = seq.filter(function(x) { return CENTS[x]; })
+                        .map(function(x) { return [CENTS[x][1], CENTS[x][0]]; });
+        if (latlngs.length < 2) continue;
+        L.polyline(latlngs, {
+          color: PAL[p % PAL.length], weight: 1.7, opacity: 0.8, dashArray: '4,3'
+        }).addTo(pathLayer);
+      }
+
+      projections += nPaths;
+      originUnit = uid;
+      markerLayer.clearLayers();
+      L.circleMarker([CENTS[uid][1], CENTS[uid][0]], {
+        radius: 8, color: '#0f172a', weight: 2, fillColor: '#10b981', fillOpacity: 0.95
+      }).bindTooltip('Projection origin: unit #' + uid).addTo(markerLayer);
+
+      document.getElementById('origin').textContent = '#' + uid;
+      document.getElementById('drawn').textContent = String(nPaths);
+      document.getElementById('touched').textContent = String(Object.keys(touched).length);
+      repaintUnits();
+    }
+
+    function clearAll() {
+      pathLayer.clearLayers();
+      markerLayer.clearLayers();
+      visitCount = {};
+      touched = {};
+      projections = 0;
+      originUnit = null;
+      document.getElementById('origin').textContent = 'none';
+      document.getElementById('drawn').textContent = '0';
+      document.getElementById('touched').textContent = '0';
+      repaintUnits();
+    }
+
+    document.getElementById('npaths').addEventListener('input', function(e) {
+      document.getElementById('npaths_lbl').textContent = e.target.value;
+    });
+    document.getElementById('nsteps').addEventListener('input', function(e) {
+      document.getElementById('nsteps_lbl').textContent = e.target.value;
+    });
+    document.getElementById('reroll').addEventListener('click', function() {
+      if (originUnit !== null) {
+        rngState = (SEED0 + Math.floor(Math.random() * 1e6)) >>> 0;
+        project(originUnit);
+      }
+    });
+    document.getElementById('clear').addEventListener('click', clearAll);
+  </script>
+</body>
+</html>"""
+
+    return LeafletMap(
+        html_content,
+        title = title,
+        width = width,
+        height = height,
+        metadata = Dict(
+            :n_units => S,
+            :n_paths => n_paths,
+            :n_steps => n_steps,
+            :seed => seed,
+            :conditioning => "forward_from_origin_only",
+        )
+    )
+end
+

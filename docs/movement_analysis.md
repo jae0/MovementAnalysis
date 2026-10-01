@@ -22,7 +22,7 @@ The framework is organized into six cohesive phases:
    │      - Joint Negative Binomial survey density & telemetry model
    ▼
 [Phase 3] Stochastic Transition Kernel Construction
-   │      - Group-stratified advection-diffusion-taxis extraction
+   │      - Pooled advection-diffusion-taxis extraction
    │      - Time-varying (monthly) kernel construction from seasonal HSI
    ▼
 [Phase 4] Trajectory & Corridor Reconstruction
@@ -58,12 +58,16 @@ Loads empirical mark-recapture data (e.g. Scotian Shelf snow crab) or generates
 synthetic multi-segment telemetry histories with known ground truth. Each
 observation pair records:
 
+JLD2 inputs work without R. R serialized inputs (`.rds`, `.rda`, `.rdz`, `.qs`)
+require the optional `RCall` dependency and an available R installation; load
+`RCall` in the active Julia environment to activate R-format support.
+
 - `release`, `recapture`: mesh node indices.
 - `k`: elapsed time steps (derived from `Δt / dt` where `dt` is the time
   resolution, e.g. `1/365.25` for daily).
 - `rel_time`: decimal-year timestamp of release (e.g. `2018.583 ≈ Aug 2018`),
   used to select the correct monthly HSI slice during path reconstruction.
-- `sex`, `mat`: biological group covariates.
+- `sex`, `mat`: descriptive demographic observations, not model strata.
 
 #### 1b. Hexagonal Resharding
 
@@ -125,52 +129,43 @@ typeof(gamma), ...)` to preserve dual-number partials.
 
 #### Model Parameters
 
-The model samples three physical parameters per group $g$:
+The model samples three pooled physical parameters:
 
-- `velocity[g]` $\sim \text{Truncated-Normal}(0.3, 0.2; 0, 0.95)$: raw
+- `velocity` $\sim \text{Truncated-Normal}(0.3, 0.2; 0, 0.95)$: raw
   advection rate.
-- `diffusion[g]` $\sim \text{Truncated-Normal}(0.1, 0.2; 0, \infty)$: raw
+- `diffusion` $\sim \text{Truncated-Normal}(0.1, 0.2; 0, \infty)$: raw
   isotropic diffusion rate.
-- `gamma[g]` $\sim \text{Normal}(1.0, 1.0)$: habitat gradient responsiveness.
+- `gamma` $\sim \text{Normal}(1.0, 1.0)$: habitat gradient responsiveness.
+
+There is no demographic stratification: a single parameter set is shared by
+every observation, and `sex` / `mat` are carried only as descriptive metadata.
 
 Derived parameters:
 
-$$\alpha_g = \frac{v_g}{v_g + D_g + \epsilon}, \qquad
-  \rho_g = \frac{1}{1 + v_g + D_g + \epsilon}$$
+$$\alpha = \frac{v}{v + D + \epsilon}, \qquad
+  \rho = \frac{1}{1 + v + D + \epsilon}$$
 
 where $\epsilon = 10^{-6}$ avoids division by zero.
 
 #### Likelihood (Discrete-Time Telemetry)
 
 $$\log \mathcal{L}(\mathbf{y}_{1:T} \mid \theta) =
-  \sum_{t=1}^{T-1} \log [T_g^{k_t}]_{y_t, y_{t+1}}$$
+  \sum_{t=1}^{T-1} \log [T^{k_t}]_{y_t, y_{t+1}}$$
 
-where $T_g^k$ is the $k$-step matrix power of the group-$g$ transition kernel
+where $T^k$ is the $k$-step matrix power of the pooled transition kernel
 and $(y_t, y_{t+1})$ are the release/recapture node indices of observation $t$.
 
 **HSI in MCMC**: the Turing model uses the climatological mean `hsi_vec`
-(temporal average across all months). This is intentional — parameters
-$(v_g, D_g, \gamma_g)$ are global; conditioning on a time-specific HSI during
+(temporal average across all months). This is intentional — the parameters
+$(v, D, \gamma)$ are global; conditioning on a time-specific HSI during
 HMC would require a different kernel per observation, making gradient
 evaluation infeasible. Time-varying HSI is applied post-estimation during
 path reconstruction and kernel construction (Phase 3–4).
 
-#### Continuous-Time SSA Telemetry Model
-
-Alternatively, fits parameters governing a spatial Markov jump process. The
-transition probability matrix over elapsed time $\Delta t$ is:
-
-$$T(\Delta t) = \exp(Q_g \Delta t)$$
-
-where $Q_g$ is the infinitesimal advection-diffusion-taxis generator.
-Evaluated via the Uniformization (Poisson-Krylov) algorithm applied to a
-sparse initial state vector to avoid forming the full matrix exponential.
-
 #### Joint Density-Movement Model
 
 Integrates scientific survey counts $C_s$ via Negative Binomial observation
-likelihood coupled to habitat suitability $H_s$. Compatible with both
-discrete-time and SSA transition kernels.
+likelihood coupled to habitat suitability $H_s$.
 
 ---
 
@@ -178,19 +173,19 @@ discrete-time and SSA transition kernels.
 
 Function: `extract_transition_kernels(loaded, fitted, params)`
 
-Constructs group-specific stochastic transition matrices
-$T_g \in \mathbb{R}^{S \times S}$:
+Constructs a single pooled stochastic transition matrix
+$T \in \mathbb{R}^{S \times S}$:
 
-$$T_g = (1 - \rho_g) \left[ (1 - \alpha_g) T_{\text{diff}} +
-    \alpha_g A_g(H) \right] + \rho_g I$$
+$$T = (1 - \rho) \left[ (1 - \alpha) T_{\text{diff}} +
+    \alpha A(H) \right] + \rho I$$
 
 where:
 
 - $T_{\text{diff}, ij} = W_{ij} / \sum_k W_{ik}$ is isotropic diffusion over
   adjacency $W$.
-- $A_{g, ij} = W_{ij} \exp(\gamma_g (H_j - H_i)) /
-  \sum_k W_{ik} \exp(\gamma_g (H_k - H_i))$ is directional habitat-taxis.
-- $\rho_g \in [0, 1)$ governs local patch residence.
+- $A_{ij} = W_{ij} \exp(\gamma (H_j - H_i)) /
+  \sum_k W_{ik} \exp(\gamma (H_k - H_i))$ is directional habitat-taxis.
+- $\rho \in [0, 1)$ governs local patch residence.
 
 The posterior mean kernel uses `loaded.hsi_vec` (climatological mean). When
 `loaded.monthly_hsi` is non-empty, Phase 4 (path reconstruction) builds
@@ -312,13 +307,15 @@ during path reconstruction.
 
 ## 4. Configuration Parameters
 
-Generated by `movement_parameters_default()` or `movement_parameters_snowcrab()`,
-and customized by merging overrides:
+Loaded from `configs/default.toml` or `configs/snowcrab.toml` by
+`movement_parameters_default()` and `movement_parameters_snowcrab()`. Snow-crab
+settings overlay the generic defaults. CLI options override the selected config.
+TOML keys use the exact internal parameter names; unknown names are rejected.
 
 | Parameter | Type | Default | Description |
 |:----------|:-----|:--------|:------------|
 | `data_source` | `Symbol` | `:simulate` | `:simulate` or `:snowcrab` |
-| `model_mode` | `String` | `"telemetry"` | `"telemetry"`, `"telemetry_and_survey"`, `"ssa"`, `"both"` |
+| `model_mode` | `String` | `"telemetry"` | `"telemetry"`, `"telemetry_and_survey"`, `"agent"`, `"both"` |
 | `reshard_hex` | `Bool` | `false` | Reshard domain to fine hexagons via LibGEOS |
 | `hex_radius_km` | `Float64` | `10.0` | Cell radius for resharded hexagons (km) |
 | `use_hydrodynamics` | `Bool` | `false` | Ingest 3D hydrodynamic velocity & bathymetry |
@@ -339,6 +336,10 @@ and customized by merging overrides:
 | `fine_radius_km` | `Float64` | `8.0` | Cell radius for refined coastal units (km) |
 | `dynamic_kernels` | `Bool` | `false` | Time-varying dynamic transition kernels |
 | `hmm_smoothing` | `Bool` | `false` | Multi-segment HMM Viterbi trajectory smoothing |
+| `n_agent_projections` | `Int` | `200` | Synthetic agents to forward-project in `"agent"` mode |
+| `persistence` | `Float64` | `0.0` | Directional persistence for agents, $\kappa$ (0 = memoryless) |
+| `rest_coupling` | `Float64` | `0.0` | Couple the stay probability to local HSI advantage |
+| `rest_advantage_form` | `Symbol` | `:difference` | Advantage measure, see [Section 7.3](#73-habitat-coupled-residency) |
 | `n_samples` | `Int` | `200` | Turing MCMC posterior draw count |
 | `n_warmup` | `Int` | `100` | Turing MCMC warmup (NUTS adaptation) iterations |
 | `seed` | `Int` | `42` | Random number generator seed |
@@ -363,6 +364,9 @@ julia --project=. scripts/run_movement.jl --simulate
 # Snow crab analysis
 julia --project=. scripts/run_movement.jl --snowcrab
 
+# Select a TOML configuration explicitly
+julia --project=. scripts/run_movement.jl --config configs/snowcrab.toml
+
 # Snow crab with depth encoding (hsi_only default) and fine hexagonal mesh
 julia --project=. scripts/run_movement.jl \
   --snowcrab --depth-range 25,400 --hex --hex-radius 5.0
@@ -382,8 +386,13 @@ julia --project=. scripts/run_movement.jl \
 |:---------|:----------|
 | `--simulate` | `data_source = :simulate` |
 | `--snowcrab` | Snow crab preset |
+| `--config <path>` | TOML config file layered over the selected preset |
 | `--model-mode <mode>` | `model_mode` |
-| `--ssa` | `model_mode = "ssa"` |
+| `--agent` | `model_mode = "agent"` |
+| `--n-agents <N>` | `n_agent_projections` |
+| `--persistence <k>` | `persistence` (directional persistence, $\kappa$) |
+| `--rest-coupling <b>` | `rest_coupling` (habitat-coupled stay probability) |
+| `--rest-advantage-form <f>` | `rest_advantage_form` (`difference`, `ratio`, `log_ratio`, `exp_difference`, `exp_ratio`, `exp_log_ratio`) |
 | `--hex` / `--reshard-hex` | `reshard_hex = true` |
 | `--hex-radius <km>` | `hex_radius_km` |
 | `--depth-range <min,max>` | `depth_range = (min, max)` |
@@ -470,21 +479,176 @@ params = merge(movement_parameters_default(), (
 results = run_movement_analysis(params)
 ```
 
+### Example 5: Forward Projection with Habitat-Coupled Residency
+
+```julia
+using MovementAnalysis
+
+params = merge(movement_parameters_default(), (
+    model_mode         = "agent",
+    n_agent_projections = 400,
+    # Agents carry a heading, so they commit to a direction instead of turning
+    # at every step.
+    persistence        = 3.0,
+    # Stay probability rises where a unit is locally better than its neighbours.
+    rest_coupling      = 0.6,
+    rest_advantage_form = :log_ratio,
+))
+
+results = run_movement_analysis(params)
+
+# Unconditioned space use: which units an animal is likely to occupy at all,
+# as opposed to the recapture-conditioned bridge distribution.
+su = results.agent_space_use
+top = sortperm(su.visit_probability; rev = true)[1:10]
+
+# Interactive explorer: click a unit to project from it and accumulate
+# visit frequency.
+map_path = joinpath(params.output_dir, "forward_projection_map.html")
+```
+
 ---
 
 ## 7. Agent-Based Model (ABM)
 
-Function: `simulate_agent_trajectories(n_agents, start_nodes, groups, transition_kernels, n_steps)`
+### 7.1 What it is, and what it is not
 
-Simulates individual discrete animals undergoing advective-diffusive movement
-across the hexagonal mesh. At each step, an agent at node $i$ samples a
-transition from the Categorical distribution defined by row $i$ of $T_g$.
+Despite the historical name, this component is a **forward projector**, not an
+alternative model. It consumes the same pooled kernel as everything else,
+introduces no parameters, and adds no likelihood term. The one thing it does that
+nothing else in the codebase does is project **forward**:
 
-Serves two purposes:
-1. **Forward simulation**: generates synthetic telemetry datasets with known
-   ground truth.
-2. **ABC inference**: maps physical parameters to simulated trajectories for
-   likelihood-free fitting via spatial summary statistics.
+- `reconstruct_paths_and_diagnostics` bridges release $\to$ recapture conditioned
+  on **both** observed endpoints.
+- The projector starts at a release unit and conditions on **neither** endpoint.
+
+A projected track may therefore visit units a bridge is forced to avoid, which
+makes it the only source of *unconditioned* space-use estimates. Agents are
+independent: no interaction, memory, mortality, or agent-level state beyond
+position. Section 7.4 lists what a genuinely agent-based formulation could add.
+
+### 7.2 Functions
+
+```text
+simulate_agent_trajectories(n_agents, start_nodes, n_steps, transition_kernel;
+                            seed, centroids, persistence, coord_space)
+forward_project_agents(release_nodes, durations; n_agents, transition_kernel,
+                        seed, centroids, persistence)
+forward_space_use(trajectories, n_spatial) -> NamedTuple
+```
+
+`simulate_agent_trajectories` accepts either a single horizon or a **per-agent
+vector** of horizons, so a run can inherit the empirical duration distribution
+instead of an arbitrary fixed step count.
+
+`forward_project_agents` draws start units **with replacement** from an empirical
+release pool and horizons from an empirical duration pool. The agent count is
+therefore a free design choice rather than a by-product of how many animals were
+observed, and increasing it reduces Monte Carlo error without changing the
+underlying distribution.
+
+`forward_space_use` returns per-unit `visit_probability` and `mean_dwell_steps`.
+These are the unconditioned counterparts to the bridge-conditioned residence
+distribution, and are the natural companion to it.
+
+### 7.3 Habitat-Coupled Residency
+
+By default the stay probability is a single global constant `residence` applied
+to every unit. That means an animal on a uniformly good patch has no more reason
+to stay than one on a poor patch, and an animal whose entire neighbourhood is
+worse than where it stands faces the same stay probability as one with much
+better options.
+
+`rest_coupling` makes the stay probability a function of **local habitat
+advantage** over the unit's own neighbourhood. With `rest_coupling = 0.0` the
+kernel is bit-for-bit unchanged, so this is a strict generalisation with an off
+switch.
+
+Let $\bar{h}_{N(i)}$ be the connectivity-weighted mean suitability of unit $i$'s
+neighbours. Six measures are available through `rest_advantage_form`:
+
+| Form | Advantage $A_i$ | How it enters the stay probability |
+|:-----|:-----------------|:----------------------------------|
+| `:difference` | $h_i - \bar{h}_{N(i)}$ | $\rho_i = \mathrm{clamp}(\rho + \beta A_i,\, 0,\, 0.999)$ |
+| `:ratio` | $h_i / \bar{h}_{N(i)} - 1$ | as above |
+| `:log_ratio` | $\log h_i - \log \bar{h}_{N(i)}$ | as above |
+| `:exp_difference` | $h_i - \bar{h}_{N(i)}$ | $\rho_i = \mathrm{logistic}(\mathrm{logit}(\rho) + \beta A_i)$ |
+| `:exp_ratio` | $h_i / \bar{h}_{N(i)} - 1$ | as above |
+| `:exp_log_ratio` | $\log h_i - \log \bar{h}_{N(i)}$ | as above |
+
+The additive forms are more interpretable; the exponential forms apply the coupling
+as a bounded logit shift and so do not saturate at the $0.999$ ceiling, which
+matters when $\beta$ is large. The ratio and log-ratio forms are scale-free and so
+preferable when HSI is scaled differently between meshes.
+
+**Guards.** Habitat is first passed through `sanitise_hsi`, which forces finite
+values into $[0, 1]$ and replaces `NaN` / $\pm\infty$ with the mean of the finite
+entries (or $0.0$ if none are finite). A unit with no usable neighbourhood gets
+**zero** advantage, so its stay probability reverts to the global `residence`
+rather than to an arbitrary number — a ratio is never formed against a zero or
+non-finite denominator. `rest_coupling == 0` short-circuits *before* any
+arithmetic, because $0 \times \infty$ is `NaN`. The logit shift is clamped to
+$\pm 20$ and the result clamped to $[0, 0.999]$ as a final backstop.
+
+### 7.4 Directional Persistence
+
+The pooled kernel is *memoryless*: $P_{ij}$ depends only on the current unit, the
+candidate, and the habitat field, so an animal that has just moved north-east is
+given the same step distribution as one arriving from the south-west. Real
+trajectories are directionally autocorrelated, and no first-order kernel can
+represent that however its parameters are tuned.
+
+`build_persistent_transition_kernel` builds a second-order chain over
+(position, heading) states of size $S H$:
+
+```math
+T[(i,h),(j,h')] \propto P_{ij} \exp\left(\kappa \cos(\beta_{ij} - \theta_h)\right)
+```
+
+where $\beta_{ij}$ is the bearing of the step, $\theta_h$ the centre of heading
+bin $h$, and $\kappa$ the `persistence` parameter. Heading turning and movement are
+coupled through geometry, so a heading is only reachable if a neighbour lies in
+that direction. $\kappa = 0$ makes the factor constant and the heading-uniform
+unit marginal *exactly* the first-order kernel, so this too is a strict
+generalisation. `simulate_agent_trajectories(persistence = ...)` applies the same
+reweighting per agent, which is what makes individual trajectories actually turn.
+
+`persistence_gain_report` scores held-out events over a grid of $\kappa$ so the
+extra parameter can be judged rather than assumed; it forms $T^k$ explicitly and
+is therefore limited to small graphs.
+
+Note that integrating $\kappa$ into the fitted telemetry likelihood at full mesh
+resolution is not currently affordable — the state space grows by a factor $H$ and
+each likelihood evaluation would pay for $T^k$ — and is not attempted.
+
+### 7.5 Interactive forward-projection explorer
+
+`leaflet_forward_projection_map(P, au; hsi, n_paths, n_steps, seed, ...)` emits a
+self-contained Leaflet application that embeds the kernel and walks it
+client-side. Clicking a unit projects trajectories forward from it, and visit
+counts accumulate across clicks into a per-unit expected visit probability, with
+the polygon fill switching to that ramp. This is the interactive form of the
+unconditioned space-use estimate, and it is the complement of the two-click
+corridor explorer: every route that map draws is conditioned on arriving at the
+chosen recapture unit, whereas this one conditions on nothing. Projection
+randomness comes from a seeded in-page generator, so a given `seed`, `n_paths`,
+and `n_steps` reproduce the same trajectories.
+
+### 7.6 What a genuinely agent-based formulation could add
+
+Assessed and deliberately not implemented, because each changes the model rather
+than the plumbing:
+
+- **Particle filter over the latent track.** `predict_path` returns a single
+  Viterbi MAP route, so corridors currently rest on point estimates. Propagating
+  a posterior over intermediate positions would give corridor uncertainty MAP
+  decoding cannot. Partially overlaps the existing ensemble reconstruction.
+- **Individual-level random effects.** A movement-type mixture is a real answer
+  to the single pooled parameter set and is distinct from the demographic
+  stratification removed in section 1, but it is weakly identifiable from a few
+  hundred animals and can absorb model misspecification.
+- **Density dependence, energetics, mortality, stage structure.** Not
+  identifiable with this dataset.
 
 ---
 
@@ -502,6 +666,8 @@ output/
 ├── movement_path_metrics.csv                 # Displacement, tortuosity, bearing
 ├── movement_tracks_animated.html             # Animated Leaflet trajectory playback
 ├── movement_corridors_heatmap.html           # Markov bridge transition corridors
+├── forward_projection_map.html               # Click-to-project explorer ("agent" mode)
+├── agent_projection_summary.csv              # Per-agent projection metrics
 ├── movement_domain_bottlenecks.html          # Pinch-points and bottleneck index
 ├── movement_current_density.html             # Circuit theory current flux
 ├── movement_stochastic_circuit.html          # Posterior current density with HSI error
@@ -533,8 +699,18 @@ output/
 7. **Bayesian Posterior Predictive Checks**: Gelman, A., Carlin, J. B., Stern,
    H. S., Dunson, D. B., Vehtari, A., & Rubin, D. B. (2013). *Bayesian Data
    Analysis* (3rd ed.). Chapman and Hall/CRC.
-8. **Master Equation**: Nordsieck, A., Lamb, W. E., & Uhlenbeck, G. E. (1940).
-   On the theory of cosmic-ray showers I. *Physica*, 7(4), 344–360.
-9. **Uniformization (Poisson-Krylov)**: Grassmann, W. K. (1977). Transient
-   solutions in Markovian queuing systems. *Computers & Operations Research*,
-   4(1), 47–53.
+8. **Habitat-Corridor Theory**: McRae, B. H. (2006). A signed graph weighting
+   function for biasing movement towards better habitat. *Ecography*, 29(1),
+   51–60. Notes the *resistance* form $r_{ij} = r_0 + r_b \exp(-\beta h_{ij})$ used
+   here for habitat-coupled residency, contrasted with the *conductance* form.
+9. **Circuit Conductance**: Keitt, T. H. (2004). A landscape basis for resistance
+   and conductance in ecological network analysis. *Proceedings of the National
+   Academy of Sciences*, 101(17), 6174–6179.
+10. **Correlated Random Walks**: Bergman, E. J., et al. (1999). Using multivector
+    methods to analyze animal movement and habitat selection. *Ecography*, 22(4),
+    370–384. Motivates the second-order (position, heading) chain used for
+    directional persistence.
+11. **Bugs and Recurrences in Stochastic Simulation**: Numerical Recipes / the
+    standard guard practice of sanitising non-finite inputs before forming ratios;
+    applied here in `sanitise_hsi` and the zero-coupling short circuit that avoids
+    $0 \times \infty$.

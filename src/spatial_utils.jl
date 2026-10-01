@@ -1398,6 +1398,38 @@ get_polygon_area(s_x::AbstractVector, s_y::AbstractVector) =
 
 
 """
+    _infer_coord_space(coords) -> Bool
+
+Conservative inference of whether `coords` are geographic `(lon, lat)` degrees.
+
+Returns `true` only when the points lie inside the WGS84 bounding box *and* fall
+in one of the known marine regions. A magnitude test alone is not sufficient: a
+planar frame in kilometres routinely satisfies `[-180, 180]`, so treating it as
+degrees collapses distances and can pick the wrong geometry family when matching
+a source mesh against a destination mesh. Callers that know the space must state
+it rather than relying on this.
+"""
+function _infer_coord_space(coords)::Bool
+    xs = Float64[]
+    ys = Float64[]
+    for pt in coords
+        length(pt) >= 2 || continue
+        (isnan(pt[1]) || isnan(pt[2])) && continue
+        push!(xs, Float64(pt[1]))
+        push!(ys, Float64(pt[2]))
+    end
+    (isempty(xs) || isempty(ys)) && return false
+    min_x, max_x = minimum(xs), maximum(xs)
+    min_y, max_y = minimum(ys), maximum(ys)
+
+    (min_y < -90.0 || max_y > 90.0 || min_x < -180.0 || max_x > 180.0) && return false
+
+    return (min_x <= -20.0 && max_x <= -10.0 && min_y >= 30.0 && max_y <= 85.0) ||
+           (min_x >= 100.0 && max_x <= 180.0 && min_y >= -50.0 && max_y <= 70.0) ||
+           (min_x >= -180.0 && max_x <= -50.0 && min_y >= -60.0 && max_y <= 75.0)
+end
+
+"""
     compute_network_transfer_matrix(
         au_src::NamedTuple,
         au_dest::NamedTuple;
@@ -1458,20 +1490,21 @@ function compute_network_transfer_matrix(
     end
 
     # Determine coordinate scale (geographic degrees vs projected planar km)
-    is_geo_coords(pts) = !isempty(pts) &&
-        all(abs(c[1]) <= 180.5 && abs(c[2]) <= 90.5 for c in pts)
-    src_is_geo = is_geo_coords(src_cents)
+    src_is_geo = _infer_coord_space(src_cents)
 
     resolve_au_geom(au, ref_geo) = begin
-        if ref_geo && hasproperty(au, :polygons_lonlat) && !isempty(au.polygons_lonlat)
+        if ref_geo && hasproperty(au, :polygons_lonlat) &&
+           au.polygons_lonlat !== nothing && !isempty(au.polygons_lonlat)
             cents = hasproperty(au, :centroids_lonlat) ?
                 au.centroids_lonlat : _extract_cents(au)
             return (polygons = au.polygons_lonlat, centroids = cents)
-        elseif !ref_geo && hasproperty(au, :polygons_km) && !isempty(au.polygons_km)
+        elseif !ref_geo && hasproperty(au, :polygons_km) &&
+               au.polygons_km !== nothing && !isempty(au.polygons_km)
             cents = hasproperty(au, :centroids_km) ?
                 au.centroids_km : _extract_cents(au)
             return (polygons = au.polygons_km, centroids = cents)
-        elseif hasproperty(au, :polygons) && !isempty(au.polygons)
+        elseif hasproperty(au, :polygons) &&
+               au.polygons !== nothing && !isempty(au.polygons)
             cents = _extract_cents(au)
             return (polygons = au.polygons, centroids = cents)
         else

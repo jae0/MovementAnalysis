@@ -10,16 +10,14 @@ Version: v1.0.0
 """
     TelemetryData <: AbstractMatrix{Float64}
 
-Structured container for mark-recapture telemetry observation events. Supports categorical
-group-stratified transition modeling while maintaining matrix indexing compatibility.
+Structured container for mark-recapture telemetry observation events while maintaining
+matrix indexing compatibility.
 
 # Fields
 - `releases`: Vector of unit indices at initial detection / release (1-indexed).
 - `recaps`: Vector of unit indices at subsequent detection / recapture (1-indexed).
 - `ks`: Elapsed discrete time intervals between consecutive detections.
-- `groups`: Biological stratum / group identifiers (1-indexed integers).
 - `covariates`: Individual-level continuous covariates.
-- `G`: Total count of distinct biological strata / groups.
 - `max_k`: Maximum observed elapsed transition step count.
 - `matrix`: `Matrix{Float64}` representation of size `(N, 4)`.
 """
@@ -27,9 +25,7 @@ struct TelemetryData <: AbstractMatrix{Float64}
     releases::Vector{Int}
     recaps::Vector{Int}
     ks::Vector{Int}
-    groups::Vector{Int}
     covariates::Vector{Float64}
-    G::Int
     max_k::Int
     matrix::Matrix{Float64}
 end
@@ -40,143 +36,87 @@ Base.getindex(td::TelemetryData, i::Int, j::Int) = td.matrix[i, j]
 Base.getindex(td::TelemetryData, i::Int) = td.matrix[i]
 Base.IndexStyle(::Type{TelemetryData}) = IndexLinear()
 
-TelemetryData(input::Union{DataFrame, AbstractMatrix}; kwargs...) =
-    _process_telemetry_data(input; kwargs...)
+TelemetryData(input::Union{DataFrame, AbstractMatrix}) =
+    _process_telemetry_data(input)
 
 """
-    _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
+    _process_telemetry_data(telemetry_input)
 
 Transforms input telemetry data (DataFrame or Matrix) into a validated `TelemetryData`
 structure for movement modeling. Supports both longitudinal event sequences and
 pre-aggregated transition event pairs.
 """
-function _process_telemetry_data(telemetry_input; mark_recapture_G=nothing)
-    if telemetry_input isa TelemetryData
-        return telemetry_input
-    elseif telemetry_input isa AbstractMatrix
-        mat = Matrix{Float64}(telemetry_input)
-        n_rows = size(mat, 1)
-        rel = n_rows > 0 ? Int.(mat[:, 1]) : Int[]
-        rec = n_rows > 0 && size(mat, 2) >= 2 ? Int.(mat[:, 2]) : Int[]
-        ks  = n_rows > 0 && size(mat, 2) >= 3 ? Int.(mat[:, 3]) : Int[]
-        cov = n_rows > 0 && size(mat, 2) >= 4 ? mat[:, 4] : zeros(Float64, n_rows)
-        grp = if size(mat, 2) >= 5
-            Int.(mat[:, 5])
-        elseif !isnothing(mark_recapture_G) && mark_recapture_G > 1 &&
-               all(c -> isinteger(c) && c >= 1, cov)
-            Int.(cov)
-        else
-            ones(Int, n_rows)
-        end
-        G_val = isnothing(mark_recapture_G) ? (isempty(grp) ? 1 : maximum(grp)) :
-            Int(mark_recapture_G)
-        max_k_val = isempty(ks) ? 1 : maximum(ks)
-        return TelemetryData(rel, rec, ks, grp, cov, G_val, max_k_val, mat)
+function _process_telemetry_data(telemetry_input)
+    telemetry_input isa TelemetryData && return telemetry_input
 
+    if telemetry_input isa AbstractMatrix
+        size(telemetry_input, 2) >= 3 || throw(ArgumentError(
+            "Telemetry matrix must have release, recapture, and step columns."
+        ))
+        matrix = Matrix{Float64}(telemetry_input)
+        releases = Int.(matrix[:, 1])
+        recaps = Int.(matrix[:, 2])
+        ks = Int.(matrix[:, 3])
+        covariates = size(matrix, 2) >= 4 ? matrix[:, 4] : zeros(size(matrix, 1))
     elseif telemetry_input isa DataFrame
         df = telemetry_input
-        has_rel = hasproperty(df, :release) || hasproperty(df, :releases)
-        has_rec = hasproperty(df, :recapture) || hasproperty(df, :recaps)
-
-        if has_rel && has_rec
-            rel_col = hasproperty(df, :release) ? :release : :releases
-            rec_col = hasproperty(df, :recapture) ? :recapture : :recaps
-            k_col = hasproperty(df, :k) ? :k : (hasproperty(df, :ks) ? :ks : nothing)
-            grp_col = hasproperty(df, :group) ? :group :
-                (hasproperty(df, :groups) ? :groups : nothing)
-            cov_col = hasproperty(df, :covariate) ? :covariate :
-                (hasproperty(df, :individual_covariate) ? :individual_covariate : nothing)
-
-            rel = Int.(df[!, rel_col])
-            rec = Int.(df[!, rec_col])
-            ks  = !isnothing(k_col) ? Int.(df[!, k_col]) : ones(Int, nrow(df))
-            grp = !isnothing(grp_col) ? Int.(df[!, grp_col]) : ones(Int, nrow(df))
-            cov = !isnothing(cov_col) ? Float64.(df[!, cov_col]) : zeros(Float64, nrow(df))
-            G_val = isnothing(mark_recapture_G) ? (isempty(grp) ? 1 : maximum(grp)) :
-                Int(mark_recapture_G)
-            max_k_val = isempty(ks) ? 1 : maximum(ks)
-            mat = hcat(Float64.(rel), Float64.(rec), Float64.(ks), cov)
-            return TelemetryData(rel, rec, ks, grp, cov, G_val, max_k_val, mat)
-        end
-
-        time_col = if hasproperty(df, :time)
-            :time
-        elseif hasproperty(df, :timestamp)
-            :timestamp
+        if (hasproperty(df, :release) || hasproperty(df, :releases)) &&
+           (hasproperty(df, :recapture) || hasproperty(df, :recaps))
+            release_col = hasproperty(df, :release) ? :release : :releases
+            recapture_col = hasproperty(df, :recapture) ? :recapture : :recaps
+            releases = Int.(df[!, release_col])
+            recaps = Int.(df[!, recapture_col])
+            ks = hasproperty(df, :k) ? Int.(df.k) :
+                 (hasproperty(df, :ks) ? Int.(df.ks) : ones(Int, nrow(df)))
+            covariates = hasproperty(df, :covariate) ? Float64.(df.covariate) :
+                         (hasproperty(df, :individual_covariate) ?
+                          Float64.(df.individual_covariate) : zeros(nrow(df)))
         else
-            _detect_time_column(df; allow_nothing=true)
-        end
+            time_col = hasproperty(df, :time) ? :time :
+                       (hasproperty(df, :timestamp) ? :timestamp : nothing)
+            tag_col = hasproperty(df, :tagid) ? :tagid :
+                      (hasproperty(df, :tag_id) ? :tag_id : nothing)
+            spatial_col = hasproperty(df, :s_idx) ? :s_idx : nothing
+            (time_col !== nothing && tag_col !== nothing && spatial_col !== nothing) ||
+                throw(ArgumentError(
+                    "Telemetry DataFrame must contain event pairs or :tagid, :s_idx, and :time/:timestamp."
+                ))
 
-        tag_col = nothing
-        for cand in [:tagid, :tag_id, :tag, :id, :individual_id, :animal_id]
-            if hasproperty(df, cand)
-                tag_col = cand
-                break
+            releases = Int[]
+            recaps = Int[]
+            ks = Int[]
+            covariates = Float64[]
+            for subset in groupby(df, tag_col)
+                sorted = sort(subset, time_col)
+                for i in 2:nrow(sorted)
+                    t0 = sorted[i - 1, time_col]
+                    t1 = sorted[i, time_col]
+                    t0_value = t0 isa Dates.TimeType ?
+                        Float64(Dates.datetime2epochms(DateTime(t0))) / 86400000.0 : Float64(t0)
+                    t1_value = t1 isa Dates.TimeType ?
+                        Float64(Dates.datetime2epochms(DateTime(t1))) / 86400000.0 : Float64(t1)
+                    push!(releases, Int(sorted[i - 1, spatial_col]))
+                    push!(recaps, Int(sorted[i, spatial_col]))
+                    push!(ks, max(1, round(Int, t1_value - t0_value)))
+                    if hasproperty(sorted, :individual_covariate)
+                        push!(covariates, Float64(sorted[i - 1, :individual_covariate]))
+                    elseif hasproperty(sorted, :covariate)
+                        push!(covariates, Float64(sorted[i - 1, :covariate]))
+                    else
+                        push!(covariates, 0.0)
+                    end
+                end
             end
         end
-
-        s_col = if hasproperty(df, :s_idx)
-            :s_idx
-        else
-            _detect_spatial_unit_column(df; allow_nothing=true)
-        end
-
-        if isnothing(time_col) || isnothing(tag_col) || isnothing(s_col)
-            error("Telemetry DataFrame must contain either event pairs " *
-                  "(:release, :recapture) or longitudinal observations " *
-                  "(tag, spatial unit, and time).")
-        end
-
-        releases = Int[]
-        recaps = Int[]
-        ks = Int[]
-        groups = Int[]
-        covariates = Float64[]
-
-        grp_col = hasproperty(df, :group) ? :group :
-            (hasproperty(df, :groups) ? :groups : nothing)
-        cov_col = hasproperty(df, :individual_covariate) ? :individual_covariate :
-            (hasproperty(df, :covariate) ? :covariate : nothing)
-
-        _t_val(v) = v isa Dates.TimeType ?
-            Float64(Dates.datetime2epochms(DateTime(v))) / 86400000.0 : Float64(v)
-
-        gdf = groupby(df, tag_col)
-        for sub_df in gdf
-            if nrow(sub_df) < 2
-                continue
-            end
-            sub_sorted = sort(sub_df, [order(time_col)])
-
-            for i in 1:(nrow(sub_sorted) - 1)
-                row_rel = sub_sorted[i, :]
-                row_rec = sub_sorted[i+1, :]
-                push!(releases, Int(getproperty(row_rel, s_col)))
-                push!(recaps, Int(getproperty(row_rec, s_col)))
-                t_rel = _t_val(getproperty(row_rel, time_col))
-                t_rec = _t_val(getproperty(row_rec, time_col))
-                push!(ks, max(1, round(Int, t_rec - t_rel)))
-                grp_val = !isnothing(grp_col) ? Int(getproperty(row_rel, grp_col)) : 1
-                push!(groups, grp_val)
-                cov_val = !isnothing(cov_col) ? Float64(getproperty(row_rel, cov_col)) : 0.0
-                push!(covariates, cov_val)
-            end
-        end
-
-        n_events = length(releases)
-        mat = if n_events > 0
-            hcat(Float64.(releases), Float64.(recaps), Float64.(ks), covariates)
-        else
-            Matrix{Float64}(undef, 0, 4)
-        end
-        G_val = isnothing(mark_recapture_G) ? (isempty(groups) ? 1 : maximum(groups)) :
-            Int(mark_recapture_G)
-        max_k_val = isempty(ks) ? 1 : maximum(ks)
-        return TelemetryData(releases, recaps, ks, groups, covariates, G_val, max_k_val, mat)
     else
-        error("Unsupported format for mark_recapture_data: $(typeof(telemetry_input)). " *
-              "Expected DataFrame or Matrix.")
+        throw(ArgumentError("Expected TelemetryData, a DataFrame, or a matrix."))
     end
+
+    length(releases) == length(recaps) == length(ks) == length(covariates) ||
+        throw(DimensionMismatch("Telemetry event columns must have equal lengths."))
+    matrix = hcat(Float64.(releases), Float64.(recaps), Float64.(ks), covariates)
+    max_k = isempty(ks) ? 1 : maximum(ks)
+    return TelemetryData(releases, recaps, ks, covariates, max_k, matrix)
 end
 
 """
@@ -744,15 +684,23 @@ function plot_ad_ratio_distribution(advection_field::AbstractVector{<:Real},
     if mode == :leaflet || mode == :html
         return leaflet_ad_ratio_distribution(advection_field, diffusion_field)
     end
-    ratios = advection_field ./ (mean(diffusion_field) .+ 1e-6)
-    plt = Plots.histogram(
-        ratios, bins=25, title="Advection-to-Diffusion Ratio (Péclet-like)",
-        xlabel="Ratio (Advection / Diffusion)", ylabel="Frequency",
-        label="Spatial Units", color=:plum, linecolor=:white
-    )
-    Plots.vline!(plt, [1.0], color=:red, linestyle=:dash, linewidth=2.0, label="Equilibrium
-      Threshold")
-    return plt
+    return _ad_ratio_histogram_via_plots(advection_field, diffusion_field)
+end
+
+"""
+    _ad_ratio_histogram_via_plots(args...)
+
+Fallback for the `mode = :plots` branch of `plot_ad_ratio_distribution`.
+Superseded by a concrete method in `MovementAnalysisPlottingExt` when `Plots` is
+installed; without that backend this reports the missing dependency directly.
+"""
+function _ad_ratio_histogram_via_plots(args...)
+    throw(ArgumentError(
+        "Plotting output requires the optional `Plots` backend, which " *
+        "MovementAnalysis does not depend on by default. Install it with " *
+        "`import Pkg; Pkg.add(\"Plots\")`, or call " *
+        "`plot_ad_ratio_distribution(...; mode = :leaflet)` for HTML output."
+    ))
 end
 
 """
@@ -2491,92 +2439,67 @@ P = (1 - \\rho) \\left[ (1 - \\alpha) T_{\\text{diff}} + \\alpha A \\right] + \\
 # Arguments
 - `W::SparseMatrixCSC`: Spatial adjacency matrix (size ``S \\times S``).
 - `hsi::AbstractVector{<:Real}`: Habitat suitability values per unit (length ``S``).
-- `gamma::Union{Real, AbstractVector{<:Real}}`: Sensitivity of directional advection to
-  the habitat gradient (default 1.0). May be scalar or vector across groups or units.
-- `residence::Union{Real, AbstractVector{<:Real}}`: Probability ``\\rho \\in [0, 1)`` of
-  remaining in current unit (default 0.2). May be scalar or vector across groups or units.
-- `advection::Union{Real, AbstractVector{<:Real}}`: Fraction ``\\alpha \\in [0, 1]`` of
-  directed movement vs random diffusion (default 0.5). May be scalar or vector.
-- `spatial::Bool`: When `true`, vector parameters of length ``S`` are interpreted as
-  spatially varying per unit ``s \\in 1:S``, returning a single ``S \\times S`` matrix.
-  When `false` (default), vector parameters of length ``G`` represent group-level
-  parameters across ``G`` biological groups, returning a `Vector{Matrix{Float64}}`.
+- `gamma::Real`: Sensitivity of directional advection to the habitat gradient.
+- `residence::Real`: Probability ``\\rho \\in [0, 1)`` of remaining in the current unit.
+- `advection::Real`: Fraction ``\\alpha \\in [0, 1]`` of directed movement versus diffusion.
 
 # Returns
-- `Matrix{Float64}`: If all parameters are scalars (or `spatial=true`), dense ``S \\times S``
-  row-stochastic transition probability matrix.
-- `Vector{Matrix{Float64}}`: If any parameter is an `AbstractVector` (and `spatial=false`),
-  vector of ``G`` dense ``S \\times S`` row-stochastic transition matrices.
+- `Matrix{Float64}`: Dense ``S \\times S`` row-stochastic transition probability matrix.
 """
 function construct_stochastic_transition_kernel(
     W::SparseMatrixCSC,
     hsi::AbstractVector{<:Real};
-    gamma::Union{Real, AbstractVector{<:Real}} = 1.0,
-    residence::Union{Real, AbstractVector{<:Real}} = 0.2,
-    advection::Union{Real, AbstractVector{<:Real}} = 0.5,
-    spatial::Bool = false,
+    gamma::Real = 1.0,
+    residence::Real = 0.2,
+    advection::Real = 0.5,
+    rest_coupling::Real = 0.0,
+    rest_advantage_form::Symbol = :difference,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
-)::Union{Matrix{Float64}, Vector{Matrix{Float64}}}
-    S = size(W, 1)
-
-    # 1. Check for vector parameters
-    any_vector = (gamma isa AbstractVector) ||
-                 (residence isa AbstractVector) ||
-                 (advection isa AbstractVector)
-
-    if !any_vector
-        # Standard scalar parameter execution — delegate to highly efficient sparse builder
-        P_sparse = build_sparse_transition_kernel(
-            W, hsi, gamma, residence, advection, land_mask
+)::Matrix{Float64}
+    return Matrix{Float64}(
+        build_sparse_transition_kernel(
+            W, hsi, gamma, residence, advection, land_mask;
+            rest_coupling = rest_coupling,
+            rest_advantage_form = rest_advantage_form,
         )
-        return Matrix{Float64}(P_sparse)
-
-    elseif spatial
-        throw(ArgumentError("spatial=true is unsupported with the sparse builder."))
-
-    else
-        # Group vector mode: construct distinct transition matrix per group g in 1:G
-        v_lengths = [length(p) for p in (gamma, residence, advection) if p isa AbstractVector]
-        G = maximum(v_lengths)
-
-        for (name, p) in (("gamma", gamma), ("residence", residence), ("advection", advection))
-            if p isa AbstractVector && length(p) != G && length(p) != 1
-                throw(DimensionMismatch(
-                    "Parameter `$name` has length $(length(p)), but expected length G=$G or 1."
-                ))
-            end
-        end
-
-        g_vec = gamma isa AbstractVector ?
-            (length(gamma) == 1 ? fill(Float64(gamma[1]), G) : Float64.(gamma)) :
-            fill(Float64(gamma), G)
-        rho_vec = residence isa AbstractVector ?
-            (length(residence) == 1 ? fill(Float64(residence[1]), G) : Float64.(residence)) :
-            fill(Float64(residence), G)
-        adv_vec = advection isa AbstractVector ?
-            (length(advection) == 1 ? fill(Float64(advection[1]), G) : Float64.(advection)) :
-            fill(Float64(advection), G)
-
-        kernels = Vector{Matrix{Float64}}(undef, G)
-        for g in 1:G
-            P_sparse = build_sparse_transition_kernel(
-                W, hsi, g_vec[g], rho_vec[g], adv_vec[g], land_mask
-            )
-            kernels[g] = Matrix{Float64}(P_sparse)
-        end
-        return kernels
-    end
+    )
 end
 
 
-function _spatial_node_distance(c1, c2)::Float64
+"""
+    _spatial_node_distance(c1, c2; coord_space = :unknown) -> Float64
+
+Great-circle or planar distance between two node coordinates, in kilometres.
+
+`coord_space` is authoritative and must be supplied whenever the caller knows it:
+
+- `:geographic` — WGS84 `(lon, lat)` in degrees; the haversine branch is used.
+- `:planar_km` — local metric `(x, y)` in kilometres; the Euclidean branch is
+  used and the result is already in kilometres.
+- `:unknown` — resolved by a conservative inference that accepts degrees only for
+  the known marine regions. Range alone is not evidence of degrees: a planar
+  frame in kilometres almost always falls inside the `[-180, 180]` degree box, and
+  treating such a point as `(lon, lat)` collapses the distance to nearly zero.
+
+Both branches return kilometres. The planar branch assumes its inputs are already
+in kilometres; feeding it metres or degrees silently mislabels the result, so the
+coordinate space must be declared rather than guessed.
+"""
+function _spatial_node_distance(c1, c2; coord_space::Symbol = :unknown)::Float64
     x1, y1 = Float64(c1[1]), Float64(c1[2])
     x2, y2 = Float64(c2[1]), Float64(c2[2])
-    if abs(x1) <= 180.0 && abs(x2) <= 180.0 && abs(y1) <= 90.0 && abs(y2) <= 90.0
-        return haversine_distance(x1, y1, x2, y2)
-    else
-        return sqrt((x1 - x2)^2 + (y1 - y2)^2)
+    space = coord_space
+    if space === :unknown
+        space = _infer_coord_space((c1, c2)) ? :geographic : :planar_km
     end
+    if space === :geographic
+        # haversine_distance returns METRES; every other kilometre-valued call
+        # site divides by 1000. Omitting that here made the geographic branch
+        # 1000x the planar branch, so calibrated resistance distances were
+        # reported in metres while being labelled kilometres.
+        return haversine_distance(x1, y1, x2, y2) / 1000.0
+    end
+    return sqrt((x1 - x2)^2 + (y1 - y2)^2)
 end
 
 """
@@ -2618,6 +2541,77 @@ function _find_navigable_node(
               "nearest marine unit $best_v."
     end
     return best_v
+end
+
+"""
+    _exact_k_max_prob_path(P, u_start, u_end, k; land_mask = nothing, p_min = 1e-12)
+
+Maximum-probability walk of exactly `k` transitions from `u_start` to `u_end`,
+computed as a length-constrained Viterbi trellis in log-probability space.
+
+Only transitions with `P[i, j] > p_min` are admissible, so every returned step
+corresponds to a transition the model actually permits — including a residence
+self-loop, but only where `P[i, i] > 0`.
+
+Returns an empty `Vector{Int}` when no such walk exists. It never pads a
+shorter route with fabricated self-loops and never returns a route whose length
+differs from the requested `k`.
+"""
+function _exact_k_max_prob_path(
+    P::AbstractMatrix{<:Real},
+    u_start::Int,
+    u_end::Int,
+    k::Int;
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    p_min::Real = 1e-12
+)::Vector{Int}
+    k < 0 && return Int[]
+    k == 0 && return u_start == u_end ? [u_start] : Int[]
+
+    S = size(P, 1)
+    P_csc = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
+
+    delta = fill(-Inf, S, k + 1)
+    psi   = zeros(Int, S, k + 1)
+    delta[u_start, 1] = 0.0
+
+    @inbounds for tau in 2:(k + 1)
+        prev = tau - 1
+        for j in 1:S
+            (land_mask !== nothing && land_mask[j]) && continue
+            best_val = -Inf
+            best_prev = 0
+            for ptr in P_csc.colptr[j]:(P_csc.colptr[j+1] - 1)
+                i = P_csc.rowval[ptr]
+                (land_mask !== nothing && land_mask[i]) && continue
+                p_ij = Float64(P_csc.nzval[ptr])
+                p_ij > p_min || continue
+                prev_val = delta[i, prev]
+                isfinite(prev_val) || continue
+                score = prev_val + log(p_ij)
+                if score > best_val
+                    best_val = score
+                    best_prev = i
+                end
+            end
+            if best_prev != 0
+                delta[j, tau] = best_val
+                psi[j, tau]   = best_prev
+            end
+        end
+    end
+
+    isfinite(delta[u_end, k + 1]) || return Int[]
+
+    path = zeros(Int, k + 1)
+    path[k + 1] = u_end
+    @inbounds for tau in (k + 1):-1:2
+        prev = psi[path[tau], tau]
+        prev == 0 && return Int[]
+        path[tau - 1] = prev
+    end
+    path[1] == u_start || return Int[]
+    return path
 end
 
 """
@@ -2682,7 +2676,10 @@ function astar_predict_path(
         throw(ArgumentError("Release unit ($release) and recapture unit ($recapture) must be within 1:$S."))
     end
     if release == recapture
-        return k !== nothing ? fill(release, max(1, k + 1)) : [release]
+        return k === nothing ? [release] :
+               _exact_k_max_prob_path(
+                   P, release, recapture, k; land_mask = land_mask, p_min = p_min
+               )
     end
 
     # Build directed graph and sparse cost matrix
@@ -2753,7 +2750,10 @@ function astar_predict_path(
     u_start = _find_navigable_node(release, cents_vec, land_mask, g)
     u_end   = _find_navigable_node(recapture, cents_vec, land_mask, g)
     if u_start == u_end
-        return k !== nothing ? fill(u_start, max(1, k + 1)) : [u_start]
+        return k === nothing ? [u_start] :
+               _exact_k_max_prob_path(
+                   P, u_start, u_end, k; land_mask = land_mask, p_min = p_min
+               )
     end
 
     has_cents = cents_vec !== nothing && length(cents_vec) == S
@@ -2798,18 +2798,17 @@ function astar_predict_path(
 
     raw_path = vcat([src(e) for e in sp], [dst(last(sp))])
 
-    if k !== nothing && k >= 1
-        m = length(raw_path) - 1
-        if m < k
-            p_self = [Float64(P[u, u]) for u in raw_path]
-            expanded_path = copy(raw_path)
-            while length(expanded_path) < k + 1
-                best_idx = argmax(p_self)
-                insert!(expanded_path, best_idx, expanded_path[best_idx])
-                p_self[best_idx] *= 0.90
-            end
-            return expanded_path
+    if k !== nothing && k >= 1 && length(raw_path) - 1 != k
+        exact = _exact_k_max_prob_path(
+            P, u_start, u_end, k; land_mask = land_mask, p_min = p_min
+        )
+        if isempty(exact)
+            @warn "astar_predict_path: no valid route of exactly $k step(s) " *
+                  "exists between units $u_start and $u_end under the supplied " *
+                  "kernel; the request cannot be satisfied and no path is returned."
+            return Int[]
         end
+        return exact
     end
 
     return raw_path
@@ -3416,6 +3415,7 @@ function astar_stochastic_predict_path(
     node_counts = zeros(Int, S)
     edge_counts = spzeros(Float64, S, S)
     temp = max(1e-6, Float64(temperature))
+    n_failed = 0
 
     for m in 1:M_total
         P_m = if !isnothing(P_samples)
@@ -3444,6 +3444,12 @@ function astar_stochastic_predict_path(
             land_mask = land_mask
         )
 
+        if isempty(p_m)
+            n_failed += 1
+            all_paths[m] = Int[]
+            continue
+        end
+
         all_paths[m] = p_m
         for u in p_m
             node_counts[u] += 1
@@ -3465,6 +3471,12 @@ function astar_stochastic_predict_path(
         end
         path_distances[m] = dist_m
         path_costs[m] = cost_m
+    end
+
+    if n_failed > 0
+        @warn "astar_stochastic_predict_path: $n_failed of $M_total draw(s) admit no " *
+              "valid route from unit $release to unit $recapture for the requested " *
+              "horizon; those draws are excluded from the corridor estimate."
     end
 
     corridor_prob = node_counts ./ Float64(M_total)
@@ -3575,10 +3587,13 @@ function predict_path(
             end
         end
 
+        # Column j of P_csc holds P[i, j] for every predecessor i of j, which is
+        # exactly the incoming-edge layout this trellis needs. Reading column j of
+        # the transpose instead scores P[j, i] against delta[i, :], which optimises
+        # walks through the reversed chain and spuriously reports "no path".
         P_csc = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
-        Pt_csc = SparseMatrixCSC(P_csc') # Transpose for fast incoming edge lookup
 
-        delta = fill(-1e12, S, k + 1)
+        delta = fill(-Inf, S, k + 1)
         psi   = zeros(Int, S, k + 1)
         delta[release, 1] = 0.0
 
@@ -3590,20 +3605,22 @@ function predict_path(
                 end
 
                 best_val = -Inf
-                best_prev = 1
+                best_prev = 0
 
-                col_start = Pt_csc.colptr[j]
-                col_end   = Pt_csc.colptr[j+1] - 1
+                col_start = P_csc.colptr[j]
+                col_end   = P_csc.colptr[j+1] - 1
 
                 for ptr in col_start:col_end
-                    i = Pt_csc.rowval[ptr]
+                    i = P_csc.rowval[ptr]
                     if land_mask !== nothing && land_mask[i]
                         continue
                     end
+                    prev_val = delta[i, prev_tau]
+                    isfinite(prev_val) || continue
 
-                    p_ij = Pt_csc.nzval[ptr]
+                    p_ij = P_csc.nzval[ptr]
                     if p_ij > 1e-15
-                        score = delta[i, prev_tau] + log(p_ij)
+                        score = prev_val + log(p_ij)
                         if score > best_val
                             best_val = score
                             best_prev = i
@@ -3611,26 +3628,29 @@ function predict_path(
                     end
                 end
 
-                if best_val > -Inf
+                if best_prev != 0
                     delta[j, tau] = best_val
                     psi[j, tau]   = best_prev
                 end
             end
         end
 
-        if delta[recapture, k + 1] <= -1e11
+        if !isfinite(delta[recapture, k + 1])
             @warn "Viterbi: no valid marine path of length $k found between " *
-                  "$release and $recapture; falling back to marine A* path."
-            return astar_predict_path(
-                P, release, recapture;
-                centroids = centroids, k = k, land_mask = land_mask
-            )
+                  "$release and $recapture."
+            return Int[]
         end
 
         path = zeros(Int, k + 1)
         path[k + 1] = recapture
         for tau in (k + 1):-1:2
-            path[tau - 1] = psi[path[tau], tau]
+            prev = psi[path[tau], tau]
+            if prev == 0
+                @warn "Viterbi: backpointer chain is broken between $release and " *
+                      "$recapture at horizon $k; no path returned."
+                return Int[]
+            end
+            path[tau - 1] = prev
         end
         return path
     else
@@ -3705,6 +3725,9 @@ intermediate time step ``\\tau \\in \\{0, 1, \\dots, k\\}``:
 # Returns
 - `Matrix{Float64}`: Array of size ``(S, k + 1)`` where column ``\\tau + 1`` gives the spatial
   probability distribution over all ``S`` units at time step ``\\tau``. Each column sums to 1.0.
+  When the endpoints cannot be joined in ``k`` steps the bridge is undefined and an
+  all-``NaN`` matrix is returned rather than a fabricated distribution; callers should
+  detect this with `any(isnan, corridor)` and drop the record.
 """
 function predict_corridor(
     P::AbstractMatrix{<:Real},
@@ -3745,19 +3768,14 @@ function predict_corridor(
     P_total = v_fwd[recapture, k + 1]
 
     if P_total <= 1e-15
-        @warn "Recapture unit $recapture has near-zero reachability from release $release in $k steps."
-        if land_mask !== nothing
-            n_water = count(!, land_mask)
-            w_val = n_water > 0 ? 1.0 / n_water : 1.0 / S
-            for j in 1:S
-                corridor[j, :] .= land_mask[j] ? 0.0 : w_val
-            end
-        else
-            corridor[:, :] .= 1.0 / S
-        end
-        corridor[release, 1] = 1.0
-        corridor[recapture, k + 1] = 1.0
-        return corridor
+        # The bridge conditional is undefined when the endpoints cannot be joined in
+        # k steps. Filling a uniform corridor here would fabricate a space-time
+        # distribution and assert endpoint occupancy the model does not support, so
+        # the failure is signalled with NaN and callers drop the record.
+        @warn "predict_corridor: recapture unit $recapture is unreachable from " *
+              "release unit $release within $k step(s); the Markov bridge is " *
+              "undefined and an all-NaN corridor is returned."
+        return fill(NaN, S, k + 1)
     end
 
     # Markov bridge formula for each intermediate step tau = 0 .. k
@@ -3791,16 +3809,15 @@ end
 """
     predict_path(res::NamedTuple, release::Int, recapture::Int, k=nothing; kwargs...) -> Vector{Int}
 
-Extracts the group transition matrix and domain mesh from a fitted MovementAnalysis result
+Extracts the pooled transition matrix and domain mesh from a fitted MovementAnalysis result
 NamedTuple and predicts the most probable movement trajectory between release and
 recapture nodes using goal-directed search (`:astar`) or dynamic programming (`:viterbi`).
 
 # Arguments
-- `res`: Result NamedTuple containing `:transition_matrices` and `:mesh`.
+- `res`: Result NamedTuple containing `:P_kernel` and optionally `:mesh`.
 - `release`: Starting spatial unit index.
 - `recapture`: Destination spatial unit index.
 - `k`: Total discrete time steps (optional for `:astar`).
-- `group`: Demographic group identifier (string, symbol, or integer ID).
 - `centroids`: Optional centroid coordinates (defaults to `res.mesh`).
 - `method`: Algorithm (`:astar` or `:viterbi`).
 - `land_mask`: Optional boolean land mask vector.
@@ -3813,7 +3830,6 @@ function predict_path(
     release::Int,
     recapture::Int,
     k::Union{Nothing, Int} = nothing;
-    group::Union{String, Symbol, Int} = 1,
     centroids = nothing,
     method::Symbol = :astar,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
@@ -3822,35 +3838,29 @@ function predict_path(
         (hasproperty(res, :land_mask) ? res.land_mask : nothing)
     cents = centroids !== nothing ? centroids :
         (hasproperty(res, :mesh) ? res.mesh : nothing)
-    if hasproperty(res, :transition_matrices)
-        tm = res.transition_matrices
-        key = group isa Int ?
-            (hasproperty(res, :group_lookup) ? res.group_lookup[group] : first(keys(tm))) :
-            string(group)
-        P = tm[key]
+    if hasproperty(res, :P_kernel)
         return predict_path(
-            P, release, recapture, k;
+            res.P_kernel, release, recapture, k;
             centroids = cents,
             method = method,
             land_mask = mask
         )
     else
-        throw(ArgumentError("Expected a result NamedTuple with field `:transition_matrices`."))
+        throw(ArgumentError("Expected a result NamedTuple with field `:P_kernel`."))
     end
 end
 
 """
     predict_corridor(res::NamedTuple, release::Int, recapture::Int, k::Int; kwargs...) -> Matrix{Float64}
 
-Extracts the group transition matrix from a fitted MovementAnalysis result NamedTuple and
+Extracts the pooled transition matrix from a fitted MovementAnalysis result NamedTuple and
 computes the space-time Markov bridge corridor matrix over ``k`` steps.
 
 # Arguments
-- `res`: Result NamedTuple containing `:transition_matrices`.
+- `res`: Result NamedTuple containing `:P_kernel`.
 - `release`: Starting spatial unit index.
 - `recapture`: Destination spatial unit index.
 - `k`: Total discrete time steps (``k \\ge 1``).
-- `group`: Demographic group identifier (string, symbol, or integer ID).
 - `land_mask`: Optional boolean land mask vector.
 
 # Returns
@@ -3858,127 +3868,15 @@ computes the space-time Markov bridge corridor matrix over ``k`` steps.
 """
 function predict_corridor(
     res::NamedTuple, release::Int, recapture::Int, k::Int;
-    group::Union{String, Symbol, Int} = 1,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
 )
     mask = land_mask !== nothing ? land_mask :
         (hasproperty(res, :land_mask) ? res.land_mask : nothing)
-    if hasproperty(res, :transition_matrices)
-        tm = res.transition_matrices
-        key = group isa Int ?
-            (hasproperty(res, :group_lookup) ? res.group_lookup[group] : first(keys(tm))) :
-            string(group)
-        P = tm[key]
-        return predict_corridor(P, release, recapture, k; land_mask=mask)
+    if hasproperty(res, :P_kernel)
+        return predict_corridor(res.P_kernel, release, recapture, k; land_mask=mask)
     else
-        error("Expected a result NamedTuple with field `:transition_matrices`.")
+        error("Expected a result NamedTuple with field `:P_kernel`.")
     end
-end
-
-"""
-    predict_path(P_vec::AbstractVector{<:AbstractMatrix{<:Real}}, release::Int, recapture::Int, k::Int;
-                 group::Union{Integer, Symbol, AbstractString} = 1,
-                 land_mask::Union{Nothing, AbstractVector{Bool}} = nothing) -> Vector{Int}
-
-Group-aware overload for `predict_path` when given a vector of group-specific transition matrices.
-Reconstructs the most likely sequence of spatial units (Viterbi path) for the specified group.
-
-# Mathematical Formulation
-Given group index ``g``, the dynamic programming Viterbi trellis identifies:
-```math
-\\mathbf{s}^* = \\arg\\max_{\\mathbf{s}} \\prod_{\\tau=1}^k [P_g]_{s_{\\tau-1}, s_\\tau}
-```
-subject to ``s_0 = u_{\\text{rel}}`` and ``s_k = u_{\\text{rec}}``.
-
-# Arguments
-- `P_vec`: Collection of row-stochastic transition matrices for each biological group.
-- `release`: Starting spatial unit index (1-indexed).
-- `recapture`: Destination spatial unit index at step `k` (1-indexed).
-- `k`: Number of discrete time intervals elapsed.
-- `group`: 1-based integer index or group label.
-- `land_mask`: Optional boolean mask of impermeable barrier units.
-
-# Returns
-- `Vector{Int}`: Sequence of ``k + 1`` spatial unit indices from `release` to `recapture`.
-"""
-function predict_path(
-    P_vec::AbstractVector{<:AbstractMatrix{<:Real}},
-    release::Int,
-    recapture::Int,
-    k::Union{Nothing, Int} = nothing;
-    group::Union{Integer, Symbol, AbstractString} = 1,
-    centroids = nothing,
-    method::Symbol = :astar,
-    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
-)::Vector{Int}
-    if isempty(P_vec)
-        throw(ArgumentError("P_vec transition kernel vector cannot be empty."))
-    end
-    g_idx = if group isa Integer
-        Int(group)
-    else
-        parsed = tryparse(Int, string(group))
-        parsed !== nothing ? parsed : 1
-    end
-    if !(1 <= g_idx <= length(P_vec))
-        throw(ArgumentError("Group index $g_idx is out of bounds (1:$(length(P_vec)))."))
-    end
-    return predict_path(
-        P_vec[g_idx], release, recapture, k;
-        centroids = centroids,
-        method = method,
-        land_mask = land_mask
-    )
-end
-
-"""
-    predict_corridor(P_vec::AbstractVector{<:AbstractMatrix{<:Real}}, release::Int, recapture::Int, k::Int;
-                     group::Union{Integer, Symbol, AbstractString} = 1,
-                     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing) -> Matrix{Float64}
-
-Group-aware overload for `predict_corridor` when given a vector of group-specific transition matrices.
-Computes the Markov bridge probability distribution across spatial units for the specified group.
-
-# Mathematical Formulation
-Given group index ``g``, the Markov bridge probability at intermediate step ``\\tau`` is:
-```math
-\\mathbb{P}(X_\\tau = j \\mid X_0 = u_{\\text{rel}}, X_k = u_{\\text{rec}}) = 
-\\frac{[P_g^\\tau]_{u_{\\text{rel}}, j} \\cdot [P_g^{k - \\tau}]_{j, u_{\\text{rec}}}}{[P_g^k]_{u_{\\text{rel}}, u_{\\text{rec}}}}
-```
-
-# Arguments
-- `P_vec`: Collection of row-stochastic transition matrices for each biological group.
-- `release`: Starting spatial unit index (1-indexed).
-- `recapture`: Destination spatial unit index at step `k` (1-indexed).
-- `k`: Number of discrete time intervals elapsed.
-- `group`: 1-based integer index or group label.
-- `land_mask`: Optional boolean mask of impermeable barrier units.
-
-# Returns
-- `Matrix{Float64}`: Array of size ``(S, k + 1)`` where column ``\\tau + 1`` gives the spatial
-  probability distribution over all units at time step ``\\tau``.
-"""
-function predict_corridor(
-    P_vec::AbstractVector{<:AbstractMatrix{<:Real}},
-    release::Int,
-    recapture::Int,
-    k::Int;
-    group::Union{Integer, Symbol, AbstractString} = 1,
-    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
-)::Matrix{Float64}
-    if isempty(P_vec)
-        throw(ArgumentError("P_vec transition kernel vector cannot be empty."))
-    end
-    g_idx = if group isa Integer
-        Int(group)
-    else
-        parsed = tryparse(Int, string(group))
-        parsed !== nothing ? parsed : 1
-    end
-    if !(1 <= g_idx <= length(P_vec))
-        throw(ArgumentError("Group index $g_idx is out of bounds (1:$(length(P_vec)))."))
-    end
-    return predict_corridor(P_vec[g_idx], release, recapture, k; land_mask=land_mask)
 end
 
 
@@ -4850,7 +4748,6 @@ mark-recapture transition events with biological group stratifications.
   - `month_lookup`: Mapping of `(year, month)` to column index.
   - `years`: Vector of survey years.
   - `obs`: Extracted mark-recapture event pairs DataFrame.
-  - `group_lookup`: Biological stratum dictionary mapping.
   - `land_mask`: Boolean vector of length ``S`` denoting terrestrial barrier units.
 """
 function prepare_movement_data(
@@ -4964,7 +4861,7 @@ function prepare_movement_data(
                 crs = crs, datum = datum
             ) for c in c_km]
         end
-        (
+        mesh_base = (
             centroids_km     = c_km,
             centroids_lonlat = c_ll,
             n_units          = n_u,
@@ -4973,8 +4870,21 @@ function prepare_movement_data(
             center_lon       = c_lon,
             center_lat       = c_lat,
             radius_km        = hasproperty(pre_mapped, :radius_km) ?
-                pre_mapped.radius_km : radius_km
+                pre_mapped.radius_km : radius_km,
+            sppoly_geometries = hasproperty(pre_mapped, :sppoly_geometries) ?
+                pre_mapped.sppoly_geometries : LibGEOS.AbstractGeometry[],
+            sppoly_bounds = hasproperty(pre_mapped, :sppoly_bounds) ?
+                pre_mapped.sppoly_bounds : nothing,
+            anchor_points_lonlat = hasproperty(pre_mapped, :anchor_points_lonlat) ?
+                pre_mapped.anchor_points_lonlat : Tuple{Float64, Float64}[]
         )
+        hasproperty(pre_mapped, :polygons) &&
+            (mesh_base = merge(mesh_base, (polygons=pre_mapped.polygons,)))
+        hasproperty(pre_mapped, :polygons_km) &&
+            (mesh_base = merge(mesh_base, (polygons_km=pre_mapped.polygons_km,)))
+        hasproperty(pre_mapped, :polygons_lonlat) &&
+            (mesh_base = merge(mesh_base, (polygons_lonlat=pre_mapped.polygons_lonlat,)))
+        mesh_base
     else
         verbose && println("  [prepare] Constructing full movement domain (r=$(radius_km) km) …")
         construct_full_movement_domain(
@@ -5141,35 +5051,6 @@ function prepare_movement_data(
 
     obs = DataFrame(pair_records)
 
-    # 5. Assign biological groupings
-    n_obs = nrow(obs)
-    labels = Vector{String}(undef, n_obs)
-    if n_obs > 0
-        obs_sexes = obs[!, :sex]
-        obs_mats  = obs[!, :mat]
-        @inbounds for i in 1:n_obs
-            sx = string(obs_sexes[i])
-            mt = string(obs_mats[i])
-            if mt == "immature"
-                labels[i] = "immature"
-            elseif mt == "mature" && sx == "M"
-                labels[i] = "male"
-            elseif mt == "mature" && sx == "F"
-                labels[i] = "female"
-            else
-                labels[i] = "unknown"
-            end
-        end
-    end
-
-    unique_labels = sort!(unique(labels))
-    group_lookup  = Dict{String, Int}(lbl => i for (i, lbl) in enumerate(unique_labels))
-    group_ids = Vector{Int}(undef, n_obs)
-    @inbounds for i in 1:n_obs
-        group_ids[i] = group_lookup[labels[i]]
-    end
-    obs[!, :group] = group_ids
-
     return (
         tagging      = tag_df,
         mesh         = mesh,
@@ -5179,7 +5060,6 @@ function prepare_movement_data(
         month_lookup = month_lookup,
         years        = years_vec,
         obs          = obs,
-        group_lookup = group_lookup,
         land_mask    = mesh.land_mask
     )
 end
@@ -5320,11 +5200,17 @@ function compute_movement_statistics(
         else
             Int[]
         end
-        if length(node_seq) > 0
+        if length(node_seq) > 1
             dur = hasproperty(p, :duration_days) ?
                 Float64(p.duration_days) : Float64(length(node_seq) - 1)
-            time_per_step = dur / max(1, length(node_seq) - 1)
-            for node in node_seq
+            n_intervals = length(node_seq) - 1
+            time_per_step = dur / n_intervals
+            # A path of n_intervals + 1 nodes spans exactly n_intervals intervals.
+            # Each interval is attributed to the node occupied at its start, so the
+            # per-unit contributions sum to the elapsed duration. Also crediting the
+            # final node would over-count residence by a full time step per path.
+            for i in 1:n_intervals
+                node = node_seq[i]
                 if 1 <= node <= n_spatial
                     residence_time[node] += time_per_step
                 end
@@ -5363,6 +5249,7 @@ function compute_movement_statistics(
 
     return (
         summary_df               = summary_df,
+        tagid                    = String[string(p.tagid) for p in paths_rich],
         net_displacement_km      = net_disp_v,
         path_length_km           = path_len_v,
         path_efficiency          = eff_v,
@@ -5411,21 +5298,38 @@ function analyze_seasonal_movement_phenology(
         push!(months_v, clamp(m, 1, 12))
     end
 
-    n_stat = length(mov_stats.net_displacement_km)
-    disp_all = n_stat == n_obs ? mov_stats.net_displacement_km :
-               fill(mean(mov_stats.net_displacement_km), n_obs)
-    eff_all  = n_stat == n_obs ? mov_stats.path_efficiency :
-               fill(mean(mov_stats.path_efficiency), n_obs)
+    # Per-tag metrics are joined to events by tag. Pairing them by row position is
+    # only accidentally correct when the two collections happen to be the same
+    # length and order, and substituting the mean for a missing tag would report a
+    # fabricated per-event value.
+    stat_tags = hasproperty(mov_stats, :tagid) ? collect(mov_stats.tagid) : String[]
+    disp_lookup = Dict{String, Float64}()
+    eff_lookup  = Dict{String, Float64}()
+    for (i, t) in enumerate(stat_tags)
+        disp_lookup[t] = Float64(mov_stats.net_displacement_km[i])
+        eff_lookup[t]  = Float64(mov_stats.path_efficiency[i])
+    end
+
+    has_tagid = hasproperty(obs_df, :tagid)
+    disp_all = has_tagid ?
+        [get(disp_lookup, string(obs_df.tagid[i]), NaN) for i in 1:n_obs] :
+        fill(NaN, n_obs)
+    eff_all = has_tagid ?
+        [get(eff_lookup, string(obs_df.tagid[i]), NaN) for i in 1:n_obs] :
+        fill(NaN, n_obs)
+
+    has_disp = .!isnan.(disp_all)
+    has_eff  = .!isnan.(eff_all)
 
     m_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     monthly_rows = []
 
     for m in 1:12
-        idxs = findall(==(m), months_v)
+        idxs = findall(i -> months_v[i] == m && has_disp[i], 1:n_obs)
         c = length(idxs)
-        m_disp = c > 0 ? mean(disp_all[idxs]) : 0.0
-        m_eff  = c > 0 ? mean(eff_all[idxs]) : 0.0
+        m_disp = c > 0 ? mean(disp_all[idxs]) : NaN
+        m_eff  = c > 0 ? mean(eff_all[idxs])  : NaN
         push!(monthly_rows, (
             month       = m,
             month_name  = m_names[m],
@@ -5440,22 +5344,23 @@ function analyze_seasonal_movement_phenology(
     quarterly_rows = []
     for q in 1:4
         q_m = ((q - 1) * 3 + 1):(q * 3)
-        idxs = findall(m -> m in q_m, months_v)
+        idxs = findall(i -> months_v[i] in q_m && has_eff[i], 1:n_obs)
         c = length(idxs)
-        q_disp = c > 0 ? mean(disp_all[idxs]) : 0.0
-        q_eff  = c > 0 ? mean(eff_all[idxs]) : 0.0
+        m_eff = c > 0 ? mean(eff_all[idxs]) : NaN
         push!(quarterly_rows, (
             quarter      = q,
             quarter_name = q_names[q],
             n_events     = c,
-            mean_disp_km = q_disp,
-            mean_eff     = q_eff,
+            mean_disp_km = NaN,
+            mean_eff     = m_eff,
         ))
     end
     quarterly_df = DataFrame(quarterly_rows)
 
-    peak_row = argmax(monthly_df.mean_disp_km)
-    peak_month = monthly_df.month_name[peak_row]
+    valid_months = findall(.!isnan.(monthly_df.mean_disp_km))
+    peak_row = isempty(valid_months) ? 0 :
+        valid_months[argmax(monthly_df.mean_disp_km[valid_months])]
+    peak_month = peak_row == 0 ? "unknown" : monthly_df.month_name[peak_row]
 
     return (
         monthly_df   = monthly_df,
@@ -5489,9 +5394,6 @@ function model_trait_movement_associations(
     n_paths = length(mov_stats.net_displacement_km)
     n_paths < 3 && return (models = Dict{String, Any}(), message = "Too few samples")
 
-    trait_vec = Float64[]
-    trait_name = "carapace_width"
-
     candidates = [:carapace_width, :cw, :size, :weight, :length, :size_mm]
     found_col = nothing
     for c in candidates
@@ -5501,23 +5403,61 @@ function model_trait_movement_associations(
         end
     end
 
-    if found_col !== nothing && nrow(obs_df) >= n_paths
-        for v in obs_df[1:n_paths, found_col]
-            push!(trait_vec, ismissing(v) ? 110.0 : Float64(v))
-        end
-        trait_name = string(found_col)
-    else
-        # Synthetic baseline trait for snow crab: carapace width ~ N(115, 18^2) mm
-        rng = MersenneTwister(42)
-        trait_vec = [115.0 + 18.0 * randn(rng) for _ in 1:n_paths]
-        trait_name = "carapace_width_sim"
+    if found_col === nothing
+        return (
+            trait_name = "none",
+            trait_vals = Float64[],
+            models     = Dict{String, Any}(),
+            message    = "No morphometric trait column is present in the observation " *
+                         "table, so no trait-movement association can be estimated. " *
+                         "Trait values are never synthesised.",
+        )
     end
+    trait_name = string(found_col)
+
+    if !hasproperty(obs_df, :tagid)
+        return (
+            trait_name = trait_name,
+            trait_vals = Float64[],
+            models     = Dict{String, Any}(),
+            message    = "The observation table has no :tagid column, so traits " *
+                         "cannot be joined to per-tag movement metrics.",
+        )
+    end
+
+    # One trait value per tag, taken from the first non-missing observation of that
+    # tag. Missing values are skipped rather than imputed.
+    trait_by_tag = Dict{String, Float64}()
+    for row in eachrow(obs_df)
+        t = string(row.tagid)
+        haskey(trait_by_tag, t) && continue
+        v = getproperty(row, found_col)
+        ismissing(v) && continue
+        trait_by_tag[t] = Float64(v)
+    end
+
+    # Movement metrics are per tag; pair them with traits by tag, never by position.
+    stat_tags = hasproperty(mov_stats, :tagid) ? collect(mov_stats.tagid) :
+                String[string(i) for i in 1:n_paths]
+    kept = findall(i -> haskey(trait_by_tag, stat_tags[i]), 1:n_paths)
+    if length(kept) < 3
+        return (
+            trait_name = trait_name,
+            trait_vals = Float64[],
+            models     = Dict{String, Any}(),
+            message    = "Only $(length(kept)) tag(s) have both a trait value and a " *
+                         "reconstructed path; at least 3 are required to fit OLS.",
+        )
+    end
+
+    trait_vec = [trait_by_tag[stat_tags[i]] for i in kept]
+    n_used = length(kept)
 
     results = Dict{String, NamedTuple}()
     targets = [
-        ("displacement", mov_stats.net_displacement_km),
-        ("efficiency", mov_stats.path_efficiency),
-        ("tortuosity", mov_stats.tortuosity),
+        ("displacement", mov_stats.net_displacement_km[kept]),
+        ("efficiency", mov_stats.path_efficiency[kept]),
+        ("tortuosity", mov_stats.tortuosity[kept]),
     ]
 
     for (t_name, y_vec) in targets
@@ -5525,15 +5465,15 @@ function model_trait_movement_associations(
         y_bar = mean(y_vec)
         ss_xx = sum((x - x_bar)^2 for x in trait_vec)
         ss_yy = sum((y - y_bar)^2 for y in y_vec)
-        ss_xy = sum((trait_vec[i] - x_bar) * (y_vec[i] - y_bar) for i in 1:n_paths)
+        ss_xy = sum((trait_vec[i] - x_bar) * (y_vec[i] - y_bar) for i in 1:n_used)
 
         beta_1 = ss_xx > 1e-10 ? ss_xy / ss_xx : 0.0
         beta_0 = y_bar - beta_1 * x_bar
-        residuals = [y_vec[i] - (beta_0 + beta_1 * trait_vec[i]) for i in 1:n_paths]
+        residuals = [y_vec[i] - (beta_0 + beta_1 * trait_vec[i]) for i in 1:n_used]
         sse = sum(r^2 for r in residuals)
         r2 = ss_yy > 1e-10 ? clamp(1.0 - sse / ss_yy, 0.0, 1.0) : 0.0
 
-        df_deg = max(1, n_paths - 2)
+        df_deg = max(1, n_used - 2)
         s_err = sqrt(sse / df_deg)
         se_beta1 = ss_xx > 1e-10 ? s_err / sqrt(ss_xx) : 1.0
         t_stat = se_beta1 > 1e-10 ? beta_1 / se_beta1 : 0.0
@@ -5582,7 +5522,7 @@ function export_movement_summary_csv(
 )::String
     mkpath(dirname(filepath))
     open(filepath, "w") do io
-        write(io, "tagid,group,release_date,recapture_date,start_lon,start_lat," *
+        write(io, "tagid,release_date,recapture_date,start_lon,start_lat," *
                   "end_lon,end_lat,duration_days,total_dist_km,displacement_km," *
                   "efficiency,tortuosity,velocity_km_day,mean_hsi,bearing_deg," *
                   "primary_behavior\n")
@@ -5596,8 +5536,6 @@ function export_movement_summary_csv(
             vel = dur > 0.1 ? tot_d / dur : 0.0
             r_date = hasproperty(p, :release_date) ? string(p.release_date) : "N/A"
             c_date = hasproperty(p, :recapture_date) ? string(p.recapture_date) : "N/A"
-            grp_val = hasproperty(p, :group) ? string(p.group) :
-                (hasproperty(p, :group_label) ? string(p.group_label) : "1")
             m_hsi = hasproperty(p, :mean_hsi) ? Float64(p.mean_hsi) : 0.5
             eff_val = i <= length(mov_stats.path_efficiency) ?
                 mov_stats.path_efficiency[i] : 1.0
@@ -5613,7 +5551,6 @@ function export_movement_summary_csv(
 
             write(io, string(
                 p.tagid, ",",
-                grp_val, ",",
                 r_date, ",",
                 c_date, ",",
                 round(c_start[1]; digits=4), ",",
@@ -5667,41 +5604,11 @@ function path_credible_intervals(
     obs_df    = loaded.obs_df
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
-    G         = kernels.G
-
-    n_draws = if hasproperty(kernels, :alpha_samples) &&
-                 !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1)
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        size(Array(active_chain), 1)
-    end
-
-    v_samples = zeros(n_draws, G)
-    d_samples = zeros(n_draws, G)
-    g_samples = zeros(n_draws, G)
-
-    if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        for g in 1:G
-            v_samples[:, g] .= kernels.alpha_samples[:, min(g, size(kernels.alpha_samples, 2))]
-            d_samples[:, g] .= kernels.rho_samples[:, min(g, size(kernels.rho_samples, 2))]
-            g_samples[:, g] .= kernels.gamma_samples[:, min(g, size(kernels.gamma_samples, 2))]
-        end
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        for draw in 1:n_draws, g in 1:G
-            vk = Symbol("velocity[$g]")
-            dk = Symbol("diffusion[$g]")
-            gk = Symbol("gamma[$g]")
-            v_samples[draw, g] = haskey(chains, vk) ? mean(active_chain[vk]) : 0.3
-            d_samples[draw, g] = haskey(chains, dk) ? mean(active_chain[dk]) : 0.1
-            g_samples[draw, g] = haskey(chains, gk) ? mean(active_chain[gk]) : 1.0
-        end
-    end
+    alpha_samples = Float64.(kernels.alpha_samples)
+    rho_samples = Float64.(kernels.rho_samples)
+    gamma_samples = Float64.(kernels.gamma_samples)
+    n_draws = min(length(alpha_samples), length(rho_samples), length(gamma_samples))
+    n_draws > 0 || throw(ArgumentError("Pooled posterior has no parameter draws."))
 
     all_tags = unique(obs_df.tagid)
     path_samples = Dict{String, Vector{Vector{Int}}}()
@@ -5713,15 +5620,11 @@ function path_credible_intervals(
 
     P_draws = Any[]
     for draw in eval_indices
-        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
-        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
-        gamma_arr = [g_samples[draw, g] for g in 1:G]
-
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = gamma_arr,
-            residence = rho_arr,
-            advection = alpha_arr,
+            gamma     = gamma_samples[draw],
+            residence = rho_samples[draw],
+            advection = alpha_samples[draw],
             land_mask = land_mask
         )
         push!(P_draws, P_draw)
@@ -5731,23 +5634,24 @@ function path_credible_intervals(
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
 
-        grp = hasproperty(sub_obs, :group) ? first(sub_obs.group) : 1
-        grp = clamp(grp, 1, G)
-
         path_ens = Vector{Int}[]
         path_lengths = Float64[]
 
         for (draw_idx, draw) in enumerate(eval_indices)
             P_draw = P_draws[draw_idx]
-            P_k = P_draw isa AbstractVector ? P_draw[grp] : P_draw
-
             full_path = Int[sub_obs.release[1]]
             for row in eachrow(sub_obs)
                 seg = predict_path(
-                    P_k, row.release, row.recapture, row.k;
+                    P_draw, row.release, row.recapture, row.k;
                     method    = :astar,
                     land_mask = land_mask
                 )
+                if isempty(seg)
+                    @warn "Bayesian ensemble: no valid route for tag $tid " *
+                          "($(row.release) -> $(row.recapture), k=$(row.k)) under " *
+                          "this draw; the segment is omitted rather than padded."
+                    continue
+                end
                 append!(full_path, seg[2:end])
             end
             push!(path_ens, full_path)
@@ -5794,9 +5698,9 @@ function path_credible_intervals(
         path_samples     = path_samples,
         path_stats       = path_stats,
         node_visit_probs = node_visit_probs,
-        v_samples        = v_samples,
-        d_samples        = d_samples,
-        g_samples        = g_samples,
+        alpha_samples    = alpha_samples,
+        rho_samples      = rho_samples,
+        gamma_samples    = gamma_samples,
     )
 end
 
@@ -5868,11 +5772,9 @@ function reconstruct_paths_bayesian_ensemble(
     land_mask = loaded.land_mask
     n_spatial = loaded.n_spatial
 
-    chains    = fitted.chains
+    chains = fitted.chains
     active_chn = haskey(chains, :telemetry) ? chains[:telemetry] :
-                 haskey(chains, :telemetry_and_survey) ?
-                 chains[:telemetry_and_survey] :
-                 first(values(chains))
+                 get(chains, :telemetry_and_survey, nothing)
 
     cents_mesh = if hasproperty(loaded, :mesh) &&
                     hasproperty(loaded.mesh, :centroids_planar)
@@ -5883,24 +5785,14 @@ function reconstruct_paths_bayesian_ensemble(
         [Float64[0.0, 0.0] for _ in 1:n_spatial]
     end
 
-    chn_mat_v = haskey(active_chn, :velocity) ?
-                Array(active_chn[:velocity]) :
-                haskey(active_chn, Symbol("velocity[1]")) ?
-                Array(active_chn[Symbol("velocity[1]")]) :
-                ones(Float64, 50, 1) .* 0.3
-    chn_mat_d = haskey(active_chn, :diffusion) ?
-                Array(active_chn[:diffusion]) :
-                haskey(active_chn, Symbol("diffusion[1]")) ?
-                Array(active_chn[Symbol("diffusion[1]")]) :
-                ones(Float64, 50, 1) .* 0.1
-    chn_mat_g = haskey(active_chn, :gamma) ?
-                Array(active_chn[:gamma]) :
-                haskey(active_chn, Symbol("gamma[1]")) ?
-                Array(active_chn[Symbol("gamma[1]")]) :
-                ones(Float64, 50, 1) .* 1.0
-
-    n_draws_chain = size(chn_mat_v, 1)
-    req_ensemble  = get(params, :n_ensemble, 50)
+    parameter_draws(parameter::Symbol, fallback::Float64) =
+        active_chn !== nothing && parameter in keys(active_chn) ?
+            vec(Float64.(Array(active_chn[parameter]))) : [fallback]
+    velocity_draws = parameter_draws(:velocity, 0.3)
+    diffusion_draws = parameter_draws(:diffusion, 0.1)
+    gamma_draws = parameter_draws(:gamma, Float64(get(params, :gamma, 1.0)))
+    n_draws_chain = min(length(velocity_draws), length(diffusion_draws), length(gamma_draws))
+    req_ensemble  = max(1, get(params, :n_ensemble, 50))
     n_ensemble    = min(req_ensemble, n_draws_chain)
     draw_indices  = round.(Int, range(1, n_draws_chain, length = n_ensemble))
 
@@ -5917,18 +5809,18 @@ function reconstruct_paths_bayesian_ensemble(
         "$n_ensemble MCMC posterior samples..."
     )
 
-    G_eff = size(chn_mat_v, 2)
-    P_draws = Any[]
+    P_draws = Matrix{Float64}[]
     for d_idx in draw_indices
-        alpha_arr = [clamp(chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] / (chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] + chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))] + 1e-6), 0.0, 1.0) for g in 1:G_eff]
-        rho_arr   = [clamp(1.0 / (1.0 + chn_mat_v[d_idx, min(g, size(chn_mat_v, 2))] + chn_mat_d[d_idx, min(g, size(chn_mat_d, 2))]), 0.01, 0.95) for g in 1:G_eff]
-        gamma_arr = [chn_mat_g[d_idx, min(g, size(chn_mat_g, 2))] for g in 1:G_eff]
+        velocity = velocity_draws[d_idx]
+        diffusion = diffusion_draws[d_idx]
+        alpha = clamp(velocity / (velocity + diffusion + 1e-6), 0.0, 1.0)
+        residence = clamp(1.0 / (1.0 + velocity + diffusion), 0.01, 0.95)
 
         P_draw = construct_stochastic_transition_kernel(
             W, hsi_vec;
-            gamma     = gamma_arr,
-            residence = rho_arr,
-            advection = alpha_arr,
+            gamma     = gamma_draws[d_idx],
+            residence = residence,
+            advection = alpha,
             land_mask = land_mask
         )
         push!(P_draws, P_draw)
@@ -5938,22 +5830,22 @@ function reconstruct_paths_bayesian_ensemble(
         sub_obs = filter(:tagid => ==(tid), obs_df)
         isempty(sub_obs) && continue
         first_row = first(sub_obs)
-        grp = hasproperty(sub_obs, :group) ? first(sub_obs.group) : 1
-
         k_steps = max(1, first_row.k)
         accumulated_corridor = zeros(Float64, n_spatial, k_steps + 1)
         sample_path_collection = Vector{Int}[]
 
+        n_valid_corridor = 0
         for (i, d_idx) in enumerate(draw_indices)
-            P_draw_all = P_draws[i]
-            grp_eff = min(grp, G_eff)
-            P_draw = P_draw_all isa AbstractVector ? P_draw_all[grp_eff] : P_draw_all
+            P_draw = P_draws[i]
 
             corr_draw = predict_corridor(
                 P_draw, first_row.release, first_row.recapture, k_steps;
                 land_mask = land_mask
             )
-            accumulated_corridor .+= corr_draw
+            if !any(isnan, corr_draw)
+                accumulated_corridor .+= corr_draw
+                n_valid_corridor += 1
+            end
 
             path_draw = predict_path(
                 P_draw, first_row.release, first_row.recapture, k_steps;
@@ -5961,10 +5853,13 @@ function reconstruct_paths_bayesian_ensemble(
                 method    = path_method,
                 land_mask = land_mask
             )
+            isempty(path_draw) && continue
             push!(sample_path_collection, path_draw)
         end
 
-        ensemble_corridors[string(tid)] = accumulated_corridor ./ n_ensemble
+        ensemble_corridors[string(tid)] = n_valid_corridor > 0 ?
+            accumulated_corridor ./ n_valid_corridor :
+            fill(NaN, size(accumulated_corridor))
         ensemble_paths[string(tid)]     = sample_path_collection
     end
 
@@ -6011,6 +5906,7 @@ function compute_stock_connectivity_matrix(
 
     connectivity_matrix = zeros(Float64, n_regions, n_regions)
     flow_counts = zeros(Int, n_regions, n_regions)
+    P_k = P_kernel
 
     for row in eachrow(obs_df)
         rel_r = region_map[clamp(row.release, 1, n_spatial)]
@@ -6026,7 +5922,6 @@ function compute_stock_connectivity_matrix(
             isempty(units_s) && continue
 
             prob_sum = 0.0
-            P_k = P_kernel isa AbstractVector ? P_kernel[1] : P_kernel
             for u in units_r, v in units_s
                 if 1 <= u <= n_spatial && 1 <= v <= n_spatial
                     prob_sum += P_k[u, v]
@@ -6071,64 +5966,31 @@ function compute_connectivity_credible_intervals(
 )::NamedTuple
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
-    G         = kernels.G
 
     if region_map === nothing
         region_map = collect(1:n_spatial)
     end
     n_regions = maximum(region_map)
 
-    n_draws = if hasproperty(kernels, :alpha_samples) &&
-                 !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1)
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        size(Array(active_chain), 1)
-    end
-
-    v_samples = zeros(n_draws, G)
-    d_samples = zeros(n_draws, G)
-    g_samples = zeros(n_draws, G)
-
-    if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        for g in 1:G
-            v_samples[:, g] .= kernels.alpha_samples[:, min(g, size(kernels.alpha_samples, 2))]
-            d_samples[:, g] .= kernels.rho_samples[:, min(g, size(kernels.rho_samples, 2))]
-            g_samples[:, g] .= kernels.gamma_samples[:, min(g, size(kernels.gamma_samples, 2))]
-        end
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        for draw in 1:n_draws, g in 1:G
-            vk = Symbol("velocity[$g]")
-            dk = Symbol("diffusion[$g]")
-            gk = Symbol("gamma[$g]")
-            v_samples[draw, g] = haskey(chains, vk) ? mean(active_chain[vk]) : 0.3
-            d_samples[draw, g] = haskey(chains, dk) ? mean(active_chain[dk]) : 0.1
-            g_samples[draw, g] = haskey(chains, gk) ? mean(active_chain[gk]) : 1.0
-        end
-    end
+    alpha_samples = Float64.(kernels.alpha_samples)
+    rho_samples = Float64.(kernels.rho_samples)
+    gamma_samples = Float64.(kernels.gamma_samples)
+    n_draws = min(length(alpha_samples), length(rho_samples), length(gamma_samples))
+    n_draws > 0 || throw(ArgumentError("Pooled posterior has no parameter draws."))
 
     n_eval_draws = min(n_draws, 40)
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
     connectivity_samples = Matrix{Float64}[]
 
     for draw in eval_indices
-        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
-        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
-        gamma_arr = [g_samples[draw, g] for g in 1:G]
-
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = gamma_arr,
-            residence = rho_arr,
-            advection = alpha_arr,
+            gamma     = gamma_samples[draw],
+            residence = rho_samples[draw],
+            advection = alpha_samples[draw],
             land_mask = land_mask
         )
-        P_k = P_draw isa AbstractVector ? P_draw[1] : P_draw
+        P_k = P_draw
 
         conn_mat = zeros(Float64, n_regions, n_regions)
         for r in 1:n_regions
@@ -6230,47 +6092,31 @@ function posterior_predictive_check(
     obs_df    = loaded.obs_df
     n_spatial = loaded.n_spatial
     land_mask = loaded.land_mask
-    G         = kernels.G
     seed      = get(params, :seed, 42)
 
-    n_draws = if hasproperty(kernels, :alpha_samples) &&
-                 !isempty(kernels.alpha_samples)
-        size(kernels.alpha_samples, 1)
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        size(Array(active_chain), 1)
-    end
+    alpha_samples = Float64.(kernels.alpha_samples)
+    rho_samples = Float64.(kernels.rho_samples)
+    gamma_samples = Float64.(kernels.gamma_samples)
+    n_draws = min(length(alpha_samples), length(rho_samples), length(gamma_samples))
+    n_draws > 0 || throw(ArgumentError("Pooled posterior has no parameter draws."))
 
-    v_samples = zeros(n_draws, G)
-    d_samples = zeros(n_draws, G)
-    g_samples = zeros(n_draws, G)
+    # Restrict to events whose endpoints are addressable, so the observed and
+    # simulated marginals are always computed over the same event set.
+    events = [
+        (release = Int(row.release), recapture = Int(row.recapture),
+         k = max(1, round(Int, row.k)))
+        for row in eachrow(obs_df)
+        if 1 <= row.release <= n_spatial && 1 <= row.recapture <= n_spatial
+    ]
+    isempty(events) && throw(ArgumentError(
+        "Posterior predictive check found no mark-recapture event with endpoints " *
+        "inside 1:$n_spatial."
+    ))
 
-    if hasproperty(kernels, :alpha_samples) && !isempty(kernels.alpha_samples)
-        for g in 1:G
-            v_samples[:, g] .= kernels.alpha_samples[:, min(g, size(kernels.alpha_samples, 2))]
-            d_samples[:, g] .= kernels.rho_samples[:, min(g, size(kernels.rho_samples, 2))]
-            g_samples[:, g] .= kernels.gamma_samples[:, min(g, size(kernels.gamma_samples, 2))]
-        end
-    else
-        chains = fitted.chains
-        active_chain = haskey(chains, :telemetry) ?
-                       chains[:telemetry] : chains[:telemetry_and_survey]
-        for draw in 1:n_draws, g in 1:G
-            vk = Symbol("velocity[$g]")
-            dk = Symbol("diffusion[$g]")
-            gk = Symbol("gamma[$g]")
-            v_samples[draw, g] = haskey(chains, vk) ? mean(active_chain[vk]) : 0.3
-            d_samples[draw, g] = haskey(chains, dk) ? mean(active_chain[dk]) : 0.1
-            g_samples[draw, g] = haskey(chains, gk) ? mean(active_chain[gk]) : 1.0
-        end
-    end
-
-    observed_recaptures = obs_df.recapture
+    observed_recaptures = [e.recapture for e in events]
     observed_dist = zeros(n_spatial)
     for rec in observed_recaptures
-        1 <= rec <= n_spatial && (observed_dist[rec] += 1)
+        observed_dist[rec] += 1
     end
     observed_dist ./= max(1.0, sum(observed_dist))
 
@@ -6283,50 +6129,52 @@ function posterior_predictive_check(
     eval_indices = round.(Int, range(1, n_draws, length=n_eval_draws))
 
     for draw in eval_indices
-        alpha_arr = [clamp(v_samples[draw, g] / (v_samples[draw, g] + d_samples[draw, g] + 1e-6), 0.0, 1.0) for g in 1:G]
-        rho_arr   = [clamp(1.0 / (1.0 + v_samples[draw, g] + d_samples[draw, g]), 0.01, 0.95) for g in 1:G]
-        gamma_arr = [g_samples[draw, g] for g in 1:G]
-
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
-            gamma     = gamma_arr,
-            residence = rho_arr,
-            advection = alpha_arr,
+            gamma     = gamma_samples[draw],
+            residence = rho_samples[draw],
+            advection = alpha_samples[draw],
             land_mask = land_mask
         )
+        P_draw_t = P_draw'
 
         simulated_recaptures = Int[]
-        for row in eachrow(obs_df)
-            rel = row.release
-            k   = row.k
-            grp = hasproperty(row, :group) ? row.group : 1
-            grp = clamp(grp, 1, G)
+        brier_terms = Float64[]
 
-            P_k = P_draw isa AbstractVector ? P_draw[grp] : P_draw
-            if !isnothing(P_k) && 1 <= rel <= n_spatial
-                prob_vec = zeros(n_spatial)
-                prob_vec[rel] = 1.0
-                for _ in 1:min(k, 10)
-                    prob_vec = P_k' * prob_vec
-                end
-                s = sum(prob_vec)
-                if s > 0.0
-                    prob_vec ./= s
-                    u_samp = rand(rng)
-                    c_sum = 0.0
-                    sampled_rec = rel
-                    for j in 1:n_spatial
-                        c_sum += prob_vec[j]
-                        if u_samp <= c_sum
-                            sampled_rec = j
-                            break
-                        end
-                    end
-                    push!(simulated_recaptures, sampled_rec)
-                else
-                    push!(simulated_recaptures, rel)
+        for e in events
+            # Propagate the event's full horizon. Truncating at a fixed step count
+            # would score a kernel on a horizon the animal never had.
+            prob_vec = zeros(n_spatial)
+            prob_vec[e.release] = 1.0
+            for _ in 1:e.k
+                prob_vec = P_draw_t * prob_vec
+            end
+            s = sum(prob_vec)
+            if s > 0.0
+                prob_vec ./= s
+            else
+                fill!(prob_vec, 0.0)
+                prob_vec[e.release] = 1.0
+            end
+
+            # Event-level calibration: the squared error of the predictive
+            # probability assigned to the outcome that was actually observed.
+            # Comparing aggregate marginals instead hides per-event miscalibration.
+            onehot = zeros(n_spatial)
+            onehot[e.recapture] = 1.0
+            push!(brier_terms, sum(abs2, onehot .- prob_vec))
+
+            u_samp = rand(rng)
+            c_sum = 0.0
+            sampled_rec = e.recapture
+            for j in 1:n_spatial
+                c_sum += prob_vec[j]
+                if u_samp <= c_sum
+                    sampled_rec = j
+                    break
                 end
             end
+            push!(simulated_recaptures, sampled_rec)
         end
 
         sim_dist = zeros(n_spatial)
@@ -6336,8 +6184,7 @@ function posterior_predictive_check(
         sim_dist ./= max(1.0, sum(sim_dist))
         push!(simulated_recapture_dists, simulated_recaptures)
 
-        brier = mean((observed_dist .- sim_dist) .^ 2)
-        push!(brier_scores, brier)
+        push!(brier_scores, mean(brier_terms))
 
         kl = 0.0
         for i in 1:n_spatial
@@ -6349,16 +6196,17 @@ function posterior_predictive_check(
     end
 
     summary = (
-        n_draws        = length(brier_scores),
-        n_observations = length(observed_recaptures),
-        brier_mean     = mean(brier_scores),
-        brier_sd       = std(brier_scores),
-        brier_lower_ci = quantile(brier_scores, 0.025),
-        brier_upper_ci = quantile(brier_scores, 0.975),
-        kl_mean        = mean(kl_divergences),
-        kl_sd          = std(kl_divergences),
-        kl_lower_ci    = quantile(kl_divergences, 0.025),
-        kl_upper_ci    = quantile(kl_divergences, 0.975),
+        n_draws                = length(brier_scores),
+        n_observations         = length(observed_recaptures),
+        n_observations_total   = nrow(obs_df),
+        brier_mean             = mean(brier_scores),
+        brier_sd               = std(brier_scores),
+        brier_lower_ci         = quantile(brier_scores, 0.025),
+        brier_upper_ci         = quantile(brier_scores, 0.975),
+        kl_mean                = mean(kl_divergences),
+        kl_sd                  = std(kl_divergences),
+        kl_lower_ci            = quantile(kl_divergences, 0.025),
+        kl_upper_ci            = quantile(kl_divergences, 0.975),
     )
 
     return (
@@ -6398,22 +6246,20 @@ end
     plot_posterior_predictive_check(ppc, output_dir) -> String
 
 Generates diagnostic plots for posterior predictive validation.
+
+Requires the optional `Plots` backend. When `Plots` is installed the real
+implementation is supplied by `MovementAnalysisPlottingExt`; otherwise this
+raises an `ArgumentError` naming the missing dependency. The numeric
+diagnostics themselves are always available without it, via
+`export_posterior_predictive_check`.
 """
-function plot_posterior_predictive_check(ppc, output_dir)::String
-    mkpath(output_dir)
-    plot_file = joinpath(output_dir, "posterior_predictive_diagnostics.png")
-
-    p1 = plot(ppc.brier_scores; label="Brier Score", xlabel="Draw", ylabel="Score",
-              title="Posterior Predictive: Brier Score", legend=:topright)
-    p2 = plot(ppc.kl_divergences; label="KL Divergence", xlabel="Draw", ylabel="Divergence",
-              title="Posterior Predictive: KL Divergence", legend=:topright)
-    p3 = plot(1:length(ppc.observed_dist), ppc.observed_dist;
-              label="Observed", xlabel="Spatial Unit", ylabel="Probability",
-              title="Recapture Probability Distribution")
-
-    plot(p1, p2, p3; layout=(3, 1), size=(800, 900))
-    savefig(plot_file)
-    return plot_file
+function plot_posterior_predictive_check(args...)
+    throw(ArgumentError(
+        "Plotting output requires the optional `Plots` backend, which " *
+        "MovementAnalysis does not depend on by default. Install it with " *
+        "`import Pkg; Pkg.add(\"Plots\")`. The numeric diagnostics are " *
+        "available without it via `export_posterior_predictive_check`."
+    ))
 end
 
 """
@@ -6475,10 +6321,6 @@ function export_movement_posterior_dashboard(
     species::String = "generic"
 )::String
     mkpath(dirname(filepath))
-    G = kernels.G
-    grp_lookup = hasproperty(kernels, :group_lookup) ?
-                 kernels.group_lookup : Dict{Int, String}()
-
     alpha_samples = hasproperty(kernels, :alpha_samples) ?
                     kernels.alpha_samples : Matrix{Float64}(undef, 0, 0)
     rho_samples   = hasproperty(kernels, :rho_samples) ?
@@ -6662,61 +6504,47 @@ function export_movement_posterior_dashboard(
         return String(take!(io))
     end
 
-    group_sections = String[]
-    table_rows = String[]
-    palette = ["#38bdf8", "#10b981", "#fbbf24", "#f43f5e", "#a78bfa"]
+    lbl = "Pooled"
 
-    for g in 1:G
-        lbl = get(grp_lookup, g, "Group $g")
-        c = palette[mod(g - 1, length(palette)) + 1]
+    _col(M::AbstractMatrix) = size(M, 2) >= 1 ? Vector{Float64}(M[:, 1]) : Float64[]
+    _fallback(v) = v isa AbstractVector ? Float64[first(v)] : Float64[v]
 
-        a_v = size(alpha_samples, 2) >= g ? alpha_samples[:, g] : Float64[kernels.alpha[g]]
-        r_v = size(rho_samples, 2) >= g   ? rho_samples[:, g]   : Float64[kernels.rho[g]]
-        g_v = size(gamma_samples, 2) >= g ? gamma_samples[:, g] : Float64[kernels.gamma[g]]
+    a_v = isempty(alpha_samples) ? _fallback(kernels.alpha) : _col(alpha_samples)
+    r_v = isempty(rho_samples)   ? _fallback(kernels.rho)   : _col(rho_samples)
+    g_v = isempty(gamma_samples) ? _fallback(kernels.gamma) : _col(gamma_samples)
 
-        a_kde = _svg_kde_curve(a_v, "Advection (α)", "#38bdf8")
-        r_kde = _svg_kde_curve(r_v, "Residence (ρ)", "#10b981")
-        g_kde = _svg_kde_curve(g_v, "Diffusion (γ)", "#fbbf24")
+    a_kde = _svg_kde_curve(a_v, "Advection (α)", "#38bdf8")
+    r_kde = _svg_kde_curve(r_v, "Residence (ρ)", "#10b981")
+    g_kde = _svg_kde_curve(g_v, "Diffusion (γ)", "#fbbf24")
 
-        sc_ar = _svg_scatter_corr(a_v, r_v, "α", "ρ", "#38bdf8")
-        sc_ag = _svg_scatter_corr(a_v, g_v, "α", "γ", "#fbbf24")
+    sc_ar = _svg_scatter_corr(a_v, r_v, "α", "ρ", "#38bdf8")
+    sc_ag = _svg_scatter_corr(a_v, g_v, "α", "γ", "#fbbf24")
 
-        push!(group_sections, """
-        <div class="card">
-          <h2>$lbl — Marginal Posteriors & Parameter Correlations</h2>
-          <div class="grid-3">
-            <div class="plot-box"><div class="plot-title">Advection α ($lbl)</div>$a_kde</div>
-            <div class="plot-box"><div class="plot-title">Residence ρ ($lbl)</div>$r_kde</div>
-            <div class="plot-box"><div class="plot-title">Diffusion γ ($lbl)</div>$g_kde</div>
-          </div>
-          <h3 style="margin-top: 18px; margin-bottom: 8px; color: #94a3b8;">""" *
-          """Bivariate Correlations</h3>
-          <div class="grid-2">
-            <div class="plot-box"><div class="plot-title">α vs ρ Correlation</div>$sc_ar</div>
-            <div class="plot-box"><div class="plot-title">α vs γ Correlation</div>$sc_ag</div>
-          </div>
-        </div>
-        """)
+    sections = ["""
+    <div class="card">
+      <h2>$lbl &mdash; Marginal Posteriors &amp; Parameter Correlations</h2>
+      <div class="grid-3">
+        <div class="plot-box"><div class="plot-title">Advection α</div>$a_kde</div>
+        <div class="plot-box"><div class="plot-title">Residence ρ</div>$r_kde</div>
+        <div class="plot-box"><div class="plot-title">Diffusion γ</div>$g_kde</div>
+      </div>
+      <h3 style="margin-top: 18px; margin-bottom: 8px; color: #94a3b8;">""" *
+      """Bivariate Correlations</h3>
+      <div class="grid-2">
+        <div class="plot-box"><div class="plot-title">α vs ρ Correlation</div>$sc_ar</div>
+        <div class="plot-box"><div class="plot-title">α vs γ Correlation</div>$sc_ag</div>
+      </div>
+    </div>
+    """]
 
-        a_m = round(mean(a_v); digits=3)
-        a_q025 = round(quantile(a_v, 0.025); digits=3)
-        a_q975 = round(quantile(a_v, 0.975); digits=3)
-        r_m = round(mean(r_v); digits=3)
-        r_q025 = round(quantile(r_v, 0.025); digits=3)
-        r_q975 = round(quantile(r_v, 0.975); digits=3)
-        g_m = round(mean(g_v); digits=3)
-        g_q025 = round(quantile(g_v, 0.025); digits=3)
-        g_q975 = round(quantile(g_v, 0.975); digits=3)
-
-        push!(table_rows, """
-        <tr>
-          <td>$lbl</td>
-          <td>$a_m [$a_q025, $a_q975]</td>
-          <td>$r_m [$r_q025, $r_q975]</td>
-          <td>$g_m [$g_q025, $g_q975]</td>
-        </tr>
-        """)
-    end
+    table_rows = ["""
+    <tr>
+      <td>$lbl</td>
+      <td>$(round(mean(a_v); digits=3)) [$(round(quantile(a_v, 0.025); digits=3)), $(round(quantile(a_v, 0.975); digits=3))]</td>
+      <td>$(round(mean(r_v); digits=3)) [$(round(quantile(r_v, 0.025); digits=3)), $(round(quantile(r_v, 0.975); digits=3))]</td>
+      <td>$(round(mean(g_v); digits=3)) [$(round(quantile(g_v, 0.025); digits=3)), $(round(quantile(g_v, 0.975); digits=3))]</td>
+    </tr>
+    """]
 
     html = """<!DOCTYPE html>
 <html lang="en">
@@ -6779,14 +6607,14 @@ family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
   <div class="subtitle">MCMC Parameter Posteriors for Species: """ *
   """$(uppercase(species)) • 95% Bayesian Credible Intervals</div>
 
-  $(join(group_sections, "\n"))
+  $(join(sections, "\n"))
 
   <div class="card">
     <h2>Parameter Posterior Summary & 95% Credible Intervals</h2>
     <table>
       <thead>
         <tr>
-          <th>Group / Stratum</th>
+          <th>Parameter Set</th>
           <th>Advection α [95% CI]</th>
           <th>Residence ρ [95% CI]</th>
           <th>Diffusion γ [95% CI]</th>
@@ -8117,6 +7945,7 @@ function predict_dynamic_corridor(
     end
 
     node_intensity = zeros(Float64, S)
+    undefined_bridge = false
     for tau in 0:K
         norm_factor = sum(f_vecs[tau + 1] .* b_vecs[tau + 1])
         if norm_factor > 1e-15
@@ -8124,11 +7953,21 @@ function predict_dynamic_corridor(
                 f_vecs[tau + 1] .* b_vecs[tau + 1]
             ) ./ norm_factor
         else
-            node_intensity .+= (
-                f_vecs[tau + 1] .+ b_vecs[tau + 1]
-            ) .* 0.5
+            # The bridge conditional is undefined for this layer. Averaging the
+            # forward and backward vectors would invent an intensity profile, so
+            # the whole corridor is reported as undefined instead.
+            undefined_bridge = true
+            break
         end
     end
+
+    if undefined_bridge
+        @warn "predict_dynamic_corridor: release unit $release cannot reach " *
+              "recapture unit $recapture within $K step(s) of the supplied kernel " *
+              "sequence; the corridor is undefined and an all-NaN matrix is returned."
+        return fill(NaN, S, S)
+    end
+
     node_intensity ./= (K + 1)
 
     if land_mask !== nothing
@@ -8187,6 +8026,8 @@ acoustic detections, or irregular time intervals using a Hidden Markov Model
 - `log_likelihood`: Maximum path log-likelihood.
 - `time_steps`: Vector 1:T.
 - `obs_mask`: Boolean vector of length T indicating observed time steps.
+- `valid`: `true` when an admissible path was decoded; `false` with an empty
+  `path` when the observations cannot be connected within the time steps given.
 """
 function viterbi_hmm_path_smoothing(
     obs_times::AbstractVector{<:Integer},
@@ -8288,7 +8129,7 @@ function viterbi_hmm_path_smoothing(
         return log_mat
     end
 
-    delta = Matrix{Float64}(undef, S, T)
+    delta = fill(-Inf, S, T)
     psi = zeros(Int, S, T)
 
     init_prob = -log(S)
@@ -8300,33 +8141,68 @@ function viterbi_hmm_path_smoothing(
         log_P = log_P_fn(t - 1)
         for j in 1:S
             best_val = -Inf
-            best_i = 1
+            best_i = 0
             for i in 1:S
-                cand = delta[i, t - 1] + log_P[i, j]
+                prev_val = delta[i, t - 1]
+                isfinite(prev_val) || continue
+                cand = prev_val + log_P[i, j]
                 if cand > best_val
                     best_val = cand
                     best_i = i
                 end
             end
-            delta[j, t] = best_val + log_B[j, t]
-            psi[j, t] = best_i
+            if best_i != 0
+                delta[j, t] = best_val + log_B[j, t]
+                psi[j, t] = best_i
+            else
+                delta[j, t] = -Inf
+            end
         end
     end
 
     best_last = argmax(delta[:, T])
     best_ll = delta[best_last, T]
 
+    # -1e9 is the sentinel for a forbidden emission or transition, so a terminal
+    # score at or below the floor means every candidate sequence violates a
+    # constraint. Reporting the argmax of that field would fabricate a path.
+    if !isfinite(best_ll) || best_ll <= -1e8
+        @warn "viterbi_hmm_path_smoothing: no admissible state sequence connects the " *
+              "supplied observations within the requested time steps " *
+              "(terminal log-likelihood = $best_ll); no path is returned."
+        return (
+            path           = Int[],
+            log_likelihood = best_ll,
+            time_steps     = collect(1:T),
+            obs_mask       = obs_mask,
+            valid          = false,
+        )
+    end
+
     path = Vector{Int}(undef, T)
     path[T] = best_last
     for t in (T - 1):-1:1
-        path[t] = psi[path[t + 1], t + 1]
+        prev = psi[path[t + 1], t + 1]
+        if prev == 0
+            @warn "viterbi_hmm_path_smoothing: backpointer chain is broken at " *
+                  "t = $t; no path is returned."
+            return (
+                path           = Int[],
+                log_likelihood = best_ll,
+                time_steps     = collect(1:T),
+                obs_mask       = obs_mask,
+                valid          = false,
+            )
+        end
+        path[t] = prev
     end
 
     return (
         path           = path,
         log_likelihood = best_ll,
         time_steps     = collect(1:T),
-        obs_mask       = obs_mask
+        obs_mask       = obs_mask,
+        valid          = true,
     )
 end
 
@@ -8481,12 +8357,9 @@ end
 
 Generates synthetic animal movement and mark-recapture telemetry datasets mapped over a
 planar hexagonal spatial mesh. Simulates individual movement trajectories via discrete
-Markov transitions across mesh units, assigns demographic attributes, and classifies
-individuals into canonical biological groups matching `snowcrab_movement_data`:
-- `"female"`: Mature females (`mat == "mature"`, `sex == "F"`)
-- `"male"`: Mature males (`mat == "mature"`, `sex == "M"`)
-- `"immature"`: Immature individuals (`mat == "immature"`)
-- `"unknown"`: Unclassified or missing demographic observations
+Markov transitions across mesh units and records descriptive demographic observations
+(`sex`, `mat`) per event. These are carried as observations only: the movement model is
+pooled, so no group index is derived and no demographic stratification is applied.
 
 # Arguments
 - `radius_km::Real = 8.0`: Hexagonal cell circumradius in kilometers.
@@ -8510,10 +8383,9 @@ A `NamedTuple` with fields:
 - `monthly_hsi::Matrix{Float64}`: Monthly dynamic HSI fields (empty if static).
 - `month_lookup::Dict`: Mapping from `(year, month)` to monthly HSI column index.
 - `years::Vector{Int}`: Observed survey years.
-- `obs::DataFrame`: Extracted consecutive mark-recapture event pairs with biological
-  group classifications (`:group` column with 1-based indices).
+- `obs::DataFrame`: Extracted consecutive mark-recapture event pairs carrying descriptive
+  `:sex` and `:mat` observations (no derived group index).
 - `survey_df::DataFrame`: Synthetic spatial survey density observations.
-- `group_lookup::Dict{String, Int}`: Dictionary mapping group names to integer IDs.
 """
 function generate_movement_data(;
     radius_km     :: Real    = 8.0,
@@ -8692,15 +8564,9 @@ function generate_movement_data(;
 
     # Return empty DataFrame immediately if not enough rows to form a pair
     if n_rows < 2
-        obs = DataFrame(tagid=String[], release=Int[], recapture=Int[], 
-                        k=Int[], sex=String[], mat=String[], group=Int[])
+        obs = DataFrame(tagid=String[], release=Int[], recapture=Int[],
+                        k=Int[], sex=String[], mat=String[])
         survey_df = DataFrame(s_idx=Int[], t_idx=Int[], density=Int[], depth=Float64[], temp=Float64[])
-        default_group_lookup = Dict{String, Int}(
-            "female"   => 1,
-            "immature" => 2,
-            "male"     => 3,
-            "unknown"  => 4
-        )
         return (
             tagging      = tagging,
             mesh         = mesh,
@@ -8710,8 +8576,7 @@ function generate_movement_data(;
             month_lookup = month_lookup,
             years        = years_vec,
             obs          = obs,
-            survey_df    = survey_df,
-            group_lookup = default_group_lookup
+            survey_df    = survey_df
         )
     end
 
@@ -8752,41 +8617,7 @@ function generate_movement_data(;
 
     obs = DataFrame(pair_records)
 
-    # 4. Assign 3-tier biological groupings matching snowcrab_movement_data()
-    n_obs = nrow(obs)
-    labels = Vector{String}(undef, n_obs)
-    
-    if n_obs > 0
-        obs_sexes = obs[!, :sex]
-        obs_mats  = obs[!, :mat]
-
-        @inbounds for i in 1:n_obs
-            sx = string(obs_sexes[i])
-            mt = string(obs_mats[i])
-
-            if mt == "immature" || mt == "imm"
-                labels[i] = "immature"
-            elseif (mt == "mature" || mt == "mat") && (sx == "M" || sx == "male")
-                labels[i] = "male"
-            elseif (mt == "mature" || mt == "mat") && (sx == "F" || sx == "female")
-                labels[i] = "female"
-            else
-                labels[i] = "unknown"
-            end
-        end
-    end
-    
-    unique_labels = sort!(unique(labels))
-    group_lookup  = Dict{String, Int}(lbl => i for (i, lbl) in enumerate(unique_labels))
-        
-    group_ids = Vector{Int}(undef, n_obs)
-    @inbounds for i in 1:n_obs
-        group_ids[i] = group_lookup[labels[i]]
-    end
-
-    obs[!, :group] = group_ids
-
-    # 5. Generate synthetic survey density observations for Option 3 joint modeling
+    # 4. Generate synthetic survey density observations for joint modeling
     mu_density = exp.(1.5 .+ 2.0 .* hsi_vec .- 0.005 .* (depth_vec .- 170.0))
     density_counts = [rand(rng, NegativeBinomial(4.0, 4.0 / (4.0 + mu_density[s]))) 
                       for s in 1:mesh.n_units]
@@ -8808,8 +8639,7 @@ function generate_movement_data(;
         years        = years_vec,
         obs          = obs,
         survey_df    = survey_df,
-        depth_vec    = depth_vec,
-        group_lookup = group_lookup
+        depth_vec    = depth_vec
     )
 end
 
