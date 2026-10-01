@@ -6,9 +6,58 @@ const _DepthRangeArg = Union{
 }
 
 
-using RCall
 using Arrow
 using DataFrames
+
+"""
+    _require_r_backend(what) -> Nothing
+
+Raise a clear, actionable error when an R-backed code path is reached without
+`RCall` installed.
+
+R is an optional dependency. `MovementAnalysisRCallExt` is loaded automatically
+when `RCall` and a working R are both present; this stub only fires when they are
+not, and it names the specific input that needed them rather than surfacing an
+`UndefVarError` from deep inside a loader.
+"""
+function _require_r_backend(what::AbstractString)
+    Base.get_extension(@__MODULE__, :MovementAnalysisRCallExt) === nothing && throw(
+        ArgumentError(
+            "$what requires the optional `RCall` backend, which is not loaded. " *
+            "Install it with `import Pkg; Pkg.add(\"RCall\")` and ensure an R " *
+            "installation with the `qs` and `arrow` R packages is configured. " *
+            "Alternatively supply the data in Arrow, CSV, GeoJSON, or shapefile " *
+            "form, which need no R."
+        ),
+    )
+    return nothing
+end
+
+"""
+    _r_ipc_convert(filepath, temp_ipc)
+
+Convert a tabular R file to an Arrow IPC file, in R.
+
+Implemented by `MovementAnalysisRCallExt`. This stub exists so the package loads
+without `RCall`.
+"""
+function _r_ipc_convert(filepath::AbstractString, temp_ipc::AbstractString)
+    _require_r_backend("Reading R data ($filepath)")
+    return nothing
+end
+
+"""
+    _r_load_object(path)
+
+Load an R object (`.rds` / `.RData`) for region-polygon extraction.
+
+Implemented by `MovementAnalysisRCallExt`. This stub exists so the package loads
+without `RCall`.
+"""
+function _r_load_object(path::AbstractString)
+    _require_r_backend("Reading R region polygons ($path)")
+    return nothing
+end
 
 """
     r_to_ipc(filepath::AbstractString)
@@ -48,40 +97,10 @@ function r_to_ipc(filepath::AbstractString)
     temp_ipc = tempname() * ".arrow"
     
     try
-        # Execute the R logic inside a local environment
-        R"""
-        local({
-            filepath <- $(filepath)
-            outpath <- $(temp_ipc)
-            
-            ext <- tolower(tools::file_ext(filepath))
-            
-            # 1. Parse the R serialization format
-            if (ext %in% c("rdz", "qs")) {
-                obj <- qs::qread(filepath)
-            } else if (ext == "rds") {
-                obj <- readRDS(filepath)
-            } else if (ext %in% c("rda", "rdata")) {
-                env <- new.env()
-                load(filepath, envir = env)
-                vars <- ls(env)
-                if (length(vars) == 0) stop("No objects found in .rda file")
-                obj <- env[[vars[1]]]
-            } else {
-                stop(paste("Unsupported file extension:", ext))
-            }
-            
-            # 2. Validate tabular structure
-            if (!is.data.frame(obj)) {
-                stop("Object is not a data.frame. IPC requires tabular data.")
-            }
-            
-            # 3. Export to intermediate Arrow IPC
-            # zstd provides excellent block-level compression to minimize disk IO time
-            arrow::write_ipc_file(obj, outpath, compression = "zstd")
-        })
-        """
-        
+        # The R conversion lives in MovementAnalysisRCallExt so that the package
+        # loads without an R installation.
+        _r_ipc_convert(filepath, temp_ipc)
+
         # Read the raw bytes from disk into memory. This avoids Windows file-locking 
         # issues that occur if we were to memory-map the file directly from disk.
         ipc_bytes = read(temp_ipc)

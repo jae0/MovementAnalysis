@@ -37,6 +37,7 @@ include("spatial_sources.jl")
 include("spatial_utils.jl")
 include("ssa_movement.jl")
 include("turing_models.jl")
+include("persistence.jl")
 include("movement.jl")
 include("circuit.jl")
 include("dashboards.jl")
@@ -95,6 +96,14 @@ export
     movement_alpha_rho,
     kstep_transition_cache,
     build_sparse_transition_kernel,
+    build_persistent_transition_kernel,
+    persistent_unit_marginal,
+    persistence_gain_report,
+    bearing_deg,
+    coordinate_space_of,
+    local_hsi_advantage,
+    residency_from_advantage,
+    sanitise_hsi,
     construct_stochastic_transition_kernel,
     construct_dynamic_transition_kernels,
     calculate_multistep_transition,

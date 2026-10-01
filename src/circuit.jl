@@ -59,6 +59,7 @@ function build_circuit_laplacian(
     conductance::Union{Nothing, AbstractVector{<:Real}, AbstractMatrix{<:Real}} = nothing,
     resistance::Union{Nothing, AbstractVector{<:Real}} = nothing,
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    hsi_exponent::Real = 1.0,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
 )
     S = size(W, 1)
@@ -92,9 +93,12 @@ function build_circuit_laplacian(
                 r_j = max(1e-6, Float64(resistance[j]))
                 c_ij = w_ij * (2.0 / (r_i + r_j))
             elseif !isnothing(hsi)
+                # Conductance from habitat suitability:
+                #     c_ij = W_ij * exp(alpha * (h_i + h_j) / 2)
+                # with alpha = 1.0 recovering the default habitat weighting.
                 h_i = clamp(Float64(hsi[i]), 0.0, 1.0)
                 h_j = clamp(Float64(hsi[j]), 0.0, 1.0)
-                c_ij = w_ij * exp(0.5 * (h_i + h_j))
+                c_ij = w_ij * exp(0.5 * Float64(hsi_exponent) * (h_i + h_j))
             end
 
             push!(rows, i)
@@ -163,6 +167,7 @@ function effective_resistance_matrix(
     L::AbstractMatrix;
     W::Union{Nothing, AbstractMatrix} = nothing,
     centroids::Union{Nothing, AbstractVector} = nothing,
+    coord_space::Symbol = :unknown,
     disconnected_dist::Real = 1e6
 )
     S = size(L, 1)
@@ -232,14 +237,26 @@ function effective_resistance_matrix(
         end
     end
 
-    # Physical spatial distance calibration if centroids provided
+    # Physical spatial distance calibration if centroids provided.
+    #
+    # `coord_space` is authoritative: `:geographic` uses haversine on WGS84
+    # degrees, `:planar_km` uses Euclidean distance on a local metric frame that
+    # is already in kilometres. Both produce kilometres, so the calibrated
+    # resistance matrix is in kilometres either way. `:unknown` falls back to a
+    # conservative inference; declare the space whenever it is known, because a
+    # planar-km frame inside the degree box would otherwise be read as
+    # longitude/latitude and the scale factor would collapse toward zero.
     if !isnothing(centroids) && length(centroids) == S
+        space = coord_space
+        if space === :unknown
+            space = _infer_coord_space(centroids) ? :geographic : :planar_km
+        end
         edge_dists = Float64[]
         for j in 1:S
             for i in (j + 1):S
                 if adj[i, j] > 0 && isfinite(Omega[i, j]) && Omega[i, j] > 0.0
                     c1, c2 = centroids[i], centroids[j]
-                    d_phys = _spatial_node_distance(c1, c2)
+                    d_phys = _spatial_node_distance(c1, c2; coord_space = space)
                     if d_phys > 0.0
                         push!(edge_dists, d_phys / Omega[i, j])
                     end
@@ -429,7 +446,34 @@ function solve_directed_circuit_voltage(
     end
 
     P_sp = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
-    
+
+    # Reachability is a structural property of the directed support of P, not a
+    # magnitude. When the sink is unreachable from the source there is no voltage
+    # drop and no current can flow. Solving (I - alpha*P) \ e_sink still returns a
+    # finite, tiny, strictly positive vector in that case, so clamping it to a
+    # floor would turn an unreachable pair into a large but finite resistance
+    # accompanied by finite edge currents, which reads as a real measurement.
+    reachable = falses(S)
+    reachable[source] = true
+    stack = Int[source]
+    while !isempty(stack)
+        i = pop!(stack)
+        for ptr in nzrange(P_sp, i)
+            j = rowvals(P_sp)[ptr]
+            if !reachable[j]
+                reachable[j] = true
+                push!(stack, j)
+            end
+        end
+    end
+
+    if !reachable[sink]
+        @warn "solve_directed_circuit_voltage: unit $sink is unreachable from " *
+              "unit $source under the supplied kernel; returning zero voltage and " *
+              "no current rather than a finite clamped resistance."
+        return zeros(Float64, S), Inf, spzeros(Float64, S, S)
+    end
+
     # "Voltage" is derived from expected reachability
     M = sparse(I, S, S) - alpha * P_sp
     b = zeros(Float64, S)
@@ -439,6 +483,7 @@ function solve_directed_circuit_voltage(
     catch
         fill(1e-15, S)
     end
+    # The sink is known reachable here, so this floor is a numerical guard only.
     v_reach = max.(v_reach, 1e-15)
 
     # Convert reachability to a "voltage" that drops as it gets closer to sink
@@ -538,7 +583,11 @@ pinch-points.
 - `weights`: Optional vector of event weights (e.g. tag observation counts).
 - `conductance`: Optional custom conductance.
 - `resistance`: Optional nodal resistance/friction vector.
-- `hsi`: Optional Habitat Suitability Index vector.
+- `hsi`: Optional Habitat Suitability Index vector. Conductance is then
+  ``c_{ij} = W_{ij}\\exp\\left(\\alpha (h_i + h_j)/2\\right)`` with
+  ``\\alpha = \\texttt{conductance\\_power}``.
+- `conductance_power`: Exponent ``\\alpha`` on the habitat term of the conductance
+  equation (default: 1.0).
 - `land_mask`: Optional boolean mask (`true` for land units).
 
 # Returns
@@ -555,6 +604,7 @@ function current_density_map(
     conductance::Union{Nothing, AbstractVector{<:Real}, AbstractMatrix{<:Real}} = nothing,
     resistance::Union{Nothing, AbstractVector{<:Real}} = nothing,
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    conductance_power::Real = 1.0,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
 )
     n_events = length(sources)
@@ -568,6 +618,7 @@ function current_density_map(
         conductance = conductance,
         resistance = resistance,
         hsi = hsi,
+        hsi_exponent = conductance_power,
         land_mask = land_mask
     )
 
@@ -830,7 +881,11 @@ P(\\text{PinchPoint}_i \\mid \\text{data}) =
 - `land_mask`: Optional boolean mask (`true` for land units).
 - `top_quantile`: Quantile threshold for bottleneck pinch-points (default: 0.90).
 - `ci_alpha`: Significance level for credible intervals (default: 0.05 for 95% CI).
-- `conductance_power`: Exponent ``\\gamma`` for conductance scaling (default: 1.0).
+- `conductance_power`: Exponent ``\\gamma`` applied to the habitat term of the
+  conductance equation ``c_{ij} = W_{ij}\\exp\\left(\\gamma (h_i + h_j)/2\\right)``
+  (default: 1.0, which recovers the unweighted habitat conductance). Larger
+  values make the current field more strongly concentrated in high-suitability
+  units. This scales conductance directly; it is not an exponent on HSI.
 - `seed`: Optional random seed for reproducibility.
 
 # Returns
@@ -915,9 +970,6 @@ function posterior_circuit_inference(
     # 2. Iterate across stochastic draws
     for m in 1:M_total
         h_m = h_draws[:, m]
-        if c_pow != 1.0
-            h_m = clamp.(h_m, 0.0, 1.0) .^ c_pow
-        end
 
         cur_dens, edge_I, _, _ = current_density_map(
             W,
@@ -925,6 +977,7 @@ function posterior_circuit_inference(
             sinks;
             weights = weights,
             hsi = h_m,
+            conductance_power = c_pow,
             land_mask = land_mask
         )
 

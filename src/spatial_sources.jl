@@ -14,7 +14,6 @@ using GeoDatasets
 using GeoInterface
 using GeoJSON
 using JLD2
-using RCall
 
 # =============================================================================
 # Bounding box
@@ -461,14 +460,9 @@ function _as_ring(r)
 end
 
 function _read_rdata(path::AbstractString)
-    val = RCall.reval(R"load($path)")
-    # Unwrap the single object an .rds/.RData file normally holds.
-    if val isa RCall.RObject && length(RCall.rcopy(val)) == 1
-        inner = first(RCall.rcopy(val))
-        inner isa RCall.RObject && return RCall.rcopy(inner)
-        return inner
-    end
-    return RCall.rcopy(val)
+    # Implemented by MovementAnalysisRCallExt; the base stub raises a clear error
+    # when RCall is not installed.
+    return _r_load_object(path)
 end
 
 # -- vector formats -----------------------------------------------------------

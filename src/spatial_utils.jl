@@ -48,6 +48,62 @@ const STANDARD_TEMPORAL_CANDIDATES = [
 ]
 
 """
+    prune_mesh(mesh::NamedTuple, keep::AbstractVector{Bool}) -> NamedTuple
+
+Restrict a spatial mesh to the units flagged in `keep`, renumbering them
+contiguously from 1.
+
+Any field of `mesh` that is indexed by unit is subset accordingly: a vector of
+length `n_units` is indexed by the kept positions, and an `n_units x n_units`
+matrix (the adjacency `W`) has both its rows and columns subset. Scalars and
+non-unit-indexed fields pass through unchanged, and `n_units` is recomputed. This
+is generic over the mesh's fields so that a mesh carrying, for example,
+`centroids_km`, `polygons_lonlat`, `areas_km`, and `land_mask` is pruned
+consistently without this function needing to know each field by name.
+
+# Arguments
+- `mesh`: Partition NamedTuple, normally from `build_hex_mesh_planar` or a
+  reshard.
+- `keep`: Boolean mask of length `n_units`; `true` means retain.
+
+# Returns
+- A `NamedTuple` of the same type, containing only the kept units.
+
+# Throws
+- `ArgumentError` if `keep` has the wrong length, or retains no units at all —
+  an empty mesh would silently invalidate every downstream index.
+"""
+function prune_mesh(mesh::NamedTuple, keep::AbstractVector{Bool})::NamedTuple
+    hasproperty(mesh, :n_units) || throw(ArgumentError(
+        "prune_mesh requires a mesh with an `n_units` field."
+    ))
+    S = Int(mesh.n_units)
+    length(keep) == S || throw(ArgumentError(
+        "prune_mesh: keep mask has length $(length(keep)) but the mesh has $S units."
+    ))
+    idx = findall(keep)
+    isempty(idx) && throw(ArgumentError(
+        "prune_mesh: the keep mask retains no units, which would leave an empty mesh."
+    ))
+
+    out = NamedTuple()
+    for k in keys(mesh)
+        v = getfield(mesh, k)
+        newv = if k === :n_units
+            length(idx)
+        elseif v isa AbstractMatrix && size(v, 1) == S && size(v, 2) == S
+            v[idx, idx]
+        elseif v isa AbstractVector && length(v) == S
+            v[idx]
+        else
+            v
+        end
+        out = merge(out, NamedTuple{(k,)}((newv,)))
+    end
+    return out
+end
+
+"""
     _detect_xy_columns(df; x=nothing, y=nothing)::Tuple{Symbol, Symbol}
 
 Automatically identifies or validates 2D spatial coordinate columns in a tabular dataset
@@ -736,7 +792,7 @@ end
     ) -> NamedTuple
 
 Ingest or synthesize high-resolution open-sourced bathymetry data for coastal
-shelf environments of the configured study area).
+shelf environments (e.g., Scotian Shelf, Cabot Strait, and Gulf of St. Lawrence).
 
 # Mathematical & Physical Foundation
 Seafloor elevation ``z_{\\text{bottom}}(\\mathbf{s})`` satisfies:
@@ -861,19 +917,18 @@ function load_open_bathymetry(;
             for i in 1:nx
                 x_norm = (lons[i] - min_lon) / (max_lon - min_lon)
 
-                # Realistic continental shelf break line across NW Atlantic:
-                # Shelf edge runs from ~42.3°N in southwest to ~44.3°N in east
-                lat_shelf_break = 42.3 + 2.0 * x_norm
-                shelf_edge_y = clamp((lat_shelf_break - min_lat) / (max_lat - min_lat), 0.05, 0.70)
+                # Distance from shelf-edge line (roughly southwest to northeast)
+                # Shelf edge runs from (0.0, 0.35) to (1.0, 0.70)
+                shelf_edge_y = 0.35 + 0.35 * x_norm
                 dist_to_slope = y_norm - shelf_edge_y
 
                 base_elev = if dist_to_slope < -0.05
                     # Continental Slope and Abyss (deep ocean)
-                    slope_t = min(1.0, max(0.0, (-dist_to_slope - 0.05) / 0.35))
+                    slope_t = clamp((-dist_to_slope - 0.05) / 0.35, 0.0, 1.0)
                     -200.0 - 2200.0 * (slope_t ^ 1.8)
                 else
                     # Continental Shelf Platform: depth typically 50m to 220m
-                    shelf_t = min(1.0, max(0.0, dist_to_slope / 0.6))
+                    shelf_t = clamp(dist_to_slope / 0.6, 0.0, 1.0)
                     # Outer shelf banks (shallow offshore features)
                     bank_signal = 55.0 * sin(3.0 * π * x_norm) * cos(2.5 * π * y_norm)
                     # Central shelf basins / troughs
@@ -1179,7 +1234,7 @@ function extract_hydrodynamic_dataset(
                     s_val = 31.2 + 1.9 * (1.0 - y_norm) + 1.3 * x_norm + (abs(z) / 150.0) * 1.4
                     S_mat[i, j, k] = clamp(s_val, 29.8, 35.8)
 
-                    # Advection: a synthetic along-shelf current, direction set by the caller
+                    # Advection: Southwestward Nova Scotia Current along coastal shelf
                     z_atten = exp(z / 80.0)
                     u_mean = (-0.18 - 0.12 * y_norm) * z_atten
                     v_mean = (-0.10 - 0.08 * (1.0 - x_norm)) * z_atten
@@ -1399,6 +1454,38 @@ get_polygon_area(s_x::AbstractVector, s_y::AbstractVector) =
 
 
 """
+    _infer_coord_space(coords) -> Bool
+
+Conservative inference of whether `coords` are geographic `(lon, lat)` degrees.
+
+Returns `true` only when the points lie inside the WGS84 bounding box *and* fall
+in one of the known marine regions. A magnitude test alone is not sufficient: a
+planar frame in kilometres routinely satisfies `[-180, 180]`, so treating it as
+degrees collapses distances and can pick the wrong geometry family when matching
+a source mesh against a destination mesh. Callers that know the space must state
+it rather than relying on this.
+"""
+function _infer_coord_space(coords)::Bool
+    xs = Float64[]
+    ys = Float64[]
+    for pt in coords
+        length(pt) >= 2 || continue
+        (isnan(pt[1]) || isnan(pt[2])) && continue
+        push!(xs, Float64(pt[1]))
+        push!(ys, Float64(pt[2]))
+    end
+    (isempty(xs) || isempty(ys)) && return false
+    min_x, max_x = minimum(xs), maximum(xs)
+    min_y, max_y = minimum(ys), maximum(ys)
+
+    (min_y < -90.0 || max_y > 90.0 || min_x < -180.0 || max_x > 180.0) && return false
+
+    return (min_x <= -20.0 && max_x <= -10.0 && min_y >= 30.0 && max_y <= 85.0) ||
+           (min_x >= 100.0 && max_x <= 180.0 && min_y >= -50.0 && max_y <= 70.0) ||
+           (min_x >= -180.0 && max_x <= -50.0 && min_y >= -60.0 && max_y <= 75.0)
+end
+
+"""
     compute_network_transfer_matrix(
         au_src::NamedTuple,
         au_dest::NamedTuple;
@@ -1459,20 +1546,21 @@ function compute_network_transfer_matrix(
     end
 
     # Determine coordinate scale (geographic degrees vs projected planar km)
-    is_geo_coords(pts) = !isempty(pts) &&
-        all(abs(c[1]) <= 180.5 && abs(c[2]) <= 90.5 for c in pts)
-    src_is_geo = is_geo_coords(src_cents)
+    src_is_geo = _infer_coord_space(src_cents)
 
     resolve_au_geom(au, ref_geo) = begin
-        if ref_geo && hasproperty(au, :polygons_lonlat) && !isempty(au.polygons_lonlat)
+        if ref_geo && hasproperty(au, :polygons_lonlat) &&
+           au.polygons_lonlat !== nothing && !isempty(au.polygons_lonlat)
             cents = hasproperty(au, :centroids_lonlat) ?
                 au.centroids_lonlat : _extract_cents(au)
             return (polygons = au.polygons_lonlat, centroids = cents)
-        elseif !ref_geo && hasproperty(au, :polygons_km) && !isempty(au.polygons_km)
+        elseif !ref_geo && hasproperty(au, :polygons_km) &&
+               au.polygons_km !== nothing && !isempty(au.polygons_km)
             cents = hasproperty(au, :centroids_km) ?
                 au.centroids_km : _extract_cents(au)
             return (polygons = au.polygons_km, centroids = cents)
-        elseif hasproperty(au, :polygons) && !isempty(au.polygons)
+        elseif hasproperty(au, :polygons) &&
+               au.polygons !== nothing && !isempty(au.polygons)
             cents = _extract_cents(au)
             return (polygons = au.polygons, centroids = cents)
         else
@@ -2133,84 +2221,3 @@ function load_hsi_jld2(
         month_lookup     = month_lookup
     )
 end
-
-"""
-    prune_mesh(mesh::NamedTuple, keep_mask::AbstractVector{Bool}) -> NamedTuple
-
-Prunes a spatial tessellation NamedTuple (such as returned by
-`build_hex_mesh_planar`) to retain only units where `keep_mask[i] == true`.
-
-Re-indexes:
-- `centroids`, `centroids_km`, `centroids_lonlat`
-- `polygons`, `polygons_km`, `polygons_lonlat`
-- Adjacency matrix `W = mesh.W[keep_mask, keep_mask]`
-- Unit counts `n_units = count(keep_mask)`
-- `areas_km2`, and optional fields `land_mask`, `is_fine`, `depth_vec` if present.
-
-# Arguments
-- `mesh`: Spatial mesh NamedTuple.
-- `keep_mask`: Boolean vector of length `mesh.n_units`.
-
-# Returns
-- A pruned `NamedTuple` matching the fields and structure of `mesh`.
-"""
-function prune_mesh(
-    mesh::NamedTuple,
-    keep_mask::AbstractVector{Bool}
-)::NamedTuple
-    length(keep_mask) == mesh.n_units || throw(ArgumentError(
-        "keep_mask length ($(length(keep_mask))) must match mesh.n_units ($(mesh.n_units))"
-    ))
-    n_new = count(keep_mask)
-    n_new > 0 || throw(ArgumentError("Cannot prune mesh to 0 units; keep_mask has no true elements."))
-
-    c_ll = hasproperty(mesh, :centroids_lonlat) ? mesh.centroids_lonlat[keep_mask] : nothing
-    c_km = hasproperty(mesh, :centroids_km) ? mesh.centroids_km[keep_mask] : nothing
-    c_raw = hasproperty(mesh, :centroids) ? mesh.centroids[keep_mask] : (c_ll !== nothing ? c_ll : c_km)
-
-    p_ll = hasproperty(mesh, :polygons_lonlat) ? mesh.polygons_lonlat[keep_mask] : nothing
-    p_km = hasproperty(mesh, :polygons_km) ? mesh.polygons_km[keep_mask] : nothing
-    p_raw = hasproperty(mesh, :polygons) ? mesh.polygons[keep_mask] : (p_ll !== nothing ? p_ll : p_km)
-
-    W_new = hasproperty(mesh, :W) && mesh.W !== nothing ? mesh.W[keep_mask, keep_mask] : nothing
-
-    areas_new = hasproperty(mesh, :areas_km2) ? mesh.areas_km2[keep_mask] : nothing
-    land_new = hasproperty(mesh, :land_mask) && mesh.land_mask !== nothing ?
-        mesh.land_mask[keep_mask] : nothing
-    fine_new = hasproperty(mesh, :is_fine) && mesh.is_fine !== nothing ?
-        mesh.is_fine[keep_mask] : nothing
-
-    c_lon = hasproperty(mesh, :center_lon) ? mesh.center_lon : (
-        c_ll !== nothing ? mean([c[1] for c in c_ll]) : 0.0
-    )
-    c_lat = hasproperty(mesh, :center_lat) ? mesh.center_lat : (
-        c_ll !== nothing ? mean([c[2] for c in c_ll]) : 0.0
-    )
-    r_km = hasproperty(mesh, :radius_km) ? mesh.radius_km : 5.0
-
-    res = (
-        centroids        = c_raw,
-        centroids_km     = c_km,
-        centroids_lonlat = c_ll,
-        polygons         = p_raw,
-        polygons_km      = p_km,
-        polygons_lonlat  = p_ll,
-        n_units          = n_new,
-        W                = W_new,
-        radius_km        = r_km,
-        areas_km2        = areas_new,
-        center_lon       = c_lon,
-        center_lat       = c_lat,
-    )
-
-    # Attach optional fields if present on input
-    if land_new !== nothing
-        res = merge(res, (land_mask = land_new,))
-    end
-    if fine_new !== nothing
-        res = merge(res, (is_fine = fine_new,))
-    end
-
-    return res
-end
-
