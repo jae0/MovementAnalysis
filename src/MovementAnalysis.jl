@@ -50,6 +50,9 @@ include("agent_movement.jl")
 export
     # Spatial Mesh & Partitioning Utilities
     build_hex_mesh_planar,
+    prune_mesh,
+    resolve_bbox,
+    extract_sppoly_bounds,
     map_point_to_units,
     map_to_units,
     assign_spatial_units,
@@ -165,6 +168,8 @@ export
     leaflet_choropleth,
     leaflet_spatial_map,
     leaflet_spatial_graph,
+    leaflet_tessellation_map,
+    show_map,
     leaflet_hsi_map,
     leaflet_diffusion_map,
     leaflet_residence_time_map,

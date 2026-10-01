@@ -2133,3 +2133,84 @@ function load_hsi_jld2(
         month_lookup     = month_lookup
     )
 end
+
+"""
+    prune_mesh(mesh::NamedTuple, keep_mask::AbstractVector{Bool}) -> NamedTuple
+
+Prunes a spatial tessellation NamedTuple (such as returned by
+`build_hex_mesh_planar`) to retain only units where `keep_mask[i] == true`.
+
+Re-indexes:
+- `centroids`, `centroids_km`, `centroids_lonlat`
+- `polygons`, `polygons_km`, `polygons_lonlat`
+- Adjacency matrix `W = mesh.W[keep_mask, keep_mask]`
+- Unit counts `n_units = count(keep_mask)`
+- `areas_km2`, and optional fields `land_mask`, `is_fine`, `depth_vec` if present.
+
+# Arguments
+- `mesh`: Spatial mesh NamedTuple.
+- `keep_mask`: Boolean vector of length `mesh.n_units`.
+
+# Returns
+- A pruned `NamedTuple` matching the fields and structure of `mesh`.
+"""
+function prune_mesh(
+    mesh::NamedTuple,
+    keep_mask::AbstractVector{Bool}
+)::NamedTuple
+    length(keep_mask) == mesh.n_units || throw(ArgumentError(
+        "keep_mask length ($(length(keep_mask))) must match mesh.n_units ($(mesh.n_units))"
+    ))
+    n_new = count(keep_mask)
+    n_new > 0 || throw(ArgumentError("Cannot prune mesh to 0 units; keep_mask has no true elements."))
+
+    c_ll = hasproperty(mesh, :centroids_lonlat) ? mesh.centroids_lonlat[keep_mask] : nothing
+    c_km = hasproperty(mesh, :centroids_km) ? mesh.centroids_km[keep_mask] : nothing
+    c_raw = hasproperty(mesh, :centroids) ? mesh.centroids[keep_mask] : (c_ll !== nothing ? c_ll : c_km)
+
+    p_ll = hasproperty(mesh, :polygons_lonlat) ? mesh.polygons_lonlat[keep_mask] : nothing
+    p_km = hasproperty(mesh, :polygons_km) ? mesh.polygons_km[keep_mask] : nothing
+    p_raw = hasproperty(mesh, :polygons) ? mesh.polygons[keep_mask] : (p_ll !== nothing ? p_ll : p_km)
+
+    W_new = hasproperty(mesh, :W) && mesh.W !== nothing ? mesh.W[keep_mask, keep_mask] : nothing
+
+    areas_new = hasproperty(mesh, :areas_km2) ? mesh.areas_km2[keep_mask] : nothing
+    land_new = hasproperty(mesh, :land_mask) && mesh.land_mask !== nothing ?
+        mesh.land_mask[keep_mask] : nothing
+    fine_new = hasproperty(mesh, :is_fine) && mesh.is_fine !== nothing ?
+        mesh.is_fine[keep_mask] : nothing
+
+    c_lon = hasproperty(mesh, :center_lon) ? mesh.center_lon : (
+        c_ll !== nothing ? mean([c[1] for c in c_ll]) : 0.0
+    )
+    c_lat = hasproperty(mesh, :center_lat) ? mesh.center_lat : (
+        c_ll !== nothing ? mean([c[2] for c in c_ll]) : 0.0
+    )
+    r_km = hasproperty(mesh, :radius_km) ? mesh.radius_km : 5.0
+
+    res = (
+        centroids        = c_raw,
+        centroids_km     = c_km,
+        centroids_lonlat = c_ll,
+        polygons         = p_raw,
+        polygons_km      = p_km,
+        polygons_lonlat  = p_ll,
+        n_units          = n_new,
+        W                = W_new,
+        radius_km        = r_km,
+        areas_km2        = areas_new,
+        center_lon       = c_lon,
+        center_lat       = c_lat,
+    )
+
+    # Attach optional fields if present on input
+    if land_new !== nothing
+        res = merge(res, (land_mask = land_new,))
+    end
+    if fine_new !== nothing
+        res = merge(res, (is_fine = fine_new,))
+    end
+
+    return res
+end
+

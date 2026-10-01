@@ -21,20 +21,26 @@ using RCall
 # =============================================================================
 
 """
-    resolve_bbox(configured, padding_deg, lons, lats) -> NTuple{4, Float64}
+    resolve_bbox(
+        configured, padding_deg, lons, lats;
+        sppoly_bounds = nothing
+    ) -> NTuple{4, Float64}
 
 Determine the analysis domain as `(west, south, east, north)` in degrees.
 
 A configured `bbox` is authoritative and is only validated. When it is absent the
 extent is derived from the supplied coordinates -- the telemetry positions and, if
 available, the spatial-unit polygons -- and padded so the mesh is not clipped
-flush against the outermost detections.
+flush against the outermost detections. When `sppoly_bounds` is provided as
+`(min_lon, min_lat, max_lon, max_lat)`, the southern and south-western bounds are
+delimited so the tessellation does not expand beyond the survey bounds.
 """
 function resolve_bbox(
     configured::Union{Nothing, AbstractVector{<:Real}},
     padding_deg::Real,
     lons::AbstractVector{<:Real},
-    lats::AbstractVector{<:Real}
+    lats::AbstractVector{<:Real};
+    sppoly_bounds::Union{Nothing, NTuple{4, Float64}} = nothing
 )::NTuple{4, Float64}
 
     if configured !== nothing
@@ -59,8 +65,81 @@ function resolve_bbox(
     e = maximum(lons) + padding_deg
     s = minimum(lats) - padding_deg
     n = maximum(lats) + padding_deg
+
+    if sppoly_bounds !== nothing
+        # Delimit south and south-western boundaries by sppoly bounds
+        w = max(w, sppoly_bounds[1])
+        s = max(s, sppoly_bounds[2])
+    end
+
     # Clamp to the valid geographic range; padding must not run off the globe.
     return (max(w, -180.0), max(s, -90.0), min(e, 180.0), min(n, 90.0))
+end
+
+"""
+    extract_sppoly_bounds(path) -> Union{Nothing, NTuple{4, Float64}}
+
+Extract spatial domain bounding coordinates `(min_lon, min_lat, max_lon, max_lat)`
+from an `sppoly` JLD2 or table file. Looks for `:centroid_lon`/`:centroid_lat`,
+`:lon`/`:lat`, or reads polygon rings if present.
+"""
+function extract_sppoly_bounds(
+    path::Union{Nothing, AbstractString}
+)::Union{Nothing, NTuple{4, Float64}}
+    isnothing(path) && return nothing
+    isfile(path) || return nothing
+    try
+        f = JLD2.jldopen(path, "r")
+        obj = if haskey(f, "sppoly")
+            f["sppoly"]
+        elseif haskey(f, "au")
+            f["au"]
+        else
+            first(values(f))
+        end
+        close(f)
+
+        if obj isa DataFrame
+            lons = if hasproperty(obj, :centroid_lon)
+                obj.centroid_lon
+            elseif hasproperty(obj, :lon)
+                obj.lon
+            else
+                nothing
+            end
+            lats = if hasproperty(obj, :centroid_lat)
+                obj.centroid_lat
+            elseif hasproperty(obj, :lat)
+                obj.lat
+            else
+                nothing
+            end
+            if lons !== nothing && lats !== nothing && !isempty(lons)
+                return (
+                    Float64(minimum(lons)), Float64(minimum(lats)),
+                    Float64(maximum(lons)), Float64(maximum(lats))
+                )
+            end
+        elseif hasproperty(obj, :lon) && hasproperty(obj, :lat)
+            return (
+                Float64(minimum(obj.lon)), Float64(minimum(obj.lat)),
+                Float64(maximum(obj.lon)), Float64(maximum(obj.lat))
+            )
+        end
+    catch
+    end
+
+    # Fallback to general polygon reading
+    try
+        rings = read_polygon_file(path)
+        all_pts = Tuple{Float64, Float64}[]
+        for ring in rings
+            append!(all_pts, ring)
+        end
+        return bbox_of(all_pts)
+    catch
+        return nothing
+    end
 end
 
 """

@@ -567,13 +567,28 @@ end
     hsi_vec   = data.hsi_vec
     obs_df    = data.obs
 
+    # Delimit domain extent using sppoly bounds when available
+    sppoly_path = if !isnothing(params.sppoly_file) && isfile(params.sppoly_file)
+        params.sppoly_file
+    else
+        nothing
+    end
+    sppoly_bounds = extract_sppoly_bounds(sppoly_path)
+    if sppoly_bounds !== nothing && verbose
+        println(
+            "  Delimiting southern/south-western domain with sppoly bounds: " *
+            "lon >= $(round(sppoly_bounds[1]; digits=4)), lat >= $(round(sppoly_bounds[2]; digits=4))"
+        )
+    end
+
     # The analysis domain is an explicit bounding box when configured, and
     # otherwise the extent of the input data plus a small padding so the mesh
     # is not clipped flush against the outermost detections.
     domain_bbox = resolve_bbox(
         params.bbox, params.bbox_padding_deg,
         hasproperty(obs_df, :lon) ? Float64[obs_df.lon...] : Float64[],
-        hasproperty(obs_df, :lat) ? Float64[obs_df.lat...] : Float64[],
+        hasproperty(obs_df, :lat) ? Float64[obs_df.lat...] : Float64[];
+        sppoly_bounds = sppoly_bounds
     )
     verbose && println(
         "  Domain bounding box (W, S, E, N) = " *
@@ -661,6 +676,11 @@ end
         cents_lat = [Float64(c[2]) for c in mesh.centroids_lonlat]
         min_lon, max_lon = extrema(cents_lon)
         min_lat, max_lat = extrema(cents_lat)
+
+        if sppoly_bounds !== nothing
+            min_lon = max(min_lon, sppoly_bounds[1])
+            min_lat = max(min_lat, sppoly_bounds[2])
+        end
 
         bathy = load_open_bathymetry(;
             lon_range      = (min_lon - 0.2, max_lon + 0.2),
@@ -998,6 +1018,105 @@ end
                     [!land_mask[s] for s in survey_df.s_idx], :
                 ]
             end
+        end
+
+        # Prune out-of-depth and unreachable/boundary-exceeded units from the final mesh
+        # so that downstream network operations and Leaflet dashboards do not retain
+        # an oversized, empty rectangular domain.
+        keep_mesh_mask = .!out_of_depth
+        if sppoly_bounds !== nothing
+            cents_tmp = hasproperty(mesh, :centroids_lonlat) ?
+                mesh.centroids_lonlat : mesh.centroids
+            for i in eachindex(cents_tmp)
+                lon_i = Float64(cents_tmp[i][1])
+                lat_i = Float64(cents_tmp[i][2])
+                if lon_i < (sppoly_bounds[1] - 0.05) || lat_i < (sppoly_bounds[2] - 0.05)
+                    keep_mesh_mask[i] = false
+                end
+            end
+        end
+
+        # Ensure active endpoints in obs_df are preserved
+        for r in eachrow(obs_df)
+            if 1 <= r.release <= length(keep_mesh_mask)
+                keep_mesh_mask[r.release] = true
+            end
+            if 1 <= r.recapture <= length(keep_mesh_mask)
+                keep_mesh_mask[r.recapture] = true
+            end
+        end
+
+        n_pruned = count(!, keep_mesh_mask)
+        if n_pruned > 0 && count(keep_mesh_mask) > 0
+            verbose && println(
+                "  Pruning $n_pruned out-of-depth/out-of-bounds units from domain " *
+                "($(count(keep_mesh_mask)) units retained)..."
+            )
+            old_to_new = zeros(Int, n_spatial)
+            new_idx = 0
+            for i in 1:n_spatial
+                if keep_mesh_mask[i]
+                    new_idx += 1
+                    old_to_new[i] = new_idx
+                end
+            end
+
+            mesh = prune_mesh(mesh, keep_mesh_mask)
+            W = W[keep_mesh_mask, keep_mesh_mask]
+            hsi_vec = hsi_vec[keep_mesh_mask]
+            if !isempty(monthly_hsi) && size(monthly_hsi, 1) == n_spatial
+                monthly_hsi = monthly_hsi[keep_mesh_mask, :]
+            end
+            if land_mask !== nothing && length(land_mask) == n_spatial
+                land_mask = land_mask[keep_mesh_mask]
+            end
+            if resharded_depths !== nothing && length(resharded_depths) == n_spatial
+                resharded_depths = resharded_depths[keep_mesh_mask]
+            end
+            if region_map !== nothing && length(region_map) == n_spatial
+                region_map = region_map[keep_mesh_mask]
+            end
+            if resharded_hydro !== nothing
+                resharded_hydro = reshard_spatial_field(
+                    spdiagm(0 => ones(Float64, count(keep_mesh_mask))),
+                    resharded_hydro
+                )
+            end
+
+            # Re-index observations to pruned mesh units
+            obs_df = copy(obs_df)
+            obs_df.release = [old_to_new[r] for r in obs_df.release]
+            obs_df.recapture = [old_to_new[r] for r in obs_df.recapture]
+
+            if !isnothing(survey_df) && hasproperty(survey_df, :s_idx)
+                survey_df = copy(survey_df)
+                keep_surv = [keep_mesh_mask[s] for s in survey_df.s_idx]
+                survey_df = survey_df[keep_surv, :]
+                survey_df.s_idx = [old_to_new[s] for s in survey_df.s_idx]
+            end
+
+            n_spatial = mesh.n_units
+        end
+    end
+
+    # Render and display/save map of resulting polygons after tessellation and pruning
+    if params.render_html
+        try
+            tess_dir = params.output_dir
+            mkpath(tess_dir)
+            tess_path = joinpath(tess_dir, "tessellation_polygons.html")
+            tess_map = leaflet_tessellation_map(
+                mesh;
+                title = "$(params.species_name) Tessellated Spatial Domain",
+                depth = resharded_depths,
+                hsi = hsi_vec,
+                dark_mode = params.dark_mode,
+                output_file = tess_path
+            )
+            show_map(tess_map; output_file = tess_path)
+            verbose && println("  Tessellation polygon map: $tess_path")
+        catch err_map
+            verbose && println("  (Tessellation map note: $(_error_note(err_map)))")
         end
     end
 
@@ -2558,7 +2677,6 @@ function export_dashboards(
     # per-unit current fields under `resharded_hydro`. The guards below use
     # `hasproperty` rather than `isnothing` on a named field, so a dataset
     # without hydrodynamics simply skips these panels instead of erroring.
-    au_mesh = loaded.mesh
 
     # 1. Step Diagnostics (Speeds, Turning Angles)
     if !isempty(path_results.paths)
@@ -2745,6 +2863,23 @@ function export_dashboards(
         catch e
             verbose && println("  (Dispersal kernel note: $(_error_note(e)))")
         end
+    end
+
+    # 7. Tessellation Polygons Map
+    try
+        tess_file = joinpath(out_dir, "tessellation_polygons.html")
+        tess_map = leaflet_tessellation_map(
+            mesh;
+            title = "$spp Tessellated Spatial Domain" * reshard_lbl * depth_lbl,
+            depth = loaded.resharded_depths,
+            hsi = loaded.hsi_vec,
+            dark_mode = params.dark_mode,
+            output_file = tess_file
+        )
+        show_map(tess_map; output_file = tess_file)
+        verbose && println("  Tessellation polygon map: $tess_file")
+    catch e
+        verbose && println("  (Tessellation polygon map note: $(_error_note(e)))")
     end
 
     # -- Agent-Based Model trajectory dashboard ----------------------------

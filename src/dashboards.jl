@@ -1598,6 +1598,338 @@ end
 leaflet_spatial_graph(au::Union{NamedTuple, AbstractDict}; kwargs...) = leaflet_spatial_graph(; au=au, kwargs...)
 
 
+"""
+    show_map(map_obj::LeafletMap; output_file::Union{Nothing, AbstractString} = nothing) -> LeafletMap
+
+Displays or exports an interactive `LeafletMap`.
+
+If running in an interactive session with display capabilities, displays the map.
+If `output_file` is provided (or if interactive terminal), saves the HTML file.
+Returns the `map_obj`.
+"""
+function show_map(
+    map_obj::LeafletMap;
+    output_file::Union{Nothing, AbstractString} = nothing
+)::LeafletMap
+    if output_file !== nothing
+        save_html(map_obj, output_file)
+    end
+    if isinteractive() && Base.invokelatest(isdefined, Base, :displayable)
+        try
+            display("text/html", map_obj.html)
+        catch
+            # Fall back gracefully in non-graphical terminals
+        end
+    end
+    return map_obj
+end
+
+"""
+    leaflet_tessellation_map(mesh; title="Spatial Tessellation Polygons",
+                             show_edges=true, show_centroids=true,
+                             depth=nothing, hsi=nothing,
+                             output_file=nothing, dark_mode=false, kwargs...) -> LeafletMap
+
+Renders an interactive map of the resulting polygons and areal units after tessellation
+and pruning.
+
+Each unit polygon displays its index, centroid coordinates, and optional depth or HSI
+value in interactive Leaflet tooltips. Adjacency graph edges and centroid points are
+toggleable via layer controls.
+
+# Mathematical & Topological Context
+For an areal unit tessellation ``\\mathcal{M} = \\{u_i\\}_{i=1}^S`` with vertices
+``\\mathcal{V}_i = \\{(x_{ik}, y_{ik})\\}`` and centroid ``\\mathbf{c}_i``, this
+visualizes the geometric tiling of the active spatial domain, confirming the elimination
+of out-of-bounds, out-of-depth, or terrestrial barrier units.
+
+# Arguments
+- `mesh`: Spatial tessellation NamedTuple (containing `polygons_lonlat` or `polygons`,
+  `centroids_lonlat` or `centroids`, and optionally `W`).
+- `title::String`: Map title banner.
+- `show_edges::Bool`: Whether adjacency edges are included as an overlay layer.
+- `show_centroids::Bool`: Whether centroid markers are included.
+- `depth`: Optional vector of unit depths to display in hover popups.
+- `hsi`: Optional vector of unit HSI suitability values.
+- `output_file::Union{Nothing, AbstractString}`: Path to save the standalone HTML file.
+- `dark_mode::Bool`: Render using CartoDB Dark or Light theme.
+
+# Returns
+- `LeafletMap`: Complete standalone HTML Leaflet map object.
+"""
+function leaflet_tessellation_map(
+    mesh;
+    title::String = "Spatial Tessellation Polygons",
+    show_edges::Bool = true,
+    show_centroids::Bool = true,
+    depth::Union{Nothing, AbstractVector} = nothing,
+    hsi::Union{Nothing, AbstractVector} = nothing,
+    output_file::Union{Nothing, AbstractString} = nothing,
+    dark_mode::Bool = false,
+    kwargs...
+)::LeafletMap
+    polys = if hasproperty(mesh, :polygons_lonlat) && mesh.polygons_lonlat !== nothing
+        mesh.polygons_lonlat
+    elseif hasproperty(mesh, :polygons) && mesh.polygons !== nothing
+        mesh.polygons
+    else
+        nothing
+    end
+    polys !== nothing || error("leaflet_tessellation_map requires polygons in mesh.")
+
+    cents = if hasproperty(mesh, :centroids_lonlat) && mesh.centroids_lonlat !== nothing
+        mesh.centroids_lonlat
+    elseif hasproperty(mesh, :centroids) && mesh.centroids !== nothing
+        mesh.centroids
+    else
+        nothing
+    end
+    cents !== nothing || error("leaflet_tessellation_map requires centroids in mesh.")
+
+    S = length(cents)
+    all_raw_pts = Tuple{Float64, Float64}[]
+    for c in cents
+        if length(c) >= 2 && !isnan(c[1]) && !isnan(c[2])
+            push!(all_raw_pts, (Float64(c[1]), Float64(c[2])))
+        end
+    end
+    for poly in polys, pt in poly
+        if length(pt) >= 2 && !isnan(pt[1]) && !isnan(pt[2])
+            push!(all_raw_pts, (Float64(pt[1]), Float64(pt[2])))
+        end
+    end
+
+    wkt_str = _extract_wkt(mesh)
+    tf = _build_coordinate_transformer(
+        all_raw_pts; wkt=wkt_str, is_geo=nothing, lon_center=0.0, lat_center=0.0
+    )
+
+    all_lats = Float64[]
+    all_lngs = Float64[]
+
+    # Polygons GeoJSON
+    polys_json = String[]
+    for (i, p) in enumerate(polys)
+        length(p) > 2 || continue
+        p_trans = _transform_polygon(tf, p)
+        length(p_trans) > 2 || continue
+        coords = String[]
+        for pt in p_trans
+            push!(coords, "[$(pt[1]), $(pt[2])]")
+            push!(all_lngs, pt[1])
+            push!(all_lats, pt[2])
+        end
+        if !isempty(coords)
+            if coords[1] != coords[end]
+                push!(coords, coords[1])
+            end
+            c_orig = cents[i]
+            cx = round(Float64(c_orig[1]); digits=4)
+            cy = round(Float64(c_orig[2]); digits=4)
+            d_val = depth !== nothing && i <= length(depth) ?
+                "$(round(Float64(depth[i]); digits=1)) m" : "N/A"
+            h_val = hsi !== nothing && i <= length(hsi) ?
+                "$(round(Float64(hsi[i]); digits=3))" : "N/A"
+
+            f = """{
+              "type": "Feature",
+              "id": $i,
+              "properties": {
+                "unit_id": $i,
+                "lon": $cx,
+                "lat": $cy,
+                "depth": "$d_val",
+                "hsi": "$h_val"
+              },
+              "geometry": { "type": "Polygon", "coordinates": [[$(join(coords, ", "))]] }
+            }"""
+            push!(polys_json, f)
+        end
+    end
+    polys_collection = "{\"type\": \"FeatureCollection\", \"features\": [$(join(polys_json, ",\n"))]}"
+
+    # Adjacency Graph Edges GeoJSON
+    edges_json = String[]
+    W_mat = hasproperty(mesh, :W) ? mesh.W : nothing
+    if show_edges && W_mat !== nothing
+        rows = rowvals(W_mat)
+        for j in 1:size(W_mat, 2)
+            for k in nzrange(W_mat, j)
+                i = rows[k]
+                if i < j && i <= S && j <= S
+                    c1 = _transform_point(tf, cents[i])
+                    c2 = _transform_point(tf, cents[j])
+                    f = """{
+                      "type": "Feature",
+                      "properties": { "src": $i, "dst": $j },
+                      "geometry": {
+                        "type": "LineString",
+                        "coordinates": [[$(c1[1]), $(c1[2])], [$(c2[1]), $(c2[2])]]
+                      }
+                    }"""
+                    push!(edges_json, f)
+                end
+            end
+        end
+    end
+    edges_collection = "{\"type\": \"FeatureCollection\", \"features\": [$(join(edges_json, ",\n"))]}"
+
+    # Centroid Nodes GeoJSON
+    nodes_json = String[]
+    if show_centroids
+        for i in 1:S
+            c = cents[i]
+            c_trans = _transform_point(tf, c)
+            deg_i = W_mat !== nothing && i <= size(W_mat, 1) ? count(!iszero, W_mat[i, :]) : 0
+            f = """{
+              "type": "Feature",
+              "id": $i,
+              "properties": { "unit_id": $i, "degree": $deg_i, "lon": $(round(Float64(c[1]); digits=4)), "lat": $(round(Float64(c[2]); digits=4)) },
+              "geometry": { "type": "Point", "coordinates": [$(c_trans[1]), $(c_trans[2])] }
+            }"""
+            push!(nodes_json, f)
+        end
+    end
+    nodes_collection = "{\"type\": \"FeatureCollection\", \"features\": [$(join(nodes_json, ",\n"))]}"
+
+    min_lat = !isempty(all_lats) ? minimum(all_lats) : -1.0
+    max_lat = !isempty(all_lats) ? maximum(all_lats) : 1.0
+    min_lng = !isempty(all_lngs) ? minimum(all_lngs) : -1.0
+    max_lng = !isempty(all_lngs) ? maximum(all_lngs) : 1.0
+
+    map_id = "ma_tess_map_" * string(abs(hash(title * string(rand()))), base=16)
+
+    map_setup_js = """
+    var isGeo = $(tf.is_geo ? "true" : "false");
+    var map = L.map('$(map_id)', { attributionControl: false });
+
+    var baseLayers = {};
+    var cartoDark = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; CartoDB &copy; OpenStreetMap',
+      maxZoom: 19
+    });
+    var cartoLight = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; CartoDB &copy; OpenStreetMap',
+      maxZoom: 19
+    });
+    var osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
+    var esriOcean = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 13 });
+
+    esriOcean.addTo(map);
+    baseLayers["Esri Ocean (Bathymetry)"] = esriOcean;
+    baseLayers["CartoDB Dark"] = cartoDark;
+    baseLayers["CartoDB Positron"] = cartoLight;
+    baseLayers["OpenStreetMap"] = osm;
+
+    var overlayLayers = {};
+
+    // Tessellation Polygons
+    var polysData = $(polys_collection);
+    var polyLayer = L.geoJSON(polysData, {
+      style: function(feature) {
+        return {
+          fillColor: '#0284c7',
+          fillOpacity: 0.25,
+          color: '#38bdf8',
+          weight: 1.2
+        };
+      },
+      onEachFeature: function(feature, layer) {
+        var p = feature.properties;
+        var html = '<div class="ma-popup">' +
+                   '<div class="ma-popup-title">Polygon Unit #' + p.unit_id + '</div>' +
+                   '<div class="ma-popup-row"><span class="ma-popup-label">Centroid:</span><span class="ma-popup-val">(' + p.lon + ', ' + p.lat + ')</span></div>';
+        if (p.depth !== "N/A") {
+          html += '<div class="ma-popup-row"><span class="ma-popup-label">Depth:</span><span class="ma-popup-val">' + p.depth + '</span></div>';
+        }
+        if (p.hsi !== "N/A") {
+          html += '<div class="ma-popup-row"><span class="ma-popup-label">HSI:</span><span class="ma-popup-val">' + p.hsi + '</span></div>';
+        }
+        html += '</div>';
+        layer.bindPopup(html);
+        layer.on('mouseover', function(e) {
+          layer.setStyle({ fillOpacity: 0.55, weight: 2.2, color: '#f59e0b' });
+        });
+        layer.on('mouseout', function(e) {
+          polyLayer.resetStyle(layer);
+        });
+      }
+    }).addTo(map);
+    overlayLayers["Tessellation Polygons ($S units)"] = polyLayer;
+
+    // Adjacency Edges
+    var edgesData = $(edges_collection);
+    if (edgesData.features.length > 0) {
+      var edgeLayer = L.geoJSON(edgesData, {
+        style: {
+          color: '#f43f5e',
+          weight: 1.0,
+          opacity: 0.45
+        }
+      }).addTo(map);
+      overlayLayers["Adjacency Edges"] = edgeLayer;
+    }
+
+    // Centroids
+    var nodesData = $(nodes_collection);
+    if (nodesData.features.length > 0) {
+      var nodeLayer = L.geoJSON(nodesData, {
+        pointToLayer: function(feature, latlng) {
+          return L.circleMarker(latlng, {
+            radius: 3.5,
+            fillColor: '#38bdf8',
+            color: '#ffffff',
+            weight: 1.0,
+            fillOpacity: 0.9
+          });
+        },
+        onEachFeature: function(feature, layer) {
+          var p = feature.properties;
+          layer.bindPopup('<div class="ma-popup"><div class="ma-popup-title">Centroid Unit #' + p.unit_id + '</div><div class="ma-popup-row"><span class="ma-popup-label">Neighbors:</span><span class="ma-popup-val">' + p.degree + '</span></div></div>');
+        }
+      });
+      overlayLayers["Centroids"] = nodeLayer;
+    }
+
+    var bounds = [[$(min_lat), $(min_lng)], [$(max_lat), $(max_lng)]];
+    map.fitBounds(bounds, { padding: [25, 25] });
+
+    L.control.layers(baseLayers, overlayLayers, { position: 'topright', collapsed: false }).addTo(map);
+
+    // Summary badge control
+    var info = L.control({ position: 'bottomleft' });
+    info.onAdd = function() {
+      var div = L.DomUtil.create('div', 'ma-coord-indicator');
+      div.innerHTML = '<strong>Tessellated Domain:</strong> $(S) units';
+      return div;
+    };
+    info.addTo(map);
+    """
+
+    doc = _generate_leaflet_html_document(
+        title = title,
+        map_id = map_id,
+        map_setup_js = map_setup_js,
+        dark_mode = dark_mode,
+        width = "100%",
+        height = "650px",
+        badge = "$S Polygons"
+    )
+
+    map_obj = LeafletMap(
+        doc, title=title, width="100%", height="650px",
+        metadata=Dict(:n_units=>S, :is_geo=>tf.is_geo, :wkt=>wkt_str)
+    )
+
+    if output_file !== nothing
+        save_html(map_obj, output_file)
+    end
+
+    return map_obj
+end
+
+
+
 # =============================================================================
 # Section 5: Movement Maps (HSI, Diffusion, Residence Time, Velocity Vectors)
 # =============================================================================

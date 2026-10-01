@@ -4486,6 +4486,8 @@ marine passages remain fully connected while landmasses act as impenetrable barr
 - `depth_threshold`: Bathymetric cutoff below which units are classified as land (default 0.0).
 - `crs`: Coordinate reference system (default local tangent projection).
 - `datum`: Reference ellipsoid datum (default `WGS84Latest`).
+- `sppoly_bounds`: Optional `(min_lon, min_lat, max_lon, max_lat)` bounding coordinates
+  used to delimit southern and south-western domain extents.
 
 # Returns
 - `NamedTuple`:
@@ -4507,10 +4509,16 @@ function construct_full_movement_domain(
     depth = nothing,
     depth_threshold::Real = 0.0,
     crs = nothing,
-    datum = WGS84Latest
+    datum = WGS84Latest,
+    sppoly_bounds = nothing
 )::NamedTuple
     lon_min, lon_max = extrema(lon_vec)
     lat_min, lat_max = extrema(lat_vec)
+
+    if sppoly_bounds !== nothing
+        lon_min = max(lon_min, sppoly_bounds[1])
+        lat_min = max(lat_min, sppoly_bounds[2])
+    end
 
     center_lon = (lon_min + lon_max) / 2.0
     center_lat = (lat_min + lat_max) / 2.0
@@ -4807,11 +4815,13 @@ function prepare_movement_data(
         )
     else
         verbose && println("  [prepare] Constructing full movement domain (r=$(radius_km) km) …")
+        sp_bounds = extract_sppoly_bounds(sppoly_file)
         construct_full_movement_domain(
             tag_df.lon, tag_df.lat;
             radius_km=radius_km, land_polygons=land_polygons,
             depth=depth, depth_threshold=depth_threshold,
-            crs=crs, datum=datum
+            crs=crs, datum=datum,
+            sppoly_bounds=sp_bounds
         )
     end
     verbose && println("    Total mesh units: $(mesh.n_units) " *

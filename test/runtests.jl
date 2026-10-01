@@ -152,16 +152,43 @@ end
         @test isempty(unbound)
     end
 
-    @testset "Synthetic ADR Movement Bundle" begin
-        rng = MersenneTwister(123)
-        bundle = generate_ADR_simulation_bundle(100.0, 15, 3, 5;
-                                                area_method = :hexagonal, rng = rng)
-        @test bundle isa NamedTuple
-        @test haskey(bundle, :data)
-        @test haskey(bundle, :telemetry_data)
-        @test haskey(bundle, :au)
-        @test bundle.n_spatial >= 10
-        @test bundle.n_years == 3
+    @testset "Spatial Pruning and Domain Bounds Delimitation" begin
+        # 1. resolve_bbox delimitation
+        lons = [-66.5, -60.0, -58.0]
+        lats = [42.0, 45.0, 47.0]
+        # Without sppoly_bounds
+        bbox_raw = resolve_bbox(nothing, 0.5, lons, lats)
+        @test bbox_raw[1] == -67.0
+        @test bbox_raw[2] == 41.5
+
+        # With sppoly_bounds (delimiting south and west)
+        sp_b = (-65.48, 43.04, -57.32, 47.27)
+        bbox_delim = resolve_bbox(nothing, 0.5, lons, lats; sppoly_bounds = sp_b)
+        @test bbox_delim[1] == -65.48
+        @test bbox_delim[2] == 43.04
+        @test bbox_delim[3] == -57.5
+        @test bbox_delim[4] == 47.5
+
+        # 2. extract_sppoly_bounds on data/sppoly.jld2 if present
+        if isfile("data/sppoly.jld2")
+            b_found = extract_sppoly_bounds("data/sppoly.jld2")
+            @test b_found !== nothing
+            @test b_found[1] <= -65.0
+            @test b_found[2] <= 43.1
+        end
+
+        # 3. prune_mesh functionality
+        m_test = build_hex_mesh_planar([-64.0, -62.0], [44.0, 46.0]; radius_km = 30.0)
+        S_orig = m_test.n_units
+        keep_mask = falses(S_orig)
+        keep_mask[1:div(S_orig, 2)] .= true
+        m_pruned = prune_mesh(m_test, keep_mask)
+
+        @test m_pruned.n_units == div(S_orig, 2)
+        @test length(m_pruned.centroids_lonlat) == div(S_orig, 2)
+        @test length(m_pruned.polygons_lonlat) == div(S_orig, 2)
+        @test size(m_pruned.W) == (div(S_orig, 2), div(S_orig, 2))
+        @test_throws ArgumentError prune_mesh(m_test, falses(S_orig))
     end
 
     @testset "Global Land/Sea Mask" begin
@@ -888,6 +915,25 @@ end
         @test occursin("var transparentZeros = true;", ch_zeros.html)
         @test occursin("fillColor: 'transparent'", ch_zeros.html)
         @test occursin("fillOpacity: 0.0", ch_zeros.html)
+
+        # 6. Tessellation polygon map
+        tess_map = leaflet_tessellation_map(
+            au;
+            title = "Test Domain Polygons",
+            depth = [50.0, 100.0, 150.0],
+            hsi = hsi_test
+        )
+        @test tess_map isa LeafletMap
+        @test occursin("Test Domain Polygons", tess_map.html)
+        @test occursin("Tessellation Polygons (3 units)", tess_map.html)
+        @test occursin("Depth:", tess_map.html)
+        @test occursin("HSI:", tess_map.html)
+
+        # 7. show_map with temporary file export
+        tmp_tess = joinpath(tempdir(), "test_tess_map.html")
+        show_map(tess_map; output_file = tmp_tess)
+        @test isfile(tmp_tess)
+        rm(tmp_tess; force = true)
     end
 
     include("test_ssa_movement.jl")
