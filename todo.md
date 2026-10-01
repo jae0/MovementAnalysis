@@ -154,6 +154,60 @@ immediately at kernel construction) and removed instead.
 
 ---
 
+## Merge state (added 2026-10-01, late)
+
+The repository was found mid-merge with 13 unmerged paths and 63 conflict hunks
+across 8 Julia files, left by an incorrect `git pull`. The merge was aborted, the
+tree returned to a clean `81c226e` with zero conflict markers, and a safety ref
+`backup-premerge` was created. The work is being ported onto the upstream
+configuration redesign in ordered, individually-tested commits on branch
+`reconcile`, which is pushed to `origin/main` by fast-forward.
+
+Upstream `7f20dcd` modernises configuration (`src/config.jl` with code-side
+defaults, list-valued `model_modes`/`path_methods`/`diagnostics` replacing the
+boolean `compute_*` switches, new `src/spatial_sources.jl`, CLI and docs
+rewrite, wavelet removal) but had **not** done the pooled-model migration: it
+still carried `G`, `group_lookup`, group-vector kernels, and the whole SSA
+component. The two lines were therefore complementary rather than competing.
+
+### Landed on `reconcile` (all with the suite green)
+
+| Commit | Change |
+|---|---|
+| `78972dc` | `RCall` and `Plots` made weak dependencies; `MovementAnalysisRCallExt` and `MovementAnalysisPlottingExt` written; `src/persistence.jl` added; `circuit.jl` 1000x haversine unit fix, structural reachability, `conductance_power`; `prune_mesh` implemented (it was exported and called but never defined); regenerated the stale `Manifest.toml` |
+| `731eb60` | Repaired a cross-file break the merge created: `_spatial_node_distance` is defined in `movement.jl` but called from `circuit.jl` with a `coord_space` keyword that did not exist on the upstream half, so calibration would have thrown a `MethodError`. Restored the keyword and the unit fix, with a regression test. |
+| `bf0a986` | Transition kernel made scalar-only; removed the per-group kernel set and the `P_draw[1]` read that silently discarded all but the first group; `_pooled_scalar` rejects longer vectors by name. |
+| `8475a2e` | `TelemetryData` lost its `groups` and `G` fields; `mark_recapture_G` accepted and ignored; `_sample_column` and `_posterior_param_draws` pooled; three posterior-draw loops read the single estimated column. |
+
+Tests: **300 passing, 0 failing** at `8475a2e`.
+
+### Remaining, in order
+
+1. **Finish the group-axis removal** (Stage 2 remainder). Sites still threading a
+   group axis, all of which must land together with the suite green:
+   `movement.jl` `kernels.G` at lines ~5550, ~5956, ~6089, ~6314; `G_eff` and
+   `grp_eff` at ~5796 and ~5827; a `for g in 1:G` loop at ~6505.
+   `pipeline.jl` `kernels.G` at ~1733, ~2234; loops at ~1965 and ~2576.
+   `dashboards.jl` ~6064 writes `:groups => group_names` into map metadata.
+2. **Agent rework** (Stage 4). `agent_movement.jl` still takes `groups` and
+   `agent_kernels`, and `pipeline.jl` ~3525-3544 derives and clamps group indices
+   for a 5-argument call. Port onto the pooled signature, keeping the per-agent
+   horizon, sampled start nodes, decoupled agent count, and the
+   self-transition-preserving heading fix.
+3. **SSA removal** (Stage 3). `ssa_movement.jl`, both SSA Turing models,
+   `calculate_ssa_transition_row`, the CLI flags, and the `ssa` / `ssa_and_survey`
+   entries in the `model_modes` list.
+4. **Sections 3-6** (Stage 5). The empirical-HSI transfer, composed mesh index
+   mappings, endpoint validity checks, the bathymetry provenance record, the exact
+   horizon router, the bridge and Viterbi fixes, the event-level PPC metric, the
+   `tagid` alignment, the residence-time allocation, the coordinate contract and
+   encoders, the hydro axis validation, and the stable per-tag seeds. These all
+   lived in files taken from upstream and have **not** been re-applied.
+5. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
+   `ibm` and `backup-premerge` both preserve it. Reset when convenient.
+
+---
+
 ## 1. Restore And Complete Pooled Model
 
 - [x] Restore `src/movement.jl` to a clean parse state and keep the repair localized to the telemetry converter and prepared-data return structure.
