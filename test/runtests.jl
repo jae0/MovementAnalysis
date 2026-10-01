@@ -900,6 +900,54 @@ end
         @test nnz(I_bad) == 0
     end
 
+    @testset "Pooled Kernel Rejects Group Vectors" begin
+        W = spzeros(3, 3)
+        for i in 1:2
+            W[i, i+1] = 1.0
+            W[i+1, i] = 1.0
+        end
+        hsi = [0.2, 0.5, 0.9]
+
+        P = construct_stochastic_transition_kernel(
+            W, hsi; gamma = 1.0, residence = 0.2, advection = 0.5
+        )
+        @test P isa Matrix{Float64}
+        @test size(P) == (3, 3)
+        @test all(isapprox.(vec(sum(P; dims = 2)), 1.0; atol = 1e-6))
+
+        # A length-1 vector is unambiguous and is unwrapped.
+        @test construct_stochastic_transition_kernel(
+            W, hsi; gamma = [1.5], residence = [0.3], advection = [0.4]
+        ) == construct_stochastic_transition_kernel(
+            W, hsi; gamma = 1.5, residence = 0.3, advection = 0.4
+        )
+
+        # A longer vector used to mean one kernel per demographic group. Silently
+        # taking the first value would drop the rest, so it must be an error.
+        for (kw, val) in ((:gamma, [1.0, 2.0]), (:residence, [0.2, 0.3]),
+                          (:advection, [0.4, 0.6]))
+            err = try
+                construct_stochastic_transition_kernel(
+                    W, hsi; gamma = 1.0, residence = 0.2, advection = 0.5, kw => val
+                )
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin(string(kw), err.msg)
+            @test occursin("pooled", err.msg)
+        end
+
+        # Dimension validation is unchanged.
+        @test_throws DimensionMismatch construct_stochastic_transition_kernel(
+            W, [0.5, 0.5]
+        )
+        @test_throws DimensionMismatch construct_stochastic_transition_kernel(
+            W, hsi; land_mask = [false, false]
+        )
+    end
+
     @testset "No HSI overlay by default and transparent choropleth zeros" begin
         # Config default
         @test MovementAnalysisConfig().overlay_hsi === false

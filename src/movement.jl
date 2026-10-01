@@ -2343,9 +2343,8 @@ function construct_stochastic_transition_kernel(
     gamma::Union{Real, AbstractVector{<:Real}} = 1.0,
     residence::Union{Real, AbstractVector{<:Real}} = 0.2,
     advection::Union{Real, AbstractVector{<:Real}} = 0.5,
-    spatial::Bool = false,
     land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
-)::Union{Matrix{Float64}, Vector{Matrix{Float64}}}
+  )::Matrix{Float64}
     S = size(W, 1)
     if length(hsi) != S
         throw(DimensionMismatch(
@@ -2358,53 +2357,35 @@ function construct_stochastic_transition_kernel(
         ))
     end
 
-    # 1. Check for vector parameters
-    any_vector = (gamma isa AbstractVector) ||
-                 (residence isa AbstractVector) ||
-                 (advection isa AbstractVector)
+    P_sparse = build_sparse_transition_kernel(
+        W, hsi,
+        _pooled_scalar(gamma, "gamma"),
+        _pooled_scalar(residence, "residence"),
+        _pooled_scalar(advection, "advection"),
+        land_mask,
+    )
+    return Matrix{Float64}(P_sparse)
+end
 
-    if !any_vector
-        # Standard scalar parameter execution — delegate to highly efficient sparse builder
-        P_sparse = build_sparse_transition_kernel(
-            W, hsi, gamma, residence, advection, land_mask
-        )
-        return Matrix{Float64}(P_sparse)
+"""
+    _pooled_scalar(p, name) -> Float64
 
-    elseif spatial
-        throw(ArgumentError("spatial=true is unsupported with the sparse builder."))
+Coerce a kernel parameter to a single scalar for the pooled model.
 
-    else
-        # Group vector mode: construct distinct transition matrix per group g in 1:G
-        v_lengths = [length(p) for p in (gamma, residence, advection) if p isa AbstractVector]
-        G = maximum(v_lengths)
-
-        for (name, p) in (("gamma", gamma), ("residence", residence), ("advection", advection))
-            if p isa AbstractVector && length(p) != G && length(p) != 1
-                throw(DimensionMismatch(
-                    "Parameter `$name` has length $(length(p)), but expected length G=$G or 1."
-                ))
-            end
-        end
-
-        g_vec = gamma isa AbstractVector ?
-            (length(gamma) == 1 ? fill(Float64(gamma[1]), G) : Float64.(gamma)) :
-            fill(Float64(gamma), G)
-        rho_vec = residence isa AbstractVector ?
-            (length(residence) == 1 ? fill(Float64(residence[1]), G) : Float64.(residence)) :
-            fill(Float64(residence), G)
-        adv_vec = advection isa AbstractVector ?
-            (length(advection) == 1 ? fill(Float64(advection[1]), G) : Float64.(advection)) :
-            fill(Float64(advection), G)
-
-        kernels = Vector{Matrix{Float64}}(undef, G)
-        for g in 1:G
-            P_sparse = build_sparse_transition_kernel(
-                W, hsi, g_vec[g], rho_vec[g], adv_vec[g], land_mask
-            )
-            kernels[g] = Matrix{Float64}(P_sparse)
-        end
-        return kernels
-    end
+A length-1 vector is accepted and unwrapped, because that is unambiguous. A longer
+vector used to select one kernel per demographic group; the pooled model has one
+parameter set, so accepting it would silently discard the extra values. This
+raises instead, naming the parameter, so the caller has to be made explicit.
+"""
+function _pooled_scalar(p, name::AbstractString)::Float64
+    p isa AbstractVector || return Float64(p)
+    length(p) == 1 && return Float64(first(p))
+    throw(ArgumentError(
+        "Kernel parameter `$name` has length $(length(p)). The movement model is " *
+        "pooled and takes one value per parameter; per-group vectors are no longer " *
+        "supported. Reduce `$name` to a single value (a mean, a fitted draw, or a " *
+        "configured constant) before building the kernel."
+    ))
 end
 
 
@@ -6014,12 +5995,12 @@ function compute_connectivity_credible_intervals(
     connectivity_samples = Matrix{Float64}[]
 
     for draw in eval_indices
-        # Derived by the same helper the models use, so a per-draw kernel cannot
-        # drift from the likelihood that produced the draw.
+        # Pooled model: one parameter set per draw. The posterior is stored with a
+        # trailing group axis for backwards compatibility, but only the first
+        # column carries the estimated values.
         alpha_arr, rho_arr = movement_alpha_rho(
-            [v_samples[draw, g] for g in 1:G],
-            [d_samples[draw, g] for g in 1:G])
-        gamma_arr = [g_samples[draw, g] for g in 1:G]
+            [v_samples[draw, 1]], [d_samples[draw, 1]])
+        gamma_arr = [g_samples[draw, 1]]
 
         P_draw = construct_stochastic_transition_kernel(
             loaded.W, loaded.hsi_vec;
@@ -6028,7 +6009,7 @@ function compute_connectivity_credible_intervals(
             advection = alpha_arr,
             land_mask = land_mask
         )
-        P_k = P_draw isa AbstractVector ? P_draw[1] : P_draw
+        P_k = P_draw
 
         conn_mat = zeros(Float64, n_regions, n_regions)
         for r in 1:n_regions
