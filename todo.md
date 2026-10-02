@@ -615,3 +615,14 @@ decision, not a refactor.
 8. **Not implemented, by decision** — particle filter over the latent track;
    individual-level random effects. Both are model changes rather than
    correctness fixes and are listed so the omission is a recorded decision.
+
+---
+
+## 8. Systematic IBM End-to-End Check
+
+- [x] Resolve `leaflet_ppc_summary` bug where it was failing to generate the file due to scope issues.
+- [x] Add predicted distribution to `posterior_predictive_check` to feed to the dashboard.
+- [x] Add graceful handling for empty turning angles when generated paths only have two points.
+- [x] Apply missing kwargs for HSI and advection mapping in the pipeline.
+- [x] Confirm data flows correctly from the IBM model to the output dashboards for active regions.
+- [x] Resolve bottleneck uncertainty visualization (z random effects were removed from likelihood, missing values).

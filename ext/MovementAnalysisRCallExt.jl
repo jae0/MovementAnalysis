@@ -40,7 +40,16 @@ function MovementAnalysis._r_ipc_convert(filepath::AbstractString, temp_ipc::Abs
             load(filepath, envir = env)
             vars <- ls(env)
             if (length(vars) == 0) stop("No objects found in .rda file")
-            obj <- env[[vars[1]]]
+            if ("tagging" %in% vars && is.data.frame(env[["tagging"]])) {
+                obj <- env[["tagging"]]
+            } else {
+                df_vars <- vars[sapply(vars, function(v) is.data.frame(env[[v]]))]
+                if (length(df_vars) > 0) {
+                    obj <- env[[df_vars[1]]]
+                } else {
+                    obj <- env[[vars[1]]]
+                }
+            }
         } else {
             stop(paste("Unsupported file extension:", ext))
         }

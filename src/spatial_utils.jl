@@ -1912,17 +1912,25 @@ function aggregate_telemetry_time(
     time_interval == :raw && return copy(tagging)
 
     df = copy(tagging)
-    hasproperty(df, :timestamp) || error("DataFrame must contain :timestamp column.")
+    time_col = _detect_time_column(df)
+    time_col === nothing && error(
+        "DataFrame must contain a date/time column (:timestamp, :time, or :date)."
+    )
+
+    parsed_ts = [_parse_flexible_date(t) for t in df[!, time_col]]
+    valid_mask = [t !== nothing for t in parsed_ts]
+    df = df[valid_mask, :]
+    df[!, :timestamp] = [t for t in parsed_ts if t !== nothing]
 
     if time_interval == :daily
-        df[!, :time_bucket] = Date.(df.timestamp)
+        df[!, :time_bucket] = df.timestamp
     elseif time_interval == :weekly
-        df[!, :time_bucket] = [Date(t) - Day(dayofweek(Date(t)) - 1)
-                                for t in df.timestamp]
+        df[!, :time_bucket] = [t - Day(dayofweek(t) - 1) for t in df.timestamp]
     elseif time_interval == :biweekly
         epoch = Date(1990, 1, 1)
-        df[!, :time_bucket] = [epoch + Day(fld(Int(Date(t) - epoch), 14) * 14)
-                                for t in df.timestamp]
+        df[!, :time_bucket] = [
+            epoch + Day(fld(Int(t - epoch), 14) * 14) for t in df.timestamp
+        ]
     elseif time_interval == :monthly
         df[!, :time_bucket] = [Date(year(t), month(t), 1) for t in df.timestamp]
     else
@@ -2010,14 +2018,14 @@ function match_telemetry_closest_month_hsi(
         dt = timestamps[i]
         s  = s_idxs[i]
         
-        yr = clamp(Dates.year(dt), y_min, y_max)
-        mo = Dates.month(dt)
+        actual_yr = Dates.year(dt)
+        mo        = Dates.month(dt)
 
-        # 2. Use 0 as a default instead of `nothing` to keep types strict and fast
-        col = get(month_lookup, (yr, mo), 0)
-        
+        col = get(month_lookup, (actual_yr, mo), 0)
         if col == 0
-            col = get(month_lookup, (y_min, mo), get(month_lookup, (y_max, mo), 0))
+            # Out-of-bounds year fallback to simulation boundary for climatology
+            fallback_yr = actual_yr < y_min ? y_min : (actual_yr > y_max ? y_max : actual_yr)
+            col = get(month_lookup, (fallback_yr, mo), 0)
             if col == 0
                 out[i] = NaN
                 missing_count += 1

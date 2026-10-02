@@ -2793,7 +2793,9 @@ corr_map   = leaflet_interactive_corridor_dashboard(
                 land_mask  = loaded.land_mask,
                 cmap       = params.cmap,
                 title      = "$spp Advection Drift & Velocity Field Vectors",
-                dark_mode  = params.dark_mode
+                dark_mode  = params.dark_mode,
+                arrow_scale = 3.5,
+                transparent_zeros = true
             )
             save_html(map_obj, adv_file)
             verbose && println("  Advection velocity dashboard: $adv_file")
@@ -2893,7 +2895,8 @@ corr_map   = leaflet_interactive_corridor_dashboard(
             map_obj = leaflet_hsi_map(
                 loaded.hsi_vec, au_mesh;
                 cmap    = params.cmap,
-                    title = "$spp Habitat Suitability Index (HSI)"
+                    title = "$spp Habitat Suitability Index (HSI)",
+                transparent_zeros = true
             )
             save_html(map_obj, hsi_file)
             verbose && println("  HSI dashboard: $hsi_file")
@@ -3190,15 +3193,17 @@ corr_map   = leaflet_interactive_corridor_dashboard(
                 scores_matrix[idx_k, :] .= c_vec ./ deg_marine
             end
             bse_vec = [std(scores_matrix[:, u]) / sqrt(n_ind) for u in 1:n_sp]
+            replace!(x -> isnan(x) ? 0.0 : x, bse_vec)
         end
     end
-    if (bse_vec === nothing || !any(>(0.0), bse_vec)) && !isnothing(path_results.domain_bottlenecks)
+    if bse_vec === nothing && !isnothing(path_results.domain_bottlenecks)
         bn = path_results.domain_bottlenecks
-        if hasproperty(bn, :bottleneck_se) && any(>(0.0), bn.bottleneck_se)
-            bse_vec = bn.bottleneck_se
+        if hasproperty(bn, :bottleneck_se)
+            bse_vec = copy(bn.bottleneck_se)
+            replace!(x -> isnan(x) ? 0.0 : x, bse_vec)
         end
     end
-    if bse_vec !== nothing && any(>(0.0), bse_vec)
+    if bse_vec !== nothing
         try
             bse_file = joinpath(out_dir, "movement_bottleneck_uncertainty.html")
             bse_map  = leaflet_choropleth(

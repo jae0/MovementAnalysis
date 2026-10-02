@@ -1403,7 +1403,28 @@ end
 """
     _parse_flexible_date(date_val)::Union{Date, Nothing}
 
-Parses date strings, DateTime, Date, or numeric timestamp representations safely.
+Parse date strings, `DateTime`, `Date`, or numeric representations safely into `Date`.
+
+# Handled Formats
+- `Date`: Returned directly.
+- `Dates.TimeType` (`DateTime`): Converted via `Date(date_val)`.
+- `Real` (numeric):
+  - Continuous decimal year: ``1900.0 \\le t \\le 2100.0``. The calendar year is
+    ``y = \\lfloor t \\rfloor`` and the day of year is
+    ``\\text{doy} = \\min(D_y, \\max(1, \\text{round}((t - y) \\cdot D_y) + 1))``,
+    where ``D_y`` is 366 for leap years and 365 otherwise.
+  - R date integer (days since 1970-01-01): ``0 \\le t \\le 60000``, converted via
+    `Date(1970, 1, 1) + Day(round(Int, t))`.
+  - Unix epoch timestamp (seconds since 1970-01-01): ``t \\ge 10^8``, converted via
+    `Date(Dates.unix2datetime(t))`.
+- `AbstractString`:
+  - Direct ISO strings parseable via `tryparse(Date, s)` or `tryparse(DateTime, s)`.
+  - Regex ISO format: `YYYY-MM-DD` or `YYYY/MM/DD` with optional time component.
+  - Disambiguated `DD/MM/YYYY`, `MM/DD/YYYY`, `DD-MM-YYYY`, `MM-DD-YYYY`.
+  - Numeric string representing decimal year or epoch seconds.
+
+Returns `nothing` if the value is missing, empty, or unparseable. Range errors are
+caught cleanly without clamping.
 """
 function _parse_flexible_date(date_val)::Union{Date, Nothing}
     if ismissing(date_val) || isnothing(date_val)
@@ -1411,30 +1432,107 @@ function _parse_flexible_date(date_val)::Union{Date, Nothing}
     end
     if date_val isa Date
         return date_val
-    elseif date_val isa Dates.DateTime
+    elseif date_val isa Dates.TimeType
         return Date(date_val)
     elseif date_val isa Real
-        yr = round(Int, date_val)
-        if 1950 <= yr <= 2050
-            return Date(yr, 6, 1)
+        isnan(date_val) && return nothing
+        v = Float64(date_val)
+        if 1900.0 <= v <= 2100.0
+            # Continuous decimal year
+            yr = floor(Int, v)
+            frac = v - yr
+            days_in_yr = Dates.isleapyear(yr) ? 366 : 365
+            doy = round(Int, frac * days_in_yr) + 1
+            if doy < 1 || doy > days_in_yr
+                doy = (doy < 1) ? 1 : days_in_yr
+            end
+            return Date(yr, 1, 1) + Day(doy - 1)
+        elseif 0.0 <= v <= 60000.0 && isinteger(v)
+            # R Date representation (days since 1970-01-01)
+            return Date(1970, 1, 1) + Day(round(Int, v))
+        elseif v >= 1.0e8
+            # Unix epoch timestamp in seconds
+            return try
+                Date(Dates.unix2datetime(v))
+            catch
+                nothing
+            end
         end
+        return nothing
     elseif date_val isa AbstractString
         s = strip(date_val)
         isempty(s) && return nothing
-        m_iso = match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})", s)
-        if !isnothing(m_iso)
-            y, m, d = parse(Int, m_iso.captures[1]), parse(Int, m_iso.captures[2]), parse(Int, m_iso.captures[3])
-            return Date(y, clamp(m, 1, 12), clamp(d, 1, 31))
+
+        # Direct tryparse
+        d_try = tryparse(Date, s)
+        d_try !== nothing && return d_try
+        dt_try = tryparse(DateTime, s)
+        dt_try !== nothing && return Date(dt_try)
+
+        # Numeric string (e.g. "2004.63")
+        num_try = tryparse(Float64, s)
+        if num_try !== nothing
+            return _parse_flexible_date(num_try)
         end
-        m_us = match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})", s)
-        if !isnothing(m_us)
-            m, d, y = parse(Int, m_us.captures[1]), parse(Int, m_us.captures[2]), parse(Int, m_us.captures[3])
-            return Date(y, clamp(m, 1, 12), clamp(d, 1, 31))
+
+        # Match ISO format: YYYY-MM-DD or YYYY/MM/DD (with optional time component)
+        m_iso = match(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:[T\s].*)?$", s)
+        if m_iso !== nothing
+            y = parse(Int, m_iso.captures[1])
+            m = parse(Int, m_iso.captures[2])
+            d = parse(Int, m_iso.captures[3])
+            if 1 <= m <= 12
+                dim = Dates.daysinmonth(y, m)
+                if 1 <= d <= dim
+                    return Date(y, m, d)
+                end
+            end
+            return nothing
         end
-        dt = tryparse(DateTime, s)
-        if !isnothing(dt)
-            return Date(dt)
+
+        # Match format: P1-P2-YYYY or P1/P2/YYYY
+        m_p = match(r"^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:[T\s].*)?$", s)
+        if m_p !== nothing
+            p1 = parse(Int, m_p.captures[1])
+            p2 = parse(Int, m_p.captures[2])
+            y  = parse(Int, m_p.captures[3])
+            # Disambiguate day vs month without clamp
+            if p1 > 12 && 1 <= p2 <= 12
+                # p1 must be day, p2 must be month (DD/MM/YYYY)
+                dim = Dates.daysinmonth(y, p2)
+                return (1 <= p1 <= dim) ? Date(y, p2, p1) : nothing
+            elseif 1 <= p1 <= 12 && p2 > 12
+                # p1 must be month, p2 must be day (MM/DD/YYYY)
+                dim = Dates.daysinmonth(y, p1)
+                return (1 <= p2 <= dim) ? Date(y, p1, p2) : nothing
+            elseif 1 <= p1 <= 12 && 1 <= p2 <= 12
+                # Ambiguous: default to MM/DD/YYYY standard
+                dim = Dates.daysinmonth(y, p1)
+                return (1 <= p2 <= dim) ? Date(y, p1, p2) : nothing
+            end
+            return nothing
         end
+    end
+    return nothing
+end
+
+"""
+    _detect_time_column(df::AbstractDataFrame)::Union{Symbol, Nothing}
+
+Identify the column representing observation time or date within a telemetry DataFrame.
+Searches systematically across common names: `:timestamp`, `:time`, `:date`, `:datetime`,
+`:datecollected`, `:datetime_utc`, ignoring case.
+"""
+function _detect_time_column(df::AbstractDataFrame)::Union{Symbol, Nothing}
+    candidates = (:timestamp, :time, :date, :datetime, :datecollected, :datetime_utc)
+    for c in candidates
+        hasproperty(df, c) && return c
+    end
+    # Fallback to case-insensitive check
+    lower_map = Dict(lowercase(string(n)) => n for n in propertynames(df))
+    for c in candidates
+        s = string(c)
+        haskey(lower_map, s) && return lower_map[s]
     end
     return nothing
 end
@@ -1468,9 +1566,9 @@ Calculates summary statistics per individual tag from a telemetry / mark-recaptu
 - `n_points::Int`: Total number of detection records.
 """
 function summarize_tag_activity(df::DataFrame)::DataFrame
-    time_col = hasproperty(df, :timestamp) ? :timestamp : (hasproperty(df, :time) ? :time : nothing)
+    time_col = _detect_time_column(df)
     if isnothing(time_col) || !hasproperty(df, :tagid)
-        error("Input DataFrame must have :tagid and either :timestamp or :time.")
+        error("Input DataFrame must have :tagid and a date/time column (:timestamp, :time, or :date).")
     end
 
     gdf = groupby(df, :tagid)
@@ -1785,8 +1883,8 @@ function reconstruct_mark_recapture_paths(
     end
 
     # Group observations by tag
-    time_col = hasproperty(tagging, :time) ? :time : (hasproperty(tagging, :timestamp) ? :timestamp : nothing)
-    isnothing(time_col) && error("tagging DataFrame must have :time or :timestamp column.")
+    time_col = _detect_time_column(tagging)
+    isnothing(time_col) && error("tagging DataFrame must have a date/time column (:timestamp, :time, or :date).")
 
     gdf = groupby(tagging, :tagid)
     tag_keys = collect(keys(gdf))
@@ -1799,7 +1897,9 @@ function reconstruct_mark_recapture_paths(
     trajectories = NamedTuple[]
 
     for i in 1:n_to_process
-        sub = sort(gdf[tag_keys[i]], time_col)
+        sub_group = gdf[tag_keys[i]]
+        order_cols = hasproperty(sub_group, :tag) ? [:tag, time_col] : [time_col]
+        sub = sort(sub_group, order_cols)
         nrow(sub) < 2 && continue
 
         tid = string(first(sub.tagid))
@@ -4792,42 +4892,54 @@ function prepare_movement_data(
         filter!(:is_dead => d -> !coalesce(d, false), tag_df)
     end
 
-    # Resolve time column (:time or :timestamp)
-    time_col = hasproperty(tag_df, :time) ? :time :
-               (hasproperty(tag_df, :timestamp) ? :timestamp : nothing)
+    # Resolve time column (:timestamp, :time, :date, etc.)
+    time_col = _detect_time_column(tag_df)
     if time_col === nothing
         throw(ArgumentError(
-            "tagging DataFrame must contain either :time or :timestamp column."
+            "tagging DataFrame must contain a date/time column (:timestamp, :time, or :date)."
         ))
     end
 
-    # Filter invalid records (missing/non-finite coordinates or identifiers)
+    # Parse timestamps systematically and compute continuous decimal years
+    n_records = nrow(tag_df)
+    parsed_dates = Vector{Union{Date, Nothing}}(undef, n_records)
+    decimal_times = Vector{Union{Float64, Nothing}}(undef, n_records)
+
+    raw_times = tag_df[!, time_col]
+    for i in 1:n_records
+        rt = raw_times[i]
+        d = _parse_flexible_date(rt)
+        if d !== nothing
+            parsed_dates[i] = d
+            decimal_times[i] = _date_to_decimal_year(d)
+        elseif rt isa Real && !isnan(rt) && 1900.0 <= rt <= 2100.0
+            decimal_times[i] = Float64(rt)
+            yr = floor(Int, rt)
+            frac = rt - yr
+            diy = Dates.isleapyear(yr) ? 366 : 365
+            doy = min(diy, max(1, round(Int, frac * diy) + 1))
+            parsed_dates[i] = Date(yr, 1, 1) + Day(doy - 1)
+        else
+            parsed_dates[i] = nothing
+            decimal_times[i] = nothing
+        end
+    end
+
+    tag_df[!, :timestamp] = parsed_dates
+    tag_df[!, :time]      = decimal_times
+
+    # Filter invalid records (missing/non-finite coordinates, identifiers, or timestamps)
     filter!(r -> !ismissing(r.lon) && !ismissing(r.lat) &&
                  !ismissing(r.tagid) && !ismissing(r.tag) &&
-                 !ismissing(r[time_col]) &&
+                 r.timestamp !== nothing && r.time !== nothing &&
                  isfinite(Float64(r.lon)) && isfinite(Float64(r.lat)), tag_df)
 
-    tag_df[!, :lon]   = Float64.(tag_df.lon)
-    tag_df[!, :lat]   = Float64.(tag_df.lat)
-    tag_df[!, :tag]   = Int.(tag_df.tag)
-    tag_df[!, :tagid] = string.(tag_df.tagid)
-
-    if time_col == :time
-        tag_df[!, :time] = Float64.(tag_df.time)
-    else
-        t_vals = Vector{Float64}(undef, nrow(tag_df))
-        for (i, row) in enumerate(eachrow(tag_df))
-            raw_t = row[time_col]
-            if raw_t isa Real
-                t_vals[i] = Float64(raw_t)
-            else
-                parsed_d = _parse_flexible_date(raw_t)
-                t_vals[i] = parsed_d !== nothing ?
-                    _date_to_decimal_year(parsed_d) : 0.0
-            end
-        end
-        tag_df[!, :time] = t_vals
-    end
+    tag_df[!, :lon]       = Float64.(tag_df.lon)
+    tag_df[!, :lat]       = Float64.(tag_df.lat)
+    tag_df[!, :tag]       = Int.(tag_df.tag)
+    tag_df[!, :tagid]     = string.(tag_df.tagid)
+    tag_df[!, :timestamp] = Date.(tag_df.timestamp)
+    tag_df[!, :time]      = Float64.(tag_df.time)
 
     # Require both release and recapture events
     valid_set = Set{String}()
@@ -4838,7 +4950,7 @@ function prepare_movement_data(
         end
     end
     filter!(:tagid => ∈(valid_set), tag_df)
-    sort!(tag_df, [:tagid, :time])
+    sort!(tag_df, [:tagid, :tag, :time])
 
     # 1. Full-domain tessellation with land barriers
     mesh = if pre_mapped !== nothing
@@ -5024,7 +5136,7 @@ function prepare_movement_data(
     has_sex = hasproperty(tag_df, :sex)
     has_mat = hasproperty(tag_df, :mat)
 
-    sorted_df = sort(tag_df, [:tagid, :time])
+    sorted_df = sort(tag_df, [:tagid, :tag, :time])
     n_rows = nrow(sorted_df)
 
     tagids    = sorted_df.tagid
@@ -5040,12 +5152,17 @@ function prepare_movement_data(
         Tuple{String, Int, Int, Int, Float64, String, String, Float64, Float64}
     }
     pair_records = Vector{RecordType}(undef, 0)
+    n_inverted = 0
 
     if n_rows >= 2
         sizehint!(pair_records, n_rows)
         for i in 2:n_rows
             if tagids[i] == tagids[i-1]
                 Δt = times[i] - times[i-1]
+                if Δt < 0.0
+                    n_inverted += 1
+                    continue
+                end
                 k  = max(1, round(Int, Δt / dt))
                 push!(pair_records, (
                     tagid     = string(tagids[i-1]),
@@ -5060,6 +5177,12 @@ function prepare_movement_data(
                 ))
             end
         end
+    end
+    if n_inverted > 0 && verbose
+        println(
+            "  [prepare] Skipped $n_inverted mark-recapture pair(s) " *
+            "with inverted dates (recapture before release)."
+        )
     end
 
     obs = DataFrame(pair_records)
@@ -6288,12 +6411,25 @@ function posterior_predictive_check(
         kl_upper_ci    = quantile(kl_divergences, 0.975),
     )
 
+    # Calculate predicted_dist_mean
+    predicted_dist_mean = zeros(n_spatial)
+    for sim_recs in simulated_recapture_dists
+        sim_dist = zeros(n_spatial)
+        for rec in sim_recs
+            1 <= rec <= n_spatial && (sim_dist[rec] += 1)
+        end
+        sim_dist ./= max(1.0, sum(sim_dist))
+        predicted_dist_mean .+= sim_dist
+    end
+    predicted_dist_mean ./= max(1.0, length(simulated_recapture_dists))
+
     return (
         brier_scores              = brier_scores,
         kl_divergences            = kl_divergences,
         observed_recaptures       = observed_recaptures,
         observed_dist             = observed_dist,
         simulated_recapture_dists = simulated_recapture_dists,
+        predicted_dist_mean       = predicted_dist_mean,
         summary                   = summary,
     )
 end

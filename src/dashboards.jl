@@ -2221,7 +2221,7 @@ function leaflet_advection_arrows(
 
     # Background Base Map (HSI or Polygons)
     base_map = if background == :hsi && !isnothing(hsi) && hasproperty(au, :polygons)
-        leaflet_hsi_map(hsi, au; title=title, cmap=cmap, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height)
+        leaflet_hsi_map(hsi, au; title=title, cmap=cmap, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height, kwargs...)
     elseif hasproperty(au, :polygons)
         polys = au.polygons
         leaflet_spatial_graph(au.centroids, nothing; polygons=polys, au=au, title=title, wkt=wkt_str, is_geo=is_geo, dark_mode=dark_mode, width=width, height=height)
@@ -4191,27 +4191,37 @@ function leaflet_step_diagnostics(
       }
     });
 
-    new Chart(document.getElementById('angleChart'), {
-      type: 'bar',
-      data: {
-        labels: [$(ax_str)],
-        datasets: [{
-          label: 'Turning Angles',
-          data: [$(ay_str)],
-          backgroundColor: '#818cf8',
-          borderRadius: 4
-        }]
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { title: { display: true, text: 'Turning Angle (degrees)', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } },
-          y: { title: { display: true, text: 'Frequency', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } }
+    const angData = [$(ay_str)];
+    const hasAngles = angData.some(v => v > 0);
+    if (!hasAngles) {
+      const ctx = document.getElementById('angleChart').getContext('2d');
+      ctx.font = '14px Outfit';
+      ctx.fillStyle = '#94a3b8';
+      ctx.textAlign = 'center';
+      ctx.fillText('No turning angles available (paths too short)', 300, 135);
+    } else {
+      new Chart(document.getElementById('angleChart'), {
+        type: 'bar',
+        data: {
+          labels: [$(ax_str)],
+          datasets: [{
+            label: 'Turning Angles',
+            data: angData,
+            backgroundColor: '#818cf8',
+            borderRadius: 4
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { title: { display: true, text: 'Turning Angle (degrees)', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' } },
+            y: { title: { display: true, text: 'Frequency', color: '#94a3b8' }, grid: { color: 'rgba(255,255,255,0.06)' }, ticks: { color: '#94a3b8' }, beginAtZero: true }
+          }
         }
-      }
-    });
+      });
+    }
   </script>
 </body>
 </html>"""
@@ -5507,7 +5517,7 @@ function leaflet_interactive_corridor_dashboard(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>$title - MovementAnalysis Interactive Dynamic Corridor Explorer</title>
+  <title>$title - MovementAnalysis Dynamic Corridor Explorer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
