@@ -1847,7 +1847,13 @@ if params.dynamic_kernels
                         land_mask = land_mask
                     )
                 end
-                append!(fpath, seg[2:end])
+                # The router returns an empty vector when no exact-k route
+                  # exists, rather than padding one. Drop the event and say so:
+                  # appending a fabricated segment would misattribute movement.
+                  isempty(seg) && (verbose && println(
+                      "  $(tid) segment $(n)/$(nrow(sub_obs)): no exact-$(row.k)-step " *
+                      "route from $(row.release) to $(row.recapture); dropped."))
+                  append!(fpath, seg[2:end])
             end
             fpath
         end

@@ -256,8 +256,31 @@ earlier notes. Several items previously listed as lost are in fact present on
    returned as `panel_skips`. Note the remaining caveat: every panel is still
    best-effort, so a run can complete with a subset of outputs and the caller
    must inspect `panel_skips` to know. Fail-fast remains a policy decision.
-6. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
-   `ibm` and `backup-premerge` both preserve it. Reset when convenient.
+6. **Sections 3-6 were lost in the merge, not never-done.** Several items here are
+   marked `[x]`, but a symbol audit found none of them present in the tree. They
+   exist only in `81c226e`, and resolving the merge with `-X ours` on
+   `movement.jl` and `pipeline.jl` discarded them. My earlier "absent" audit was
+   wrong twice over: it searched for invented symbol names instead of reading
+   this file, and it reported the loss without checking `81c226e`.
+   - **Recovered and landed:** the exact-k router, `_exact_k_max_prob_path`, a
+     length-constrained Viterbi trellis that returns `Int[]` when no exact-`k`
+     walk exists. Both self-loop-padding fallbacks in `astar_predict_path`
+     (`fill(release, k+1)` when release == recapture, and when both endpoints
+     snap to one navigable node) now route through it, and the pipeline drops
+     unsatisfiable segments with a warning instead of appending fabricated ones.
+     Covered by `test_exact_k.jl`, including parity refusal on a bipartite ring
+     and a brute-force check that the returned route really is the
+     maximum-probability one.
+   - **Still to recover from `81c226e`:** `bathymetry_provenance` (13 refs),
+     `unit_mapping` with its per-stage `to_next` and composed `to_final` (14),
+     `_snowcrab_land_polygons` (6), `hsi_origin` / `:empirical_transferred` (2+7).
+     Per-observation HSI transfer and the endpoint validity checks depend on
+     `unit_mapping` and are the largest of these.
+   - **Per-tag seeds** and **coordinate encoders** appear in no branch at all;
+     they still need writing rather than recovery.
+   Recovering from `81c226e` by hand is the safer route. A second merge would
+   collide on the same files again, and the versions in `81c226e` predate the
+   group-axis removal, the SSA removal, and the four bug fixes.
 
 ---
 

@@ -2455,6 +2455,85 @@ function _find_navigable_node(
 end
 
 """
+    _exact_k_max_prob_path(P, u_start, u_end, k; land_mask = nothing, p_min = 1e-12)
+
+Maximum-probability walk of exactly `k` transitions from `u_start` to `u_end`,
+computed as a length-constrained Viterbi trellis in log-probability space.
+
+Only transitions with `P[i, j] > p_min` are admissible, so every returned step
+corresponds to a transition the model actually permits -- including a residence
+self-loop, but only where `P[i, i] > 0`.
+
+Returns an empty `Vector{Int}` when no such walk exists. It never pads a shorter
+route with fabricated self-loops and never returns a route whose length differs
+from the requested `k`.
+
+This exists because the two fallbacks it replaces were both fabrications. When
+release and recapture fell on the same unit, or when the goal turned out to be
+unreachable, the caller returned `fill(release, k + 1)` -- a path claiming `k`
+steps of movement while never leaving the cell, and asserting a residence
+probability the fitted kernel may not assign. Reporting an honest "no such route"
+is more useful than a plausible wrong one, so unsatisfiable requests are dropped
+with a warning rather than silently padded.
+"""
+function _exact_k_max_prob_path(
+    P::AbstractMatrix{<:Real},
+    u_start::Int,
+    u_end::Int,
+    k::Int;
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    p_min::Real = 1e-12
+)::Vector{Int}
+    k < 0 && return Int[]
+    k == 0 && return u_start == u_end ? [u_start] : Int[]
+
+    S = size(P, 1)
+    P_csc = P isa SparseMatrixCSC ? P : SparseMatrixCSC(P)
+
+    delta = fill(-Inf, S, k + 1)
+    psi   = zeros(Int, S, k + 1)
+    delta[u_start, 1] = 0.0
+
+    @inbounds for tau in 2:(k + 1)
+        prev = tau - 1
+        for j in 1:S
+            (land_mask !== nothing && land_mask[j]) && continue
+            best_val = -Inf
+            best_prev = 0
+            for ptr in P_csc.colptr[j]:(P_csc.colptr[j + 1] - 1)
+                i = P_csc.rowval[ptr]
+                (land_mask !== nothing && land_mask[i]) && continue
+                p_ij = Float64(P_csc.nzval[ptr])
+                p_ij > p_min || continue
+                prev_val = delta[i, prev]
+                isfinite(prev_val) || continue
+                score = prev_val + log(p_ij)
+                if score > best_val
+                    best_val = score
+                    best_prev = i
+                end
+            end
+            if best_prev != 0
+                delta[j, tau] = best_val
+                psi[j, tau]   = best_prev
+            end
+        end
+    end
+
+    isfinite(delta[u_end, k + 1]) || return Int[]
+
+    path = zeros(Int, k + 1)
+    path[k + 1] = u_end
+    @inbounds for tau in (k + 1):-1:2
+        prev = psi[path[tau], tau]
+        prev == 0 && return Int[]
+        path[tau - 1] = prev
+    end
+    path[1] == u_start || return Int[]
+    return path
+end
+
+"""
     astar_predict_path(
         P::AbstractMatrix{<:Real},
         release::Int,
@@ -2516,7 +2595,10 @@ function astar_predict_path(
         throw(ArgumentError("Release unit ($release) and recapture unit ($recapture) must be within 1:$S."))
     end
     if release == recapture
-        return k !== nothing ? fill(release, max(1, k + 1)) : [release]
+        # Staying put is only a legal k-step route when the kernel actually
+        # permits the self-transition. Padding unconditionally would assert a
+        # residence probability that may not exist.
+        return k === nothing ? [release] : _exact_k_max_prob_path(P, release, recapture, k; land_mask, p_min)
     end
 
     # Build directed graph and sparse cost matrix
@@ -2587,7 +2669,9 @@ function astar_predict_path(
     u_start = _find_navigable_node(release, cents_vec, land_mask, g)
     u_end   = _find_navigable_node(recapture, cents_vec, land_mask, g)
     if u_start == u_end
-        return k !== nothing ? fill(u_start, max(1, k + 1)) : [u_start]
+        # Both endpoints snapped to the same navigable node. Same rule as above:
+        # no self-transition in the kernel means no valid k-step route.
+        return k === nothing ? [u_start] : _exact_k_max_prob_path(P, u_start, u_end, k; land_mask, p_min)
     end
 
     has_cents = cents_vec !== nothing && length(cents_vec) == S
