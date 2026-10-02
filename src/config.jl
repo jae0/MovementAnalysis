@@ -94,6 +94,14 @@ Base.@kwdef struct MovementAnalysisConfig
     dynamic_kernels::Bool = false
     hmm_smoothing::Bool = false
 
+    # --- Agent forward projection --------------------------------------------
+    # Heading persistence for the agent projection, kappa in
+    # exp(kappa * cos(bearing - heading)). Zero is the memoryless chain, where a
+    # step depends only on current position. Only read by :agent runs.
+    persistence::Float64 = 0.0
+    # Horizon used when the telemetry carries no usable duration column.
+    agent_horizon::Int = 50
+
     # --- Posterior inference -------------------------------------------------
     n_samples::Int = 200
     n_warmup::Int = 100

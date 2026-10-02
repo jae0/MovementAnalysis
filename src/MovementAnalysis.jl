@@ -68,8 +68,10 @@ export
       joint_survey_telemetry_turing_model,
 
     # Agent-Based Model Alternative
-    TrackedAgent,
+    CrabAgent,
     simulate_agent_trajectories,
+    forward_project_agents,
+    forward_space_use,
 
     # Telemetry & Mark-Recapture Data Structures
     TelemetryData,

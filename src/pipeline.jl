@@ -2885,8 +2885,8 @@ _record_panel_skip("Summary diagnostics", e); verbose && println(
     end
 
     # -- Agent-Based Model trajectory dashboard ----------------------------
-    # agent_trajectories is a DataFrame with columns: tagid, step, mesh_unit,
-    # heading.  Convert to lightweight NamedTuples compatible with leaflet_tracks_map
+    # agent_trajectories is a DataFrame with columns: tagid, step, mesh_unit.
+    # Convert to lightweight NamedTuples compatible with leaflet_tracks_map
     # and export, then write a companion CSV.
     if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
         try
@@ -3513,39 +3513,38 @@ function run_movement_analysis(
         end
         n_sim_agents = nrow(loaded.obs_df)
         # Use observed release sites to start agents (column is :release, not :release_unit)
-        start_nodes = Int.(loaded.obs_df.release)
-        maximum(start_nodes) <= size(kernels.P_kernel, 1) || throw(BoundsError(
+        release_nodes = Int.(loaded.obs_df.release)
+        maximum(release_nodes) <= size(kernels.P_kernel, 1) || throw(BoundsError(
             kernels.P_kernel,
-            "release unit $(maximum(start_nodes)) exceeds the fitted kernel",
+            "release unit $(maximum(release_nodes)) exceeds the fitted kernel",
         ))
-        # Start every agent on heading 1. The kernel is pooled, so there is no
-        # group to start from; heading 1 is the north-centred bin, and any agent
-        # whose first step is non-zero re-derives its heading from that step.
-        start_headings = ones(Int, n_sim_agents)
-
-        # A persistence kernel projects heading jointly with position and so
-        # needs n_units to decode its (unit, heading) rows; a first-order kernel
-        # has one row per unit. Only the latter is tracked geometrically, which
-        # needs coordinates, so centroids are passed through either way.
-        P_agent = sparse(kernels.P_kernel)
-        n_units = size(P_agent, 1)
-        # _resolve_centroids returns (planar_km, lonlat, mesh_drawing). Headings
-        # want a single coordinate list in a single space, so pick planar km when
-        # it exists and fall back to lon/lat, tagging which was used so bearing_deg
-        # does not have to guess.
-        agent_planar, agent_lonlat, _ = _resolve_centroids(loaded.mesh, n_units)
-        if agent_planar !== nothing
-            agent_centroids, agent_space = agent_planar, :km
-        elseif agent_lonlat !== nothing
-            agent_centroids, agent_space = agent_lonlat, :degrees
+        # The projection horizon is a modelling choice: how far to carry an untagged
+        # animal forward. Telemetry does not identify it. The `k` column is a gap
+        # ratio, delta_t over the nominal step, and it is 1 for every regularly
+        # sampled interval -- so inheriting it blindly collapses every agent to a
+        # single step and destroys the space-use question the projection exists
+        # to answer. It is used only where it genuinely varies.
+        durations = if hasproperty(loaded.obs_df, :k) && !isnothing(loaded.obs_df.k)
+            k = max.(1, round.(Int, collect(loaded.obs_df.k)))
+            (length(unique(k)) > 1 && any(>(1), k)) ? k : fill(params.agent_horizon, length(release_nodes))
         else
-            agent_centroids, agent_space = nothing, :unknown
+            fill(params.agent_horizon, length(release_nodes))
         end
 
-        agent_trajectories = simulate_agent_trajectories(
-            n_sim_agents, start_nodes, start_headings, P_agent, 50;
-            n_units = n_units, centroids = agent_centroids,
-            coord_space = agent_space, seed = params.seed
+        # _resolve_centroids returns (planar_km, lonlat, mesh_drawing). Headings
+        # want one coordinate list in one space, so pick planar km when it exists
+        # and fall back to lon/lat.
+        agent_planar, agent_lonlat, _ =
+            _resolve_centroids(loaded.mesh, size(kernels.P_kernel, 1))
+        agent_centroids = agent_planar === nothing ? agent_lonlat : agent_planar
+
+        agent_trajectories = forward_project_agents(
+            release_nodes, durations;
+            n_agents = n_sim_agents,
+            transition_kernel = sparse(kernels.P_kernel),
+            centroids = agent_centroids,
+            persistence = params.persistence,
+            seed = params.seed,
         )
         if params.verbose
             println("  Simulated $(n_sim_agents) agents for 50 steps.")
