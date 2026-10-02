@@ -220,6 +220,8 @@ export
     export_dashboards,
     execute_validation_analyses,
     run_movement_analysis,
+    PANEL_SKIPS,
+    report_panel_skips,
     julia_main
 
 include("cli.jl")

@@ -954,4 +954,31 @@ end
         @test_throws MethodError MovementAnalysis._sample_column([1.0, 2.0], 1)
     end
 
+    @testset "Failed panels are recorded, not silently dropped" begin
+        # Each optional panel is wrapped in `try`/`catch` so one bad panel cannot
+        # end a run that has already sampled for minutes. That policy hid three
+        # real defects, because the catch only printed a note and gated the print
+        # on `verbose`. Failures are now recorded unconditionally.
+        sk = MovementAnalysis.PANEL_SKIPS
+        empty!(sk)
+        @test isempty(sk)
+        @test MovementAnalysis.report_panel_skips() == 0
+
+        MovementAnalysis._record_panel_skip("Widget", ErrorException("boom"))
+        MovementAnalysis._record_panel_skip("Gadget", ArgumentError("bad"))
+        @test length(sk) == 2
+        @test occursin("Widget", sk[1]) && occursin("boom", sk[1])
+        @test occursin("Gadget", sk[2]) && occursin("bad", sk[2])
+
+        # A huge type signature must be capped, not dumped: the note is one line.
+        big = ErrorException("x"^5000)
+        empty!(sk)
+        MovementAnalysis._record_panel_skip("Huge", big)
+        @test length(sk) == 1
+        @test length(sk[1]) < 300
+
+        @test MovementAnalysis.report_panel_skips() == 1
+        empty!(sk)
+    end
+
 end

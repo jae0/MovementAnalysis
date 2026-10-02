@@ -1135,7 +1135,7 @@ end
             show_map(tess_map; output_file = tess_path)
             verbose && println("  Tessellation polygon map: $tess_path")
         catch err_map
-            verbose && println("  (Tessellation map note: $(_error_note(err_map)))")
+            _record_panel_skip("Tessellation map", err_map);             verbose && println("  (Tessellation map note: $(_error_note(err_map)))")
         end
     end
 
@@ -1409,6 +1409,52 @@ type and the reason it failed.
 """
 _error_note(e, limit::Int = 200) =
     (s = first(sprint(showerror, e), limit); length(sprint(showerror, e)) > limit ? s * " …" : s)
+
+"""
+    PANEL_SKIPS::Vector{String}
+
+Every optional dashboard panel that failed during the last run, as `"name: reason"`.
+
+The export phase wraps roughly twenty-five panels in `try`/`catch` so that one
+bad panel cannot end a run that has already spent minutes sampling. That policy
+is right, but it was also *silent*: each catch only printed a note, and gated
+that print on `verbose`, so under the default quiet settings a panel could fail
+every time and nothing in the output said so.
+
+That is not hypothetical. Three real defects hid in exactly these blocks -- an
+unbound `hydro`, a `_sample_column` call with a group argument the pooled model
+no longer has, and a read of the `group` column after it had been removed. Each
+one made a whole panel vanish permanently while the run reported success. The
+notes only surfaced because a verbose end-to-end run was printed by hand.
+
+Recording the failures here makes a missing panel an observable fact. It is
+module-level rather than threaded through the panel helpers so that panels in
+different functions are all captured without changing any of their signatures;
+it is diagnostic state only, reset at the start of each run, and never read by
+the model.
+"""
+const PANEL_SKIPS = String[]
+
+function _record_panel_skip(name::AbstractString, e)::Nothing
+    push!(PANEL_SKIPS, "$name: $(_error_note(e))")
+    return nothing
+end
+
+"""
+    report_panel_skips(verbose::Bool) -> Int
+
+Print a consolidated summary of `PANEL_SKIPS` and return how many were recorded.
+Called once at the end of a run so that silent panel loss is visible by default.
+"""
+function report_panel_skips(verbose::Bool = true)::Int
+    n = length(PANEL_SKIPS)
+    n == 0 && return 0
+    println("\n  $(n) optional panel(s) did not render:")
+    for s in PANEL_SKIPS
+        println("    - $s")
+    end
+    return n
+end
 
 # =============================================================================
 # Phase 3: Kernel Construction
@@ -1877,7 +1923,7 @@ if params.dynamic_kernels
                     "$(round(dist_km; digits=1)) km"
                 )
             catch e
-                verbose && println("  (Stochastic A* note [$tid]: $e)")
+                _record_panel_skip("Stochastic A* [$tid]", e); verbose && println("  (Stochastic A* note [$tid]: $e)")
             end
         end
 
@@ -2115,7 +2161,7 @@ function compute_advanced_diagnostics(
                 n_robust        = n_robust,
             )
         catch e
-            verbose && println("  (Circuit computation note: $(_error_note(e)))")
+            _record_panel_skip("Circuit computation", e);             verbose && println("  (Circuit computation note: $(_error_note(e)))")
         end
     end
 
@@ -2430,7 +2476,7 @@ function export_dashboards(
         save_html(map_obj, html_file)
         verbose && println("  Paths dashboard: $html_file")
     catch e
-        verbose && println("  (Leaflet paths note: $(_error_note(e)))")
+        _record_panel_skip("Leaflet paths", e);         verbose && println("  (Leaflet paths note: $(_error_note(e)))")
     end
 
     # -- Movement ecology statistics & phenology ----------------------
@@ -2452,7 +2498,7 @@ function export_dashboards(
         )
         verbose && println("  Summary CSV table: $csv_file")
     catch e
-        verbose && println("  (Summary CSV note: $(_error_note(e)))")
+        _record_panel_skip("Summary CSV", e);         verbose && println("  (Summary CSV note: $(_error_note(e)))")
     end
 
     # -- Movement summary diagnostics dashboard -----------------------
@@ -2469,9 +2515,9 @@ function export_dashboards(
                 "  Summary diagnostics: $summ_file"
             )
         catch e
-            verbose && println(
-                "  (Summary diagnostics note: $(_error_note(e)))"
-            )
+_record_panel_skip("Summary diagnostics", e); verbose && println(
+"  (Summary diagnostics note: $(_error_note(e)))"
+        )
         end
     end
 
@@ -2485,7 +2531,7 @@ function export_dashboards(
         )
         verbose && println("  Posterior uncertainty: $post_file")
     catch e
-        verbose && println("  (Posterior uncertainty note: $(_error_note(e)))")
+        _record_panel_skip("Posterior uncertainty", e);         verbose && println("  (Posterior uncertainty note: $(_error_note(e)))")
     end
 
     # -- Directed flow network dashboard ------------------------------
@@ -2498,7 +2544,7 @@ function export_dashboards(
         )
         verbose && println("  Network flow diagram: $net_file")
     catch e
-        verbose && println("  (Network flow note: $(_error_note(e)))")
+        _record_panel_skip("Network flow", e);         verbose && println("  (Network flow note: $(_error_note(e)))")
     end
 
     # -- Interactive two-click corridor explorer -----------------------------
@@ -2518,7 +2564,7 @@ function export_dashboards(
         save_html(corr_map, corr_file_pl)
         verbose && println("  Corridor dashboard: $corr_file")
     catch e
-        verbose && println("  (Corridor dashboard note: $(_error_note(e)))")
+        _record_panel_skip("Corridor dashboard", e);         verbose && println("  (Corridor dashboard note: $(_error_note(e)))")
     end
 
     # -- Posterior path ensemble --------------------------------------------
@@ -2540,7 +2586,7 @@ function export_dashboards(
             save_html(ens_map, ens_file)
             verbose && println("  Posterior ensemble dashboard: $ens_file")
         catch e
-            verbose && println("  (Posterior ensemble note: $(_error_note(e)))")
+            _record_panel_skip("Posterior ensemble", e);             verbose && println("  (Posterior ensemble note: $(_error_note(e)))")
         end
     end
 
@@ -2556,7 +2602,7 @@ function export_dashboards(
             save_html(dash, hydro_file)
             verbose && println("  Hydrodynamic dashboard: $hydro_file")
         catch e
-            verbose && println("  (Hydrodynamic dashboard note: $(_error_note(e)))")
+            _record_panel_skip("Hydrodynamic dashboard", e);             verbose && println("  (Hydrodynamic dashboard note: $(_error_note(e)))")
         end
     end
 
@@ -2578,7 +2624,7 @@ function export_dashboards(
             )
             verbose && println("  Current density dashboard: $circ_file")
         catch e
-            verbose && println("  (Circuit density note: $(_error_note(e)))")
+            _record_panel_skip("Circuit density", e);             verbose && println("  (Circuit density note: $(_error_note(e)))")
         end
 
         try
@@ -2594,7 +2640,7 @@ function export_dashboards(
             )
             verbose && println("  Stochastic circuit dashboard: $stoch_file")
         catch e
-            verbose && println("  (Stochastic circuit note: $(_error_note(e)))")
+            _record_panel_skip("Stochastic circuit", e);             verbose && println("  (Stochastic circuit note: $(_error_note(e)))")
         end
     end
 
@@ -2617,7 +2663,7 @@ function export_dashboards(
             )
             verbose && println("  Bottleneck dashboard: $bn_file")
         catch e
-            verbose && println("  (Bottleneck rendering note: $(_error_note(e)))")
+            _record_panel_skip("Bottleneck rendering", e);             verbose && println("  (Bottleneck rendering note: $(_error_note(e)))")
         end
     end
 
@@ -2639,7 +2685,7 @@ function export_dashboards(
             save_html(map_obj, step_file)
             verbose && println("  Step diagnostics dashboard: $step_file")
         catch e
-            verbose && println("  (Step diagnostics note: $(_error_note(e)))")
+            _record_panel_skip("Step diagnostics", e);             verbose && println("  (Step diagnostics note: $(_error_note(e)))")
         end
     end
 
@@ -2661,7 +2707,7 @@ function export_dashboards(
             save_html(map_obj, conn_file)
             verbose && println("  Regional connectivity dashboard: $conn_file")
         catch e
-            verbose && println("  (Regional connectivity note: $(_error_note(e)))")
+            _record_panel_skip("Regional connectivity", e);             verbose && println("  (Regional connectivity note: $(_error_note(e)))")
         end
     elseif verbose
         println(
@@ -2701,7 +2747,7 @@ function export_dashboards(
             save_html(map_obj, adv_file)
             verbose && println("  Advection velocity dashboard: $adv_file")
         catch e
-            verbose && println("  (Advection velocity note: $(_error_note(e)))")
+            _record_panel_skip("Advection velocity", e);             verbose && println("  (Advection velocity note: $(_error_note(e)))")
         end
     end
 
@@ -2725,7 +2771,7 @@ function export_dashboards(
                 save_html(map_obj, ad_file)
                 verbose && println("  Advection ratio dashboard: $ad_file")
             catch e
-                verbose && println("  (Advection ratio note: $(_error_note(e)))")
+                _record_panel_skip("Advection ratio", e);                 verbose && println("  (Advection ratio note: $(_error_note(e)))")
             end
         elseif verbose
             println(
@@ -2749,7 +2795,7 @@ function export_dashboards(
             save_html(map_obj, res_file)
             verbose && println("  Residence time dashboard: $res_file")
         catch e
-            verbose && println("  (Residence time note: $(_error_note(e)))")
+            _record_panel_skip("Residence time", e);             verbose && println("  (Residence time note: $(_error_note(e)))")
         end
     end
 
@@ -2784,7 +2830,7 @@ function export_dashboards(
                 save_html(map_obj, diff_file)
                 verbose && println("  Diffusion dashboard: $diff_file")
             catch e
-                verbose && println("  (Diffusion note: $(_error_note(e)))")
+                _record_panel_skip("Diffusion", e);                 verbose && println("  (Diffusion note: $(_error_note(e)))")
             end
         end
     end
@@ -2801,7 +2847,7 @@ function export_dashboards(
             save_html(map_obj, hsi_file)
             verbose && println("  HSI dashboard: $hsi_file")
         catch e
-            verbose && println("  (HSI map note: $(_error_note(e)))")
+            _record_panel_skip("HSI map", e);             verbose && println("  (HSI map note: $(_error_note(e)))")
         end
     end
 
@@ -2817,7 +2863,7 @@ function export_dashboards(
             save_html(map_obj, disp_file)
             verbose && println("  Dispersal kernel dashboard: $disp_file")
         catch e
-            verbose && println("  (Dispersal kernel note: $(_error_note(e)))")
+            _record_panel_skip("Dispersal kernel", e);             verbose && println("  (Dispersal kernel note: $(_error_note(e)))")
         end
     end
 
@@ -2835,7 +2881,7 @@ function export_dashboards(
         show_map(tess_map; output_file = tess_file)
         verbose && println("  Tessellation polygon map: $tess_file")
     catch e
-        verbose && println("  (Tessellation polygon map note: $(_error_note(e)))")
+        _record_panel_skip("Tessellation polygon map", e);         verbose && println("  (Tessellation polygon map note: $(_error_note(e)))")
     end
 
     # -- Agent-Based Model trajectory dashboard ----------------------------
@@ -2922,7 +2968,7 @@ function export_dashboards(
                 verbose && println("  Agent visit-frequency CSV: $csv_agent")
             end
         catch e
-            verbose && println("  (Agent trajectory note: $(_error_note(e)))")
+            _record_panel_skip("Agent trajectory", e);             verbose && println("  (Agent trajectory note: $(_error_note(e)))")
         end
     end
 
@@ -2953,7 +2999,7 @@ function export_dashboards(
             save_html(corr_map, corr_file)
             verbose && println("  Corridor heatmap: $corr_file")
         catch e
-            verbose && println("  (Corridor heatmap note: $(_error_note(e)))")
+            _record_panel_skip("Corridor heatmap", e);             verbose && println("  (Corridor heatmap note: $(_error_note(e)))")
         end
     end
 
@@ -3003,7 +3049,7 @@ function export_dashboards(
             save_html(bse_map, bse_file)
             verbose && println("  Bottleneck SE dashboard: $bse_file")
         catch e
-            verbose && println("  (Bottleneck SE note: $(_error_note(e)))")
+            _record_panel_skip("Bottleneck SE", e);             verbose && println("  (Bottleneck SE note: $(_error_note(e)))")
         end
     end
 
@@ -3025,7 +3071,7 @@ function export_dashboards(
                 save_html(conn_map, conn_html)
                 verbose && println("  Stock connectivity HTML: $conn_html")
             catch e
-                verbose && println("  (Stock connectivity HTML note: $(_error_note(e)))")
+                _record_panel_skip("Stock connectivity HTML", e);                 verbose && println("  (Stock connectivity HTML note: $(_error_note(e)))")
             end
         end
     end
@@ -3043,7 +3089,7 @@ function export_dashboards(
                 _export_ppc_html(ppc_file, ppc; species = spp)
                 verbose && println("  PPC summary dashboard: $ppc_file")
             catch e
-                verbose && println("  (PPC dashboard note: $(_error_note(e)))")
+                _record_panel_skip("PPC dashboard", e);                 verbose && println("  (PPC dashboard note: $(_error_note(e)))")
             end
         end
     end
@@ -3380,6 +3426,10 @@ function run_movement_analysis(
     out_dir = params.output_dir
     mkpath(out_dir)
 
+    # Panel failures are collected per run, so a previous run's dead panels are
+    # never reported against this one.
+    empty!(PANEL_SKIPS)
+
     results_checkpoint = joinpath(out_dir, "movement_results_checkpoint.jld2")
 
     # --figures-only: load the full results checkpoint and re-render dashboards
@@ -3526,10 +3576,14 @@ function run_movement_analysis(
             "agent_trajectories", agent_trajectories,
         )
     catch e
-        params.verbose && println(
-            "  (Results checkpoint write skipped: $(_error_note(e)))"
-        )
+_record_panel_skip("Results checkpoint write", e); params.verbose && println(
+"  (Results checkpoint write skipped: $(_error_note(e)))"
+            )
     end
+
+    # Reported unconditionally, not under `verbose`. A panel that fails on every
+    # run must not be able to do so invisibly.
+    report_panel_skips()
 
     if params.verbose
         println("\n" * "=" ^ 72)
@@ -3560,6 +3614,9 @@ function run_movement_analysis(
             residence = kernels.rho_hat,
             gamma     = kernels.gamma_hat,
         ),
-        depth_range        = loaded.parsed_depth_range,
-    )
-end
+depth_range        = loaded.parsed_depth_range,
+          # Panels that failed this run, so a caller does not have to read stdout
+          # to find out that an output is missing.
+          panel_skips       = copy(PANEL_SKIPS),
+      )
+    end
