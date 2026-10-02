@@ -99,6 +99,11 @@ Base.@kwdef struct MovementAnalysisConfig
     # exp(kappa * cos(bearing - heading)). Zero is the memoryless chain, where a
     # step depends only on current position. Only read by :agent runs.
     persistence::Float64 = 0.0
+    # Number of synthetic animals projected. Deliberately decoupled from the
+    # number of observations: starts are drawn with replacement from the observed
+    # release set, so raising this reduces Monte Carlo error without changing the
+    # distribution being estimated.
+    n_agent_projections::Int = 200
     # Horizon used when the telemetry carries no usable duration column.
     agent_horizon::Int = 50
 

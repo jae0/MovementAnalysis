@@ -3507,11 +3507,12 @@ function run_movement_analysis(
     end
     
     agent_trajectories = nothing
+    agent_space_use = nothing
     if :agent in params.model_modes
         if params.verbose
-            println("\n[Phase 2b] Simulating Agent-Based Movement Alternative Model...")
+            println("\n[Phase 2b] Projecting synthetic agents forward...")
         end
-        n_sim_agents = nrow(loaded.obs_df)
+        n_sim_agents = params.n_agent_projections
         # Use observed release sites to start agents (column is :release, not :release_unit)
         release_nodes = Int.(loaded.obs_df.release)
         maximum(release_nodes) <= size(kernels.P_kernel, 1) || throw(BoundsError(
@@ -3546,8 +3547,13 @@ function run_movement_analysis(
             persistence = params.persistence,
             seed = params.seed,
         )
+        # Expected space use under the projected kernel: how likely an untagged
+        # animal is to reach each unit, and how long it stays there once it does.
+        agent_space_use = forward_space_use(agent_trajectories, loaded.n_spatial)
         if params.verbose
-            println("  Simulated $(n_sim_agents) agents for 50 steps.")
+            println("  Projected $(n_sim_agents) agents over $(params.agent_horizon) steps.")
+            top = findmax(agent_space_use.visit_probability)
+            println("  Highest projected use: unit $(top[2]) (p = $(round(top[1]; digits = 3)))")
         end
     end
     
@@ -3602,6 +3608,7 @@ _record_panel_skip("Results checkpoint write", e); params.verbose && println(
         circuit            = diagnostics.circuit,
         validation_analyses = validation,
         agent_trajectories = agent_trajectories,
+          agent_space_use    = agent_space_use,
         movement_stats     = !isnothing(dashboards) && hasproperty(dashboards, :movement_stats) ?
                              dashboards.movement_stats : nothing,
         phenology          = !isnothing(dashboards) && hasproperty(dashboards, :phenology) ?
