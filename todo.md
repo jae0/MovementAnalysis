@@ -228,12 +228,15 @@ earlier notes. Several items previously listed as lost are in fact present on
    (`coordinate_space_of`). **Absent**: empirical-HSI transfer, the exact-horizon
    A* router, stable per-tag seeds, coordinate encoders, `tagid` alignment,
    bathymetry provenance, composed mesh index mappings.
-5. **Silent-failure audit still owed.** The export phase wraps each dashboard in
-   `try`/`catch` that downgrades any error to a printed note. Three real bugs
-   were hiding in exactly that way (`hydro` unbound, `_sample_column` arity,
-   the `group` column read after removal) and none of them failed a test. The
-   policy hides whole missing panels, so it needs either a fail-fast mode or a
-   count of skipped panels surfaced in the summary.
+5. **Silent-failure audit — done, `93444f9`.** The export phase wraps ~25
+   panels in `try`/`catch` that downgrades any error to a printed note, gated on
+   `verbose`. Three real bugs hid in exactly that way (`hydro` unbound,
+   `_sample_column` arity, the `group` column read after removal) and none of
+   them failed a test. All 28 catch sites now record into `PANEL_SKIPS`, which
+   is reset per run, printed once at the end regardless of verbosity, and
+   returned as `panel_skips`. Note the remaining caveat: every panel is still
+   best-effort, so a run can complete with a subset of outputs and the caller
+   must inspect `panel_skips` to know. Fail-fast remains a policy decision.
 6. **Local `main`** still sits at `81c226e`, diverged from `origin/main`;
    `ibm` and `backup-premerge` both preserve it. Reset when convenient.
 
