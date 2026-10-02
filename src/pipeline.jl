@@ -2220,9 +2220,10 @@ rendering errors so the pipeline is never aborted. Exports:
 """
 function export_dashboards(
     loaded, kernels, path_results, diagnostics, params,
-    validation = nothing,
-    agent_trajectories = nothing
-)::Union{NamedTuple, Nothing}
+validation = nothing,
+    agent_trajectories = nothing,
+    agent_space_use = nothing
+  )::Union{NamedTuple, Nothing}
     params.render_html || return nothing
     verbose = params.verbose
 
@@ -2484,9 +2485,27 @@ function export_dashboards(
     # -- Movement paths dashboard ---------------------------------
     try
         html_file = joinpath(out_dir, "movement_paths_dashboard.html")
-        map_obj = leaflet_tracks_map(
-            all_paths_rich, au_mesh;
-            empirical_paths     = emp_tracks,
+# Projected agents in the same shape the map expects for observed tags, so every
+      # path source lands on one interactive map. They get their own toggleable
+      # layer: reconstructed paths are conditioned on both observed endpoints,
+      # projected ones on neither, and conflating them would be misleading.
+      agent_segs = nothing
+      if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
+          segs = Vector{Vector{Tuple{Float64, Float64}}}()
+          for gdf in groupby(agent_trajectories, :tagid)
+              srt = sort(gdf, :step)
+              pts = [(Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
+                     for u in srt.mesh_unit if 1 <= u <= n_units]
+              length(pts) >= 2 && push!(segs, pts)
+          end
+          isempty(segs) || (agent_segs = segs)
+      end
+
+      map_obj = leaflet_tracks_map(
+                all_paths_rich, au_mesh;
+                empirical_paths     = emp_tracks,
+                agent_paths         = agent_segs,
+                max_agent_paths     = 200,
             max_paths           = max(100, length(all_paths_rich)),
             max_empirical_paths = length(emp_tracks),
             hsi                 = nothing,
@@ -2573,15 +2592,19 @@ _record_panel_skip("Summary diagnostics", e); verbose && println(
     try
         corr_file  = joinpath(out_dir, "movement_interactive_corridor.html")
         corr_file_pl = joinpath(out_dir, "movement_interactive_corridors.html")
-          corr_map   = leaflet_interactive_corridor_dashboard(
-              P_kernel, au_mesh;
-              hsi             = params.overlay_hsi ? hsi_vec : nothing,
-              overlay_hsi     = params.overlay_hsi,
-              empirical_paths = emp_tracks,
-              dark_mode       = params.dark_mode,
-            title           = "$spp Dynamic Migration Corridor" *
-                              reshard_lbl * depth_lbl
-        )
+# Projected agents, in the same shape the explorer expects for observed tags.
+            # Rendered on their own toggleable layer so the two kinds of path stay
+            # distinguishable: reconstructed paths are conditioned on both
+            # endpoints, projected ones on neither.
+corr_map   = leaflet_interactive_corridor_dashboard(
+                  P_kernel, au_mesh;
+                  hsi             = params.overlay_hsi ? hsi_vec : nothing,
+                  overlay_hsi     = params.overlay_hsi,
+                  empirical_paths = emp_tracks,
+                  dark_mode       = params.dark_mode,
+                title           = "$spp Dynamic Migration Corridor" *
+                                  reshard_lbl * depth_lbl
+            )
         save_html(corr_map, corr_file)
         save_html(corr_map, corr_file_pl)
         verbose && println("  Corridor dashboard: $corr_file")
@@ -2989,8 +3012,119 @@ _record_panel_skip("Summary diagnostics", e); verbose && println(
                 end
                 verbose && println("  Agent visit-frequency CSV: $csv_agent")
             end
+
+            # Projected space use. The track map shows individual samples; this
+            # shows what the projection implies for the population, which is the
+            # quantity a space-use question is actually about. Without it the
+            # forward projection produced a frame that nothing summarised.
+            if agent_space_use !== nothing && !isempty(agent_space_use.visit_probability)
+                su_file = joinpath(out_dir, "movement_agent_space_use.html")
+                su_map = leaflet_choropleth(
+                    au_mesh.polygons_lonlat, agent_space_use.visit_probability;
+                    title       = "$spp Projected Space Use (untagged animals)",
+                    cmap        = params.cmap,
+                    vmin        = 0.0,
+                    vmax        = 1.0,
+                    colorbar_label = "P(unit reached)",
+                    dark_mode   = params.dark_mode,
+                )
+                save_html(su_map, su_file)
+                verbose && println("  Projected space-use map: $su_file")
+
+                # Table: one row per unit, ordered by how likely it is to be used.
+                su_csv = joinpath(out_dir, "movement_agent_space_use.csv")
+                order = sortperm(agent_space_use.visit_probability; rev = true)
+                open(su_csv, "w") do io
+                    write(io, "mesh_unit,visit_probability,visits,mean_dwell_steps,hsi\n")
+                    for u in order
+                        write(io, string(u, ',',
+                            round(agent_space_use.visit_probability[u]; digits = 6), ',',
+                            agent_space_use.visits[u], ',',
+                            round(agent_space_use.mean_dwell_steps[u]; digits = 4), ',',
+                            (1 <= u <= length(hsi_vec)) ? round(hsi_vec[u]; digits = 6) : "NA",
+                            '\n'))
+                    end
+                end
+                verbose && println("  Projected space-use table: $su_csv")
+
+                # Console summary: the units the projection concentrates on.
+                top_n = min(5, length(order))
+                if top_n > 0
+                    println("  Top projected-use units:")
+                    for k in 1:top_n
+                        u = order[k]
+                        println("    unit $(rpad(u, 5)) p=$(round(agent_space_use.visit_probability[u]; digits = 3))  " *
+                                "dwell=$(round(agent_space_use.mean_dwell_steps[u]; digits = 1)) steps  " *
+                                "hsi=$(round(hsi_vec[u]; digits = 3))")
+                    end
+                end
+            end
         catch e
             _record_panel_skip("Agent trajectory", e);             verbose && println("  (Agent trajectory note: $(_error_note(e)))")
+        end
+
+        # Does directional persistence actually buy anything over the memoryless
+        # kernel? The agent projection reweights by heading rather than using a
+        # (position, heading) kernel, which is a choice that ought to be defended
+        # rather than assumed. This scores both against the observed transitions.
+        if agent_space_use !== nothing || !isnothing(loaded.obs_df)
+            try
+                max_units = 400
+                n_units <= max_units || throw(ArgumentError(
+                    "persistence_gain_report forms T^k explicitly and is limited " *
+                    "to $max_units units; this mesh has $n_units."
+                ))
+                # Bearing needs planar coordinates, so prefer the km centroids over lon/lat.
+                gain_cents = hasproperty(au_mesh, :centroids_km) &&
+                             !isnothing(au_mesh.centroids_km) ?
+                             au_mesh.centroids_km : au_mesh.centroids
+                kappas = [0.0, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+                gains = persistence_gain_report(
+                    loaded.W, gain_cents, hsi_vec;
+                    releases  = Int.(loaded.obs_df.release),
+                    recaptures = Int.(loaded.obs_df.recapture),
+                    ks         = max.(1, round.(Int, collect(loaded.obs_df.k))),
+                    gamma      = kernels.gamma_hat,
+                    residence  = kernels.rho_hat,
+                    advection  = kernels.alpha_hat,
+                    kappas     = kappas,
+                    n_headings = params.n_headings,
+                )
+
+                csv_gain = joinpath(out_dir, "movement_persistence_gain.csv")
+                open(csv_gain, "w") do io
+                    write(io, "kappa,mean_loglik,gain_vs_first_order\n")
+                    for p in gains.by_persistence
+                        write(io, string(p.persistence, ',',
+                            round(p.mean_loglik; digits = 6), ',',
+                            round(p.gain_vs_first_order; digits = 6), '\n'))
+                    end
+                end
+
+                # A "best" that sits on the edge of the grid has not been located.
+                at_boundary = gains.best_persistence == maximum(kappas) &&
+                              gains.improves_on_first_order
+
+                if verbose
+                    println("\n  Directional persistence vs the memoryless kernel:")
+                    println("  | kappa | mean log-lik | gain vs first-order |")
+                    println("  |------:|-------------:|--------------------:|")
+                    for p in gains.by_persistence
+                        println("  | $(p.persistence) | $(round(p.mean_loglik; digits = 4)) | $(round(p.gain_vs_first_order; digits = 4)) |")
+                    end
+                    println("  Best kappa = $(gains.best_persistence) " *
+                            "(improves: $(gains.improves_on_first_order))")
+                    if at_boundary
+                        println("  NOTE: the best value is at the edge of the kappa grid " *
+                                "($(maximum(kappas))), and the curve is still rising. " *
+                                "The optimum has not been located; widen the grid before " *
+                                "treating $(gains.best_persistence) as the estimate.")
+                    end
+                    println("  Table: $csv_gain")
+                end
+            catch e
+                _record_panel_skip("Persistence gain", e); verbose && println("  (Persistence gain note: $(_error_note(e)))")
+            end
         end
     end
 
@@ -3478,7 +3612,8 @@ function run_movement_analysis(
         params_render.verbose && println("\n[figures-only] Regenerating dashboards...")
         export_dashboards(
             loaded_r, kernels_r, path_res_r, diagnostics_r,
-            params_render, validation_r, agent_trajectories_r
+            params_render, validation_r, agent_trajectories_r,
+            agent_space_use_r
         )
         params_render.verbose && println("\n[figures-only] Done.")
 
@@ -3583,7 +3718,8 @@ function run_movement_analysis(
     diagnostics = compute_advanced_diagnostics(loaded, path_res, params)
     validation  = execute_validation_analyses(loaded, fitted, kernels, params)
     dashboards  = export_dashboards(
-        loaded, kernels, path_res, diagnostics, params, validation, agent_trajectories
+        loaded, kernels, path_res, diagnostics, params, validation, agent_trajectories,
+    agent_space_use
     )
 
     # Write a full results checkpoint so --figures-only can regenerate dashboards

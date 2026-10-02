@@ -230,12 +230,18 @@ earlier notes. Several items previously listed as lost are in fact present on
    **Caveat:** `:log_ratio` saturates to the 0.0/0.999 bounds at beta=2 because
    `log(h_i / mean)` is unbounded as `h_i` approaches zero. `:difference` is
    the better-behaved default for weak coupling.
-4. **Still unwired.** `build_persistent_transition_kernel` and
-   `persistent_unit_marginal` are implemented and exported but not called by the
-   pipeline; the agent projection uses the reweighting form in
-   `_turn_logweight` instead. That is a defensible choice, but it is currently
-   an unstated one, and `persistence_gain_report` is the tool that would justify
-   it.
+4. **Persistence is now wired, and the gain is measured.** `persistence_gain_report`
+   runs in `:agent` mode, printing a kappa-vs-log-likelihood table and writing
+   `movement_persistence_gain.csv`. On the simulated dataset it is decisive:
+   mean log-lik rises from -2.55 first-order to -1.81 at kappa=4, so heading
+   persistence is a real improvement and the agent reweighting is justified.
+   **The grid is not wide enough.** The best value still sits at the upper edge
+   (kappa=16 after widening), and the run prints an explicit warning rather than
+   presenting a boundary value as the estimate. The optimum has not been located;
+   the grid needs extending, ideally with a proper search rather than a fixed set.
+   `build_persistent_transition_kernel` and `persistent_unit_marginal` are still
+   uncalled by the pipeline -- the report uses them internally to score, but the
+   fitted kernel itself is still first-order.
 4. **Sections 3-6, verified individually.** Present: Viterbi, bridge handling,
    residence-time allocation, the coordinate space contract
    (`coordinate_space_of`). **Absent**: empirical-HSI transfer, the exact-horizon

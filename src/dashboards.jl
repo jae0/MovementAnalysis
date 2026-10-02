@@ -2325,6 +2325,8 @@ function leaflet_tracks_map(
     paths,
     au::Union{Nothing, NamedTuple} = NamedTuple();
     empirical_paths = nothing,
+    agent_paths = nothing,
+    max_agent_paths::Int = 200,
     hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
     overlay_hsi::Bool = false,
     background::Symbol = :polygons,
@@ -2554,6 +2556,30 @@ function leaflet_tracks_map(
     end
     emp_tracks_collection = "{\"type\": \"FeatureCollection\", \"features\": [$(join(emp_tracks_json, ",\n"))]}"
 
+    # Projected agents, rendered as their own layer. Without this the forward
+    # projection produced tracks that existed only in a standalone map, so the
+    # one dashboard that puts every path source on a single map omitted the
+    # only paths that were never observed.
+    agent_tracks_json = String[]
+    if !isnothing(agent_paths)
+        n_agent_render = min(length(agent_paths), max_agent_paths)
+        for i in 1:n_agent_render
+            pt_seq = agent_paths[i]
+            if length(pt_seq) >= 2
+                coords_trans = [_transform_point(tf, pt) for pt in pt_seq]
+                coord_str = join(["[$(pt[1]), $(pt[2])]" for pt in coords_trans], ", ")
+                push!(agent_tracks_json, """{
+                  "type": "Feature",
+                  "id": "agent-$i",
+                  "properties": { "tag_id": "agent-$i", "n_obs": $(length(pt_seq)) },
+                  "geometry": { "type": "LineString", "coordinates": [$coord_str] }
+                }""")
+            end
+        end
+    end
+    agent_tracks_collection =
+        "{\"type\": \"FeatureCollection\", \"features\": [$(join(agent_tracks_json, ",\n"))]}"
+
     # Background Polygons in transformed space with HSI coloring
     polys_json = String[]
     has_hsi = overlay_hsi && !isnothing(hsi) && !isempty(hsi)
@@ -2723,6 +2749,7 @@ $(hsi_popup_row)
 
     // 2. Empirical Tag Observations Layer
     var empTracksData = $(emp_tracks_collection);
+      var agentTracksData = $(agent_tracks_collection);
     if (empTracksData.features.length > 0) {
       var empTrackLayer = L.geoJSON(empTracksData, {
         style: {
@@ -2745,6 +2772,36 @@ $(hsi_popup_row)
         }
       }).addTo(map);
       overlayLayers["Direct Tag Vectors"] = empTrackLayer;
+    }
+
+    // 2b. Projected Agent Trajectories Layer
+    // Untagged animals sampled from the fitted kernel. Distinct from the
+    // reconstructed layer: those are conditioned on observed endpoints, these
+    // are conditioned on neither.
+    if (agentTracksData.features.length > 0) {
+      var agentLayer = L.geoJSON(agentTracksData, {
+        style: {
+          color: '#f59e0b',
+          weight: 1.5,
+          opacity: 0.55,
+          dashArray: '4 3'
+        },
+        onEachFeature: function(feature, layer) {
+          var p = feature.properties;
+          layer.on('mouseover', function() {
+            layer.setStyle({ weight: 3.5, opacity: 1.0, color: '#b45309' });
+          });
+          layer.on('mouseout', function() {
+            agentLayer.resetStyle(layer);
+          });
+          layer.bindPopup('<div class="ma-popup">' +
+            '<div class="ma-popup-title" style="color:#b45309">' + p.tag_id + '</div>' +
+            '<div class="ma-popup-row"><span class="ma-popup-label">Projected steps:</span><span class="ma-popup-val">' + p.n_obs + '</span></div>' +
+            '<div class="ma-popup-row"><span class="ma-popup-label">Basis:</span><span class="ma-popup-val">pooled kernel, no endpoints</span></div>' +
+            '</div>');
+        }
+      }).addTo(map);
+      overlayLayers["Projected Agents"] = agentLayer;
     }
 
     // 3. Reconstructed State-Space Trajectories Layer
@@ -5240,8 +5297,8 @@ end
           P::AbstractMatrix{<:Real},
           au::NamedTuple;
           hsi::Union{Nothing, AbstractVector{<:Real}} = nothing,
-          empirical_paths = nothing,
-          title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
+empirical_paths = nothing,
+    title::String = "Interactive Movement Corridor & Path Ensemble Explorer",
         dark_mode::Bool = false,
         width::String = "100%",
         height::String = "750px",
