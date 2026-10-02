@@ -2324,7 +2324,8 @@ function construct_stochastic_transition_kernel(
     gamma::Union{Real, AbstractVector{<:Real}} = 1.0,
     residence::Union{Real, AbstractVector{<:Real}} = 0.2,
     advection::Union{Real, AbstractVector{<:Real}} = 0.5,
-    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    coupled_residency::Bool = false
   )::Matrix{Float64}
     S = size(W, 1)
     if length(hsi) != S
@@ -2338,10 +2339,23 @@ function construct_stochastic_transition_kernel(
         ))
     end
 
+    # `gamma` and `advection` are fitted parameters and must stay scalar. `residence`
+    # may also be a per-unit vector, but only when the caller sets
+    # `coupled_residency`, which asserts that the vector is *derived* -- one value
+    # per unit computed from the fitted scalar rho and local habitat -- rather
+    # than a second set of fitted parameters. Without that flag the guard still
+    # rejects it, so the group-axis misuse it was built to stop cannot reappear
+    # through the back door.
+    residence_arg = if coupled_residency && residence isa AbstractVector
+        residence
+    else
+        _pooled_scalar(residence, "residence")
+    end
+
     P_sparse = build_sparse_transition_kernel(
         W, hsi,
         _pooled_scalar(gamma, "gamma"),
-        _pooled_scalar(residence, "residence"),
+        residence_arg,
         _pooled_scalar(advection, "advection"),
         land_mask,
     )

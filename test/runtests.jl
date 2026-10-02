@@ -938,6 +938,7 @@ end
     end
 
       include("test_agent_movement.jl")
+      include("test_persistence.jl")
 
     @testset "Posterior panel parameter columns resolve" begin
         # `_sample_column` takes one series and nothing else. The panel used to

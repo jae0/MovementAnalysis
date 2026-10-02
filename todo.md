@@ -217,12 +217,25 @@ earlier notes. Several items previously listed as lost are in fact present on
    wiring would have hit: `_resolve_centroids` returns a 3-tuple and was being
    passed straight through, and the persistence-kernel state index is
    position-major (`(i-1)*H + h`), which the first version encoded transposed.
-3. **`persistence.jl` is dead in the live path.** `local_hsi_advantage`,
-   `residency_from_advantage`, `sanitise_hsi`, and `persistence_gain_report` are
-   defined and exported, but nothing in `pipeline.jl` calls them; the fitted
-   kernel is the plain first-order one. The agent projection can consume a
-   persistence kernel, but nothing builds one for it. Either wire it in or say
-   plainly that it is not part of the pipeline yet.
+3. **Habitat-coupled residency — done.** `residency_from_advantage` and
+   `local_hsi_advantage` are wired into the live kernel, via `rest_advantage`
+   (coupling strength, default 0 = unchanged behaviour) and
+   `rest_advantage_form`. `build_sparse_transition_kernel` now accepts a
+   per-unit residence vector, but only through an explicit `coupled_residency`
+   flag on `construct_stochastic_transition_kernel`; without it the pooled
+   `_pooled_scalar` guard still rejects a vector, so the group-axis misuse it
+   exists to prevent cannot reappear. Gamma and advection remain strictly
+   scalar. Verified end to end: beta=0 gives a uniform rho of 0.599,
+   beta=2 `:difference` spans 0.235..0.820, and the kernel stays row-stochastic.
+   **Caveat:** `:log_ratio` saturates to the 0.0/0.999 bounds at beta=2 because
+   `log(h_i / mean)` is unbounded as `h_i` approaches zero. `:difference` is
+   the better-behaved default for weak coupling.
+4. **Still unwired.** `build_persistent_transition_kernel` and
+   `persistent_unit_marginal` are implemented and exported but not called by the
+   pipeline; the agent projection uses the reweighting form in
+   `_turn_logweight` instead. That is a defensible choice, but it is currently
+   an unstated one, and `persistence_gain_report` is the tool that would justify
+   it.
 4. **Sections 3-6, verified individually.** Present: Viterbi, bridge handling,
    residence-time allocation, the coordinate space contract
    (`coordinate_space_of`). **Absent**: empirical-HSI transfer, the exact-horizon

@@ -1653,14 +1653,36 @@ function extract_transition_kernels(loaded, fitted, params)::NamedTuple
                 "gamma=$(round(g_mean; digits=4))")
     end
 
-    # Build the single transition kernel from posterior means
-    P_kernel = construct_stochastic_transition_kernel(
-        loaded.W, loaded.hsi_vec;
-        gamma     = g_mean,
-        residence = rho_hat,
-        advection = alpha_hat,
-        land_mask = loaded.land_mask,
-    )
+# Habitat-coupled residency. `gamma` biases *which* neighbour is chosen;
+      # residence decides whether the animal moves at all. With a zero coupling
+      # the fitted scalar rho applies everywhere, which is what the posterior
+      # actually estimated. A positive coupling makes residency unit-specific
+      # from local habitat advantage, which is an extra assumption the telemetry
+      # did not fit, so it is opt-in and reported below when active.
+      beta = Float64(params.rest_advantage)
+      residency = if beta == 0.0
+          rho_hat
+      else
+          adv = local_hsi_advantage(
+              loaded.hsi_vec, loaded.W; form = params.rest_advantage_form)
+          residency_from_advantage(rho_hat, adv, beta, params.rest_advantage_form)
+      end
+
+      # Build the single transition kernel from posterior means
+      P_kernel = construct_stochastic_transition_kernel(
+          loaded.W, loaded.hsi_vec;
+          gamma     = g_mean,
+          residence = residency,
+          advection = alpha_hat,
+          land_mask = loaded.land_mask,
+          coupled_residency = beta != 0.0,
+      )
+
+      if verbose && beta != 0.0
+          println("  Habitat-coupled residency active: beta=$(beta), " *
+                  "form=:$(params.rest_advantage_form), " *
+                  "rho range $(round(minimum(residency); digits = 3))..$(round(maximum(residency); digits = 3))")
+      end
 
     return (
         P_kernel        = P_kernel,

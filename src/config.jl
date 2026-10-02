@@ -94,6 +94,16 @@ Base.@kwdef struct MovementAnalysisConfig
     dynamic_kernels::Bool = false
     hmm_smoothing::Bool = false
 
+    # --- Habitat-coupled residency --------------------------------------------
+    # Strength of the coupling between local habitat advantage and how long an
+    # animal stays put. Zero makes every unit share the fitted scalar rho, which
+    # is the historical behaviour and the default. Positive values raise
+    # residency where the local habitat is favourable relative to its neighbours.
+    rest_advantage::Float64 = 0.0
+    # How local advantage is measured: :difference, :ratio, :log_ratio,
+    # :exp_difference, :exp_ratio, or :exp_log_ratio.
+    rest_advantage_form::Symbol = :difference
+
     # --- Agent forward projection --------------------------------------------
     # Heading persistence for the agent projection, kappa in
     # exp(kappa * cos(bearing - heading)). Zero is the memoryless chain, where a

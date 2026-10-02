@@ -68,7 +68,11 @@ where ``T^{\\text{diff}}`` is the unbiased random walk matrix.
 - `W::SparseMatrixCSC{Float64, Int}`: Spatial adjacency matrix.
 - `hsi::Vector{Float64}`: Habitat suitability index vector.
 - `gamma`: Gradient responsiveness parameter.
-- `residence`: Diagonal residence probability parameter (``\\rho``).
+- `residence`: Diagonal residence probability (``\\rho``). A scalar, or a
+  length-`S` vector giving a per-unit residency, which is how habitat coupling
+  enters: a vector built by `residency_from_advantage` makes an animal more
+  likely to stay put where the habitat is locally favourable. A scalar makes
+  every unit behave identically.
 - `advection`: Advection weighting parameter (``\\alpha``).
 - `land_mask`: Optional boolean mask denoting impermeable units.
 
@@ -91,7 +95,10 @@ function build_sparse_transition_kernel(
             "Dimension mismatch: W is $(S)x$(S), but land_mask has length $(length(land_mask))."
         ))
     end
-    T = promote_type(Float64, eltype(W), typeof(gamma), typeof(residence), typeof(advection))
+    # `residence` may be a scalar or a per-unit vector, so promote on its element
+    # type: typeof() of a vector would widen T to Any and break every constructor.
+    residence_eltype = residence isa AbstractVector ? eltype(residence) : typeof(residence)
+    T = promote_type(Float64, eltype(W), typeof(gamma), residence_eltype, typeof(advection))
     I_idx = Int[]
     J_idx = Int[]
     V_val = T[]
@@ -103,14 +110,28 @@ function build_sparse_transition_kernel(
     vals = nonzeros(W)
 
     # Use T throughout so ForwardDiff.Dual partials are preserved
-    rho   = clamp(T(residence), T(0), T(0.999))
     alpha = clamp(T(advection), T(0), T(1))
-    w_move = one(T) - rho
-    w_adv  = w_move * alpha
-    w_diff = w_move * (one(T) - alpha)
     gam    = T(gamma)
 
+    # `residence` may be a scalar or a per-unit vector. A scalar keeps the
+    # historical behaviour exactly; a vector makes residency habitat-coupled,
+    # which is what `residency_from_advantage` produces. Indexing the vector
+    # inside the loop keeps each element on the AD tape.
+    unit_residence = residence isa AbstractVector
+    if unit_residence
+        length(residence) == S || throw(DimensionMismatch(
+            "Dimension mismatch: W is $(S)x$(S), but residence has length " *
+            "$(length(residence))."
+        ))
+    end
+    rho_shared = unit_residence ? zero(T) : clamp(T(residence), T(0), T(0.999))
+
     for i in 1:S
+        rho = unit_residence ? clamp(T(residence[i]), T(0), T(0.999)) : rho_shared
+        w_move = one(T) - rho
+        w_adv  = w_move * alpha
+        w_diff = w_move * (one(T) - alpha)
+
         if !isnothing(land_mask) && land_mask[i]
             push!(I_idx, i)
             push!(J_idx, i)
