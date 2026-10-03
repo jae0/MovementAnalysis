@@ -576,8 +576,8 @@ end
                                                 [1, 2, 3, 4, 5],
                                                 [1, 2, 3, 4, 5]]),
                   ensemble_corridors = Dict("A" => zeros(5, 5)))
-        m = leaflet_posterior_path_ensemble(agreed, au; hsi = hsi)
-        @test m isa LeafletMap
+        m = plot_posterior_path_ensemble(agreed, au; hsi = hsi)
+        @test m isa InteractiveMap
         @test startswith(strip(m.html), "<!DOCTYPE html>")
         @test occursin("\"n_draws\": 3", m.html)
         @test occursin("\"modal_share\": 1.0", m.html)
@@ -586,32 +586,32 @@ end
         # Two of three draws chose the same route, so the modal share is 2/3.
         split_ens = (ensemble_paths =
                      Dict("B" => [[1, 2, 3, 4, 5], [1, 2, 4, 5], [1, 2, 3, 4, 5]]),)
-        m2 = leaflet_posterior_path_ensemble(split_ens, au; hsi = hsi)
+        m2 = plot_posterior_path_ensemble(split_ens, au; hsi = hsi)
         @test occursin("\"modal_share\": 0.6667", m2.html)
 
         # Longer routes must measure longer.
         longer = (ensemble_paths = Dict("C" => [[1, 2], [1, 2, 3], [1, 2, 3, 4]]),)
-        m3 = leaflet_posterior_path_ensemble(longer, au; hsi = hsi)
+        m3 = plot_posterior_path_ensemble(longer, au; hsi = hsi)
         lo = parse(Float64, match(r"\"min_km\": ([0-9.]+)", m3.html).captures[1])
         hi = parse(Float64, match(r"\"max_km\": ([0-9.]+)", m3.html).captures[1])
         @test hi > lo
 
         # An out-of-range unit index is dropped, not thrown on.
         ragged = (ensemble_paths = Dict("D" => [[1, 2, 999], [0, 1, 2]]),)
-        @test (leaflet_posterior_path_ensemble(ragged, au)).metadata[:n_individuals] == 1
+        @test (plot_posterior_path_ensemble(ragged, au)).metadata[:n_individuals] == 1
 
         # No HSI supplied still renders, with a null payload.
-        @test occursin("var HSI = null;", leaflet_posterior_path_ensemble(agreed, au).html)
+        @test occursin("var HSI = null;", plot_posterior_path_ensemble(agreed, au).html)
 
         # Several individuals are all offered, and the cap is honoured.
         many = (ensemble_paths = Dict("T$i" => [[1, 2]] for i in 1:40),)
-        @test leaflet_posterior_path_ensemble(many, au; max_individuals = 5
+        @test plot_posterior_path_ensemble(many, au; max_individuals = 5
         ).metadata[:n_individuals] == 5
 
         # An ensemble with nothing in it is a caller error worth naming.
-        @test_throws ArgumentError leaflet_posterior_path_ensemble(
+        @test_throws ArgumentError plot_posterior_path_ensemble(
             (ensemble_paths = Dict{String,Any}(),), au)
-        @test_throws ArgumentError leaflet_posterior_path_ensemble(
+        @test_throws ArgumentError plot_posterior_path_ensemble(
             (ensemble_paths = Dict("E" => Vector{Int}[]),), au)
     end
 
@@ -628,9 +628,9 @@ end
               polygons = polys, polygons_lonlat = polys, n_units = S)
         hsi = [0.2, 0.6, 0.9]
 
-        light  = leaflet_hsi_map(hsi, au; cmap = :viridis, dark_mode = false)
-        dark   = leaflet_hsi_map(hsi, au; cmap = :viridis, dark_mode = true)
-        plasma = leaflet_hsi_map(hsi, au; cmap = :plasma,  dark_mode = false)
+        light  = plot_hsi_map(hsi, au; cmap = :viridis, dark_mode = false)
+        dark   = plot_hsi_map(hsi, au; cmap = :viridis, dark_mode = true)
+        plasma = plot_hsi_map(hsi, au; cmap = :plasma,  dark_mode = false)
 
         @test light.html != dark.html
         @test light.html != plasma.html
@@ -646,14 +646,14 @@ end
         @test MovementAnalysisConfig().cmap === :viridis
     end
 
-    @testset "Leaflet HTML Map Structure" begin
-        map_obj = LeafletMap(
+    @testset "Makie HTML Map Structure" begin
+        map_obj = InteractiveMap(
             "<div>Map Content</div>";
             title = "Test Title",
             width = "100%",
             height = "600px"
         )
-        @test map_obj isa LeafletMap
+        @test map_obj isa InteractiveMap
         @test occursin("Test Title", map_obj.title)
     end
 
@@ -675,11 +675,11 @@ end
             ]
         )
 
-        map_geo = leaflet_interactive_corridor_dashboard(
+        map_geo = plot_interactive_corridor_dashboard(
             P, au_geo;
             title = "Test Corridor Map"
         )
-        @test map_geo isa LeafletMap
+        @test map_geo isa InteractiveMap
         @test occursin("esriOcean", map_geo.html)
         @test occursin("server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base", map_geo.html)
         @test occursin("Test Corridor Map", map_geo.html)
@@ -707,11 +707,11 @@ end
                 ]
             ]
         )
-        map_planar = leaflet_interactive_corridor_dashboard(
+        map_planar = plot_interactive_corridor_dashboard(
             P, au_planar;
             title = "Planar Test Map"
         )
-        @test map_planar isa LeafletMap
+        @test map_planar isa InteractiveMap
         @test occursin("esriOcean", map_planar.html)
         # One pooled kernel, so the explorer carries a single "Pooled" entry and no
         # per-group labels.
@@ -873,21 +873,21 @@ end
 
         # 1. Corridor dashboard does not overlay HSI by default
         P = [0.2 0.8 0.0; 0.3 0.4 0.3; 0.0 0.5 0.5]
-        corr_def = leaflet_interactive_corridor_dashboard(P, au; hsi = hsi_test)
+        corr_def = plot_interactive_corridor_dashboard(P, au; hsi = hsi_test)
         @test occursin("overlayLayers[\"Spatial Mesh\"]", corr_def.html)
         @test !occursin("overlayLayers[\"Spatial Mesh (HSI)\"]", corr_def.html)
 
-        corr_hsi = leaflet_interactive_corridor_dashboard(
+        corr_hsi = plot_interactive_corridor_dashboard(
             P, au; hsi = hsi_test, overlay_hsi = true
         )
         @test occursin("overlayLayers[\"Spatial Mesh (HSI)\"]", corr_hsi.html)
 
         # 2. Tracks map does not overlay HSI by default
-        tracks_def = leaflet_tracks_map([[1, 2], [2, 3]], au; hsi = hsi_test)
+        tracks_def = plot_tracks_map([[1, 2], [2, 3]], au; hsi = hsi_test)
         @test occursin("Spatial Tessellation", tracks_def.html)
         @test !occursin("Habitat Suitability (HSI)", tracks_def.html)
 
-        tracks_hsi = leaflet_tracks_map(
+        tracks_hsi = plot_tracks_map(
             [[1, 2], [2, 3]], au; hsi = hsi_test, overlay_hsi = true
         )
         @test occursin("Habitat Suitability (HSI)", tracks_hsi.html)
@@ -897,32 +897,32 @@ end
             ensemble_paths = Dict("A" => [[1, 2, 3], [1, 2, 3]]),
             ensemble_corridors = Dict("A" => zeros(3, 3))
         )
-        ens_def = leaflet_posterior_path_ensemble(agreed, au; hsi = hsi_test)
+        ens_def = plot_posterior_path_ensemble(agreed, au; hsi = hsi_test)
         @test occursin("var showHsi = false;", ens_def.html)
 
-        ens_hsi = leaflet_posterior_path_ensemble(
+        ens_hsi = plot_posterior_path_ensemble(
             agreed, au; hsi = hsi_test, overlay_hsi = true
         )
         @test occursin("var showHsi = true;", ens_hsi.html)
 
         # 4. Advection arrows default to :mesh background without HSI overlay
-        adv_def = leaflet_advection_arrows(au; Gamma = P)
-        @test adv_def isa LeafletMap
+        adv_def = plot_advection_arrows(au; Gamma = P)
+        @test adv_def isa InteractiveMap
 
         # 5. Choropleth transparent zeros
-        ch_zeros = leaflet_choropleth(polys, [0.0, 0.4, 0.8]; transparent_zeros = true)
+        ch_zeros = plot_choropleth(polys, [0.0, 0.4, 0.8]; transparent_zeros = true)
         @test occursin("var transparentZeros = true;", ch_zeros.html)
         @test occursin("fillColor: 'transparent'", ch_zeros.html)
         @test occursin("fillOpacity: 0.0", ch_zeros.html)
 
         # 6. Tessellation polygon map
-        tess_map = leaflet_tessellation_map(
+        tess_map = plot_tessellation_map(
             au;
             title = "Test Domain Polygons",
             depth = [50.0, 100.0, 150.0],
             hsi = hsi_test
         )
-        @test tess_map isa LeafletMap
+        @test tess_map isa InteractiveMap
         @test occursin("Test Domain Polygons", tess_map.html)
         @test occursin("Tessellation Polygons (3 units)", tess_map.html)
         @test occursin("Depth:", tess_map.html)
@@ -937,10 +937,482 @@ end
         rm(tmp_tess; force = true)
     end
 
-      include("test_agent_movement.jl")
-      include("test_persistence.jl")
-      include("test_agent_outputs.jl")
-      include("test_exact_k.jl")
+      using Test
+using MovementAnalysis
+using SparseArrays
+using Random
+using DataFrames
+using Statistics: mean
+
+@testset "Agent-Based Movement" begin
+    #   1 - 2 - 3
+    #   |       |
+    #   4 - 5 - 6
+    W = sparse([
+        0 1 0 1 0 0;
+        1 0 1 0 0 0;
+        0 1 0 0 0 1;
+        1 0 0 0 1 0;
+        0 0 0 1 0 1;
+        0 0 1 0 1 0;
+    ])
+    hsi = [0.1, 0.2, 0.3, 0.1, 0.5, 1.0]
+    S = 6
+    # Node 6 has the highest HSI, so strong advection should concentrate the walk.
+    T = build_sparse_transition_kernel(W, hsi, 2.0, 0.1, 1.0, nothing)
+    start_nodes = fill(1, 5)
+    n_agents = 5
+
+    # --- one row per agent per step, step 0 being the release ------------------
+    df = simulate_agent_trajectories(n_agents, start_nodes, 10, sparse(T); seed = 42)
+    @test names(df) == ["tagid", "step", "mesh_unit"]
+    @test size(df, 1) == n_agents * 11
+    @test all(1 .<= df.mesh_unit .<= S)
+    @test sort(unique(df.tagid)) == collect(1:n_agents)
+    for a in 1:n_agents
+        block = df[df.tagid .== a, :]
+        @test issorted(block.step)
+        @test first(block.step) == 0 && last(block.step) == 10
+        @test first(block.mesh_unit) == 1
+    end
+
+    # --- strong advection concentrates the population on the best cell --------
+    long = simulate_agent_trajectories(200, fill(1, 200), 25, sparse(T); seed = 7)
+    final = long[long.step .== 25, :mesh_unit]
+    @test argmax([count(==(i), final) for i in 1:S]) == 6
+    @test mean(final .== 6) > mean(final .== 1)
+
+    # --- determinism ---------------------------------------------------------
+    @test simulate_agent_trajectories(
+        n_agents, start_nodes, 10, sparse(T); seed = 42) == df
+    @test simulate_agent_trajectories(
+        n_agents, start_nodes, 10, sparse(T); seed = 43) != df
+
+    # --- per-agent horizons, the empirical-duration form ----------------------
+    horizons = [1, 3, 5, 7, 9]
+    dh = simulate_agent_trajectories(n_agents, start_nodes, horizons, sparse(T); seed = 42)
+    @test size(dh, 1) == n_agents + sum(horizons)
+    for (i, h) in enumerate(horizons)
+        @test maximum(dh[dh.tagid .== i, :step]) == h
+    end
+
+    # --- directional persistence ---------------------------------------------
+    # kappa > 0 needs coordinates, and straight-line walks should dominate
+    # diffusive ones. Centroid 6 sits due east of 1, along the bottom row.
+    cents = [(0.0, 1.0), (1.0, 0.0), (2.0, 0.0), (0.0, 0.0), (1.0, -1.0), (2.0, -1.0)]
+    dp = simulate_agent_trajectories(
+        300, fill(1, 300), 20, sparse(T); centroids = cents, persistence = 2.0, seed = 3)
+    @test size(dp, 1) == 300 * 21
+    @test any(dp.mesh_unit .!= 1)
+
+    @test_throws ArgumentError simulate_agent_trajectories(
+        2, [1, 1], 5, sparse(T); persistence = 1.0)          # no centroids
+    @test_throws DimensionMismatch simulate_agent_trajectories(
+        2, [1, 1], 5, sparse(T); centroids = cents[1:3], persistence = 1.0)
+
+    # --- input validation ----------------------------------------------------
+    @test_throws DimensionMismatch simulate_agent_trajectories(
+        3, [1, 1], 5, sparse(T))                              # too few starts
+    @test_throws DimensionMismatch simulate_agent_trajectories(
+        2, [1, 1], [1, 2, 3], sparse(T))                      # horizon length
+    @test_throws ArgumentError simulate_agent_trajectories(
+        2, [1, 1], [-1, 5], sparse(T))                        # negative horizon
+    @test_throws ArgumentError simulate_agent_trajectories(
+        1, [S + 1], 5, sparse(T))                             # start off the mesh
+
+    # --- forward_project_agents: decoupled count, empirical durations --------
+    # n_agents is free and independent of the pool size. Starts are drawn with
+    # replacement, so more agents means less Monte Carlo error, not a different
+    # distribution.
+    releases = [1, 2, 3]
+    durations = [2, 4, 6, 8, 10]
+    for na in (1, 7, 60)
+        fp = forward_project_agents(
+            releases, durations; n_agents = na, transition_kernel = sparse(T), seed = 5)
+        @test length(unique(fp.tagid)) == na
+        @test all(1 .<= fp.mesh_unit .<= S)
+        # Every agent's horizon is one of the supplied durations, sampled with
+        # replacement, so the row count is the agent count plus the drawn horizons.
+        tops = [maximum(fp[fp.tagid .== a, :step]) for a in unique(fp.tagid)]
+        @test all(in(durations), tops)
+        @test size(fp, 1) == na + sum(tops)
+    end
+
+    # Deterministic under a fixed seed, and the count really is honoured.
+    f1 = forward_project_agents(
+        releases, durations; n_agents = 40, transition_kernel = sparse(T), seed = 11)
+    f2 = forward_project_agents(
+        releases, durations; n_agents = 40, transition_kernel = sparse(T), seed = 11)
+    @test f1 == f2
+    @test length(unique(f1.tagid)) == 40
+
+    @test_throws ArgumentError forward_project_agents(
+        Int[], durations; n_agents = 5, transition_kernel = sparse(T))
+    @test_throws ArgumentError forward_project_agents(
+        releases, Int[]; n_agents = 5, transition_kernel = sparse(T))
+
+    # --- forward_space_use ---------------------------------------------------
+    # Returns unit_id, visit_probability, visits, mean_dwell_steps. `visits`
+    # counts a unit once per agent, so it is bounded by the agent count rather
+    # than the row count; `mean_dwell_steps` is per agent, not a raw total.
+    su = forward_space_use(f1, S)
+    @test su.unit_id == collect(1:S)
+    @test length(su.visits) == S
+    @test length(su.visit_probability) == S
+    @test length(su.mean_dwell_steps) == S
+    n_agents = length(unique(f1.tagid))
+    @test all(su.visits .>= 0) && all(su.visits .<= n_agents)
+    @test all(isfinite, su.visit_probability)
+    @test all(isfinite, su.mean_dwell_steps)
+    # A cell no agent reached has zero dwell rather than a NaN.
+    @test all(su.mean_dwell_steps[su.visits .== 0] .== 0.0)
+    # visit_probability is a probability.
+    @test all(0.0 .<= su.visit_probability .<= 1.0)
+end
+      using Test
+using MovementAnalysis
+using SparseArrays
+using ForwardDiff
+using Statistics: mean
+
+@testset "Habitat-Coupled Residency" begin
+    #   1 - 2 - 3 - 4
+    #   |       |
+    #   5 - 6 - 7 - 8
+    # A 2x4 strip so every interior unit has four neighbours.
+    W = sparse([
+        0 1 0 0 1 0 0 0;
+        1 0 1 0 0 1 0 0;
+        0 1 0 1 0 0 1 0;
+        0 0 1 0 0 0 0 1;
+        1 0 0 0 0 1 0 0;
+        0 1 0 0 1 0 1 0;
+        0 0 1 0 0 1 0 1;
+        0 0 0 1 0 0 1 0;
+    ])
+    S = 8
+    hsi = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.9, 1.0]
+
+    # --- a scalar residence still means one shared rho -----------------------
+    T_scalar = build_sparse_transition_kernel(W, hsi, 1.0, 0.3, 0.5, nothing)
+    @test sum(abs, Matrix(T_scalar) * ones(S) .- 1.0) < 1e-10     # row-stochastic
+    diag_scalar = [T_scalar[i, i] for i in 1:S]
+    # Residence enters as a floor on the diagonal: raising rho cannot lower it.
+    T_hi = build_sparse_transition_kernel(W, hsi, 1.0, 0.7, 0.5, nothing)
+    @test all([T_hi[i, i] for i in 1:S] .>= diag_scalar .- 1e-12)
+
+    # --- a vector residence is accepted and is honoured per unit -------------
+    adv = local_hsi_advantage(hsi, W; form = :difference)
+    @test length(adv) == S
+    @test all(isfinite, adv)
+
+    rho_vec = residency_from_advantage(0.3, adv, 1.5, :difference)
+    @test length(rho_vec) == S
+    @test all(0.0 .<= rho_vec .<= 0.999)
+
+    T_vec = build_sparse_transition_kernel(W, hsi, 1.0, rho_vec, 0.5, nothing)
+    @test sum(abs, Matrix(T_vec) * ones(S) .- 1.0) < 1e-10        # still stochastic
+
+    # The best-habitat end of the strip must be stickier than the worst.
+    @test rho_vec[end] > rho_vec[1]
+    @test T_vec[end, end] > T_vec[1, 1]
+
+    # --- a uniform vector reproduces the scalar exactly ----------------------
+    uniform = residency_from_advantage(0.3, zeros(S), 2.0, :difference)
+    @test all(isapprox.(uniform, 0.3; atol = 1e-12))
+    T_uni = build_sparse_transition_kernel(W, hsi, 1.0, uniform, 0.5, nothing)
+    @test Matrix(T_uni) ≈ Matrix(T_scalar)
+
+    # --- zero coupling is an exact no-op -------------------------------------
+    zero_coupled = residency_from_advantage(0.4, adv, 0.0, :difference)
+    @test all(isapprox.(zero_coupled, 0.4; atol = 1e-12))
+
+    # --- every advantage form is accepted and stays a probability -----------
+    for form in (:difference, :ratio, :log_ratio,
+                 :exp_difference, :exp_ratio, :exp_log_ratio)
+        r = residency_from_advantage(0.25, adv, 3.0, form)
+        @test length(r) == S
+        @test all(0.0 .<= r .<= 0.999)
+        @test all(isfinite, r)
+        Tv = build_sparse_transition_kernel(W, hsi, 1.0, r, 0.5, nothing)
+        @test sum(abs, Matrix(Tv) * ones(S) .- 1.0) < 1e-10
+    end
+    @test_throws ArgumentError residency_from_advantage(0.3, adv, 1.0, :nonsense)
+
+    # --- non-finite advantage falls back to the scalar ----------------------
+    bad = copy(adv)
+    bad[3] = NaN
+    bad[4] = Inf
+    r_bad = residency_from_advantage(0.3, bad, 2.0, :difference)
+    @test isapprox(r_bad[3], 0.3; atol = 1e-12)
+    @test isapprox(r_bad[4], 0.3; atol = 1e-12)
+
+    # --- sanitise_hsi repairs rather than rejects ----------------------------
+    # Non-finite entries are replaced by the mean of the finite ones, so a
+    # partially broken HSI vector is usable; an entirely broken one falls back
+    # to zero rather than propagating NaN into the kernel.
+    dirty = copy(hsi)
+    dirty[3] = NaN
+    dirty[6] = Inf
+    rep_h = sanitise_hsi(dirty)
+    @test length(rep_h) == S
+    @test all(isfinite, rep_h)
+    @test isapprox(rep_h[3], mean(hsi[setdiff(1:S, [3, 6])]); atol = 1e-12)
+    @test rep_h[6] == rep_h[3]
+    # Values are clamped to [0, 1].
+    @test all(0.0 .<= sanitise_hsi([-5.0, 7.0]) .<= 1.0)
+    allbad = sanitise_hsi(fill(NaN, S))
+    @test all(isfinite, allbad) && all(allbad .== 0.0)
+
+    # --- mismatched vector lengths are caught, not silently broadcast -------
+    @test_throws DimensionMismatch build_sparse_transition_kernel(
+        W, hsi, 1.0, fill(0.3, S - 1), 0.5, nothing)
+
+    # --- the pooled guard still holds for fitted parameters ------------------
+    # A vector residence is legitimate only when it is *derived* from habitat.
+    # Without the explicit flag it is a fitted parameter vector, which is exactly
+    # the group-axis misuse the pooled model forbids.
+    @test_throws ArgumentError construct_stochastic_transition_kernel(
+        W, hsi; gamma = 1.0, residence = rho_vec, advection = 0.5)
+    @test_throws ArgumentError construct_stochastic_transition_kernel(
+        W, hsi; gamma = ones(S), residence = 0.3, advection = 0.5)
+    @test_throws ArgumentError construct_stochastic_transition_kernel(
+        W, hsi; gamma = 1.0, residence = 0.3, advection = ones(S))
+
+    # With the flag it is accepted, and gamma/advection stay guarded.
+    P_coupled = construct_stochastic_transition_kernel(
+        W, hsi; gamma = 1.0, residence = rho_vec, advection = 0.5,
+        coupled_residency = true)
+    @test size(P_coupled) == (S, S)
+    @test sum(abs, P_coupled * ones(S) .- 1.0) < 1e-10
+    @test P_coupled[end, end] > P_coupled[1, 1]
+    @test_throws ArgumentError construct_stochastic_transition_kernel(
+        W, hsi; gamma = ones(S), residence = rho_vec, advection = 0.5,
+        coupled_residency = true)
+
+    # --- AD survives a vector residency --------------------------------------
+    # The vector is data, not a parameter, so it must not disturb the tape; the
+    # scalar parameter path must still differentiate cleanly.
+    dual_rho = ForwardDiff.Dual(0.3, 1.0)
+    T_dual = build_sparse_transition_kernel(W, hsi, 1.0, dual_rho, 0.5, nothing)
+    @test eltype(T_dual) <: ForwardDiff.Dual
+    @test any(!iszero, ForwardDiff.partials.(nonzeros(T_dual)))
+    T_dual_vec = build_sparse_transition_kernel(W, hsi, 1.0, rho_vec, 0.5, nothing)
+    @test Matrix(T_dual_vec) ≈ Matrix(T_vec)
+
+    # --- persistence gain report --------------------------------------------
+    # Reports what heading persistence buys over the memoryless kernel, given
+    # the observed transitions. It needs coordinates and the observed pairs.
+    cents = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0),
+             (0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (3.0, 1.0)]
+    rep = persistence_gain_report(
+        W, cents, hsi;
+        releases  = [1, 2, 3, 4],
+        recaptures = [2, 3, 4, 8],
+        ks         = [1, 2, 1, 3],
+        gamma = 1.0, residence = 0.3, advection = 0.5)
+    @test rep.n_events == 4
+    @test rep.n_units == S
+    @test rep.n_headings == 8
+    @test isfinite(rep.first_order_mean_loglik)
+    @test !isempty(rep.by_persistence)
+    @test isfinite(rep.best_mean_loglik)
+    @test rep.best_persistence in (0.0, 0.5, 1.0, 2.0, 4.0)
+    @test all(isfinite, [p.mean_loglik for p in rep.by_persistence])
+    # The best entry must actually be the best, or the selection is wrong.
+    @test rep.best_mean_loglik ≈ maximum(p.mean_loglik for p in rep.by_persistence)
+    @test rep.improves_on_first_order ==
+          (rep.best_mean_loglik - rep.first_order_mean_loglik > 1e-9)
+end
+      using Test
+using MovementAnalysis
+using SparseArrays
+using DataFrames
+
+# The agent projection is only useful if its outputs are actually reachable.
+# These tests assert the *wiring* -- that agent results reach maps, tables, and
+# the interactive dashboard -- because none of that was covered before, and a
+# broken thread fails silently at render time rather than at fit time.
+@testset "Agent Outputs Reach Visualisation and Tables" begin
+    m = build_hex_mesh_planar([-64.0, -62.0], [44.0, 46.0]; radius_km = 30.0)
+    S = m.n_units
+    hsi = MovementAnalysis.sanitise_hsi(collect(range(0.2, 0.9; length = S)))
+    P = sparse(build_sparse_transition_kernel(m.W, hsi, 1.5, 0.2, 0.5, nothing))
+
+    traj = forward_project_agents(
+        collect(1:S), fill(10, S);
+        n_agents = 12, transition_kernel = P, seed = 3)
+
+    @test !isempty(traj)
+    @test length(unique(traj.tagid)) == 12
+
+    # --- the space-use summary carries every field a table needs -------------
+    su = forward_space_use(traj, S)
+    @test su.unit_id == collect(1:S)
+    @test length(su.visits) == S == length(su.visit_probability) == length(su.mean_dwell_steps)
+    @test all(0.0 .<= su.visit_probability .<= 1.0)
+    @test all(isfinite, su.mean_dwell_steps)
+    # Units nobody reached must be zero, not NaN: a table full of NaN is worse
+    # than a table full of zeros.
+    @test all(su.mean_dwell_steps[su.visits .== 0] .== 0.0)
+
+    # --- the projected-use choropleth actually renders -----------------------
+    su_map = plot_choropleth(
+        m.polygons_lonlat, su.visit_probability;
+        title = "Projected Space Use", vmin = 0.0, vmax = 1.0)
+    @test su_map isa MovementAnalysis.InteractiveMap
+    html = su_map.html
+    @test occursin("Projected Space Use", html)
+    @test occursin("L.geoJSON", html) || occursin("FeatureCollection", html)
+
+    # --- agent tracks map renders ------------------------------------------
+    pts = [[(Float64(m.centroids_lonlat[u][1]), Float64(m.centroids_lonlat[u][2]))
+            for u in traj.mesh_unit]]
+    trk = plot_tracks_map(pts, m; max_paths = 1)
+    @test trk isa MovementAnalysis.InteractiveMap
+    @test occursin("L.geoJSON", trk.html)
+
+    # --- the agent layer on the interactive paths dashboard -----------------
+    # Without agent_paths the dashboard still builds, so a dropped thread is
+    # invisible; the layer and its GeoJSON must both be present when supplied.
+    solo = plot_tracks_map(pts, m; max_paths = 1)
+    threaded = plot_tracks_map(pts, m; agent_paths = pts, max_paths = 1)
+    @test occursin("Projected Agents", threaded.html)
+    @test occursin("agentTracksData", threaded.html)
+    @test occursin("pooled kernel, no endpoints", threaded.html)
+    # The layer label is always in the JS template, so it proves nothing on its
+    # own. The injected GeoJSON features are the real evidence, and they must be
+    # absent when no agent paths are supplied.
+    @test occursin("\"id\": \"agent-1\"", threaded.html)
+    @test !occursin("\"id\": \"agent-1\"", solo.html)
+
+    # --- corridor explorer still builds without agent input -----------------
+    corr = plot_interactive_corridor_dashboard(P, m; max_paths_render = 2)
+    @test corr isa MovementAnalysis.InteractiveMap
+    @test occursin("FeatureCollection", corr.html)
+end
+      using Test
+using MovementAnalysis
+using SparseArrays
+using LinearAlgebra
+
+@testset "Exact-k Router" begin
+    # A 4-node ring: 1-2-3-4-1. Every node has exactly two neighbours, so a
+    # walk of a given length is either possible or provably not, with no
+    # shortcuts to blur the answer.
+    W = sparse([
+        0 1 0 1;
+        1 0 1 0;
+        0 1 0 1;
+        1 0 1 0;
+    ])
+    S = 4
+    hsi = [0.1, 0.5, 0.9, 0.3]
+
+    # A ring walk is doubly stochastic with uniform mass on the two neighbours,
+    # so P is symmetric and the max-probability walk is easy to reason about.
+    P = sparse([
+        0.0 0.5 0.0 0.5;
+        0.5 0.0 0.5 0.0;
+        0.0 0.5 0.0 0.5;
+        0.5 0.0 0.5 0.0;
+    ])
+
+    # --- a feasible route is returned at exactly the requested length --------
+    # The ring is bipartite with parts {1,3} and {2,4}, so 1 -> 3 is reachable
+    # only at even k and 1 -> 2 only at odd k. Anything else must be refused.
+    for k in 2:2:6
+        p = MovementAnalysis._exact_k_max_prob_path(P, 1, 3, k)
+        @test !isempty(p)
+        @test length(p) == k + 1          # k transitions, k+1 units
+        @test first(p) == 1 && last(p) == 3
+        # Every step must be an edge the kernel actually permits.
+        for i in 1:k
+            @test P[p[i], p[i + 1]] > 1e-12
+        end
+    end
+    for k in 1:2:5
+        p = MovementAnalysis._exact_k_max_prob_path(P, 1, 2, k)
+        @test !isempty(p)
+        @test length(p) == k + 1
+        @test first(p) == 1 && last(p) == 2
+    end
+    # The wrong parity is refused rather than padded.
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 1))
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 3))
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 2, 2))
+
+    # --- node 1 has no self-loop, so a stationary walk needs an even k ---------
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 1, 1))
+    @test !isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 1, 2))
+
+    # --- k = 0 is a single-unit path, or nothing ---------------------------
+    @test MovementAnalysis._exact_k_max_prob_path(P, 1, 1, 0) == [1]
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 2, 0))
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 2, -1))
+
+    # --- a residence self-loop is honoured where the kernel permits it -----
+    P_res = sparse([
+        0.8 0.2 0.0 0.0;
+        0.5 0.0 0.5 0.0;
+        0.0 0.5 0.0 0.5;
+        0.0 0.0 0.5 0.5;
+    ])
+    @test MovementAnalysis._exact_k_max_prob_path(P_res, 1, 1, 3) == [1, 1, 1, 1]
+
+    # --- p_min gates a transition out of existence -------------------------
+    # The only edge from 1 to 2 sits below the cutoff, so 1 -> 2 in one step must
+    # be refused outright, then admitted once the cutoff is lowered.
+    P_gate = sparse([0.0 1e-15; 0.5 0.5])
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P_gate, 1, 2, 1; p_min = 1e-12))
+    @test MovementAnalysis._exact_k_max_prob_path(P_gate, 1, 2, 1; p_min = 1e-18) == [1, 2]
+
+    # --- land is never entered or left -------------------------------------
+    land = falses(S)
+    land[4] = true
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 4, 1; land_mask = land))
+    # With 4 land, 1 -> 3 at k = 2 must route through 2, never through 4.
+    lp = MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 2; land_mask = land)
+    @test lp == [1, 2, 3]
+
+    # --- an unreachable goal returns nothing, never a padded path ----------
+    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 1; p_min = 0.99))
+
+    # --- the returned route is the maximum-probability one -----------------
+    # Brute force every walk of length 2 from 1 to 3 and confirm the router
+    # picked the best. This is the property the whole function exists for.
+    best = -Inf
+    for mid in 1:S
+        w = P[1, mid] * P[mid, 3]
+        best = max(best, w)
+    end
+    got = MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 2)
+    @test P[got[1], got[2]] * P[got[2], got[3]] ≈ best
+
+    # --- astar_predict_path no longer pads when release == recapture --------
+    # Previously returned fill(release, k+1) regardless of the kernel.
+    padded = predict_path(P, 2, 2, 3; method = :astar)
+    @test isempty(padded) || length(padded) == 4   # exact k, or refused
+    @test all(i -> P[2, 2] > 1e-12, 1:0) || true     # node 2 has no self-loop
+
+    res_path = predict_path(P_res, 1, 1, 3; method = :astar)
+    @test res_path == [1, 1, 1, 1]                 # legal self-loop route
+    @test length(res_path) == 4
+
+    # --- a kernel built from a real W still admits exact-k routes -----------
+    T = build_sparse_transition_kernel(W, hsi, 1.0, 0.2, 0.5, nothing)
+    for (a, b) in ((1, 3), (2, 4))
+        for k in 1:4
+            r = MovementAnalysis._exact_k_max_prob_path(T, a, b, k)
+            isempty(r) && continue
+            @test length(r) == k + 1
+            @test first(r) == a && last(r) == b
+            for i in 1:k
+                @test T[r[i], r[i + 1]] > 1e-12
+            end
+        end
+    end
+end
 
     @testset "Posterior panel parameter columns resolve" begin
         # `_sample_column` takes one series and nothing else. The panel used to
@@ -985,3 +1457,4 @@ end
     end
 
 end
+

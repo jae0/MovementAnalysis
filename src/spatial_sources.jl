@@ -32,7 +32,7 @@ extent is derived from the supplied coordinates -- the telemetry positions and, 
 available, the spatial-unit polygons -- and padded so the mesh is not clipped
 flush against the outermost detections. When `sppoly_bounds` is provided as
 `(min_lon, min_lat, max_lon, max_lat)`, the southern and south-western bounds are
-delimited so the tessellation does not expand beyond the survey bounds.
+delimited so the grid does not expand beyond the survey bounds.
 """
 function resolve_bbox(
     configured::Union{Nothing, AbstractVector{<:Real}},

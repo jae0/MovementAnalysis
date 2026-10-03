@@ -358,9 +358,9 @@ win is correctness, plus removing the obstacle to a gradient sampler later.
     hsi::Vector{Float64},
     land_mask::Union{Nothing, BitVector, Vector{Bool}}
 )
-    mu_velocity  ~ truncated(Normal(0.3, 0.2), 0.0, 0.95)
-    mu_diffusion ~ truncated(Normal(0.1, 0.2), 0.0, Inf)
-    mu_gamma     ~ Normal(1.0, 1.0)
+    mu_velocity  ~ truncated(Distributions.Normal(0.3, 0.2), 0.0, 0.95)
+    mu_diffusion ~ truncated(Distributions.Normal(0.1, 0.2), 0.0, Inf)
+    mu_gamma     ~ Distributions.Normal(1.0, 1.0)
 
     velocity  = clamp(mu_velocity,  0.0, 0.95)
     diffusion = max(mu_diffusion,  0.0)
@@ -419,13 +419,13 @@ declared in `model_modes` and something must answer for them.
           "See todo.md 1.6."
 
     # Declared but unused -- see the note above. Present so the gap is visible.
-    beta0      ~ Normal(0.0, 5.0)
-    beta_depth ~ Normal(0.0, 2.0)
-    inv_r      ~ truncated(Normal(0.0, 1.0), 0.0, Inf)
+    beta0      ~ Distributions.Normal(0.0, 5.0)
+    beta_depth ~ Distributions.Normal(0.0, 2.0)
+    inv_r      ~ truncated(Distributions.Normal(0.0, 1.0), 0.0, Inf)
 
-    mu_velocity  ~ truncated(Normal(0.3, 0.2), 0.0, 0.95)
-    mu_diffusion ~ truncated(Normal(0.1, 0.2), 0.0, Inf)
-    mu_gamma     ~ Normal(1.0, 1.0)
+    mu_velocity  ~ truncated(Distributions.Normal(0.3, 0.2), 0.0, 0.95)
+    mu_diffusion ~ truncated(Distributions.Normal(0.1, 0.2), 0.0, Inf)
+    mu_gamma     ~ Distributions.Normal(1.0, 1.0)
 
     velocity  = clamp(mu_velocity,  0.0, 0.95)
     diffusion = max(mu_diffusion,  0.0)

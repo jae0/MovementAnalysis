@@ -3,7 +3,7 @@
 # Every analysis parameter at its declared default, with the input files left
 # unset. Supply the input files (or edit this file) to analyse a real dataset.
 #
-#   julia --project=. scripts/run_movement.jl --config=configs/default.toml \
+#   julia --project=. MovementAnalysisRun.jl --config=configs/default.toml \
 #          --tagging-file=data/tagging.jld2 \
 #          --hsi-file=data/hsi.jld2 --sppoly-file=data/sppoly.jld2
 #

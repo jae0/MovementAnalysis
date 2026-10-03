@@ -305,20 +305,20 @@ Generates standalone HTML/SVG dashboards. After Phase 6 completes, writes
 
 ```powershell
 # Full run
-julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml
+julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml
 
 # Skip MCMC â€” load movement_checkpoint.jld2, run Phases 4â€“6
-julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml --resume=true
+julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --resume=true
 
 # Regenerate all HTML dashboards only (requires prior successful run)
-julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml --figures-only=true
+julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --figures-only=true
 
 # Tweak styling and regenerate
-julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml `
+julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml `
     --figures-only=true --dark-mode=true --cmap=plasma
 
 # Write results checkpoint without rendering HTML
-julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml `
+julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml `
     --resume=true --render-html=false
 ```
 
@@ -356,7 +356,7 @@ julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml `
 To bootstrap the full results checkpoint from an existing MCMC run:
 
 ```powershell
-julia --project=. scripts/run_movement.jl --config=configs/snowcrab.toml --resume=true
+julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --resume=true
 ```
 
 ---

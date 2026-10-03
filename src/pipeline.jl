@@ -120,7 +120,7 @@ end
 
 
 
-# Ingest empirical telemetry data, construct 20 km hexagonal mesh, sever
+# Ingest empirical telemetry data, construct 20 km hexagonal mesh, block
 # terrestrial barriers, and infill unobserved marine HSI values
 
 
@@ -139,7 +139,7 @@ end
 High-level convenience pipeline for empirical mark-recapture datasets
 movement, telemetry, and environmental suitability data across Atlantic Canada.
 Loads empirical mark-recapture encounters from JLD2 storage, constructs a unified
-planar hexagonal domain tessellation covering the full extent of the
+planar hexagonal domain grid covering the full extent of the
 St. Lawrence, classifies and severs terrestrial land barriers, infills unobserved
 marine Habitat Suitability Index (HSI) values via screened graph-Laplacian
 Dirichlet diffusion, snaps telemetry observations to navigable marine units,
@@ -159,7 +159,7 @@ and stratifies event pairs into 4 biological demographic categories.
 # Returns
 - `NamedTuple` containing:
   - `tagging::DataFrame`: Filtered telemetry records snapped to marine units.
-  - `mesh::NamedTuple`: Full-domain tessellation with centroids and polygons.
+  - `mesh::NamedTuple`: Full-domain grid with centroids and polygons.
   - `W::SparseMatrixCSC{Float64, Int}`: Adjacency matrix with land severed.
   - `hsi_vec::Vector{Float64}`: Infilled full-domain spatial HSI vector.
   - `monthly_hsi::Matrix{Float64}`: Monthly discretized HSI matrix.
@@ -696,15 +696,12 @@ end
         min_lon, max_lon = extrema(cents_lon)
         min_lat, max_lat = extrema(cents_lat)
 
-        if sppoly_bounds !== nothing
-            min_lon = max(min_lon, sppoly_bounds[1])
-            min_lat = max(min_lat, sppoly_bounds[2])
-        end
+
 
         bathy = load_open_bathymetry(;
             lon_range      = (min_lon - 0.2, max_lon + 0.2),
             lat_range      = (min_lat - 0.2, max_lat + 0.2),
-            resolution_deg = 0.08
+            resolution_deg = 0.02
         )
         hydro = extract_hydrodynamic_dataset(bathy;
             depth_levels = [0.0, 25.0, 50.0, 100.0, 175.0],
@@ -1040,30 +1037,58 @@ end
         end
 
         # Prune out-of-depth and unreachable/boundary-exceeded units from the final mesh
-        # so that downstream network operations and Leaflet dashboards do not retain
+        # so that downstream network operations and PlotlyJS dashboards do not retain
         # an oversized, empty rectangular domain.
-        keep_mesh_mask = .!out_of_depth
-        if sppoly_bounds !== nothing
-            cents_tmp = hasproperty(mesh, :centroids_lonlat) ?
-                mesh.centroids_lonlat : mesh.centroids
-            for i in eachindex(cents_tmp)
-                lon_i = Float64(cents_tmp[i][1])
-                lat_i = Float64(cents_tmp[i][2])
-                if lon_i < (sppoly_bounds[1] - 0.05) || lat_i < (sppoly_bounds[2] - 0.05)
-                    keep_mesh_mask[i] = false
-                end
+        keep_mesh_mask = .!out_of_depth .& .!land_mask
+        
+        sppoly_polys = nothing
+        try
+            if params.sppoly_file !== nothing && isfile(params.sppoly_file)
+                sppoly_polys = read_polygon_file(params.sppoly_file)
+            end
+        catch e
+        end
+
+        cents_tmp = hasproperty(mesh, :centroids_lonlat) ?
+            mesh.centroids_lonlat : mesh.centroids
+
+        final_mask = falses(n_spatial)
+        for i in eachindex(cents_tmp)
+            keep_mesh_mask[i] || continue
+            
+            lon_i = Float64(cents_tmp[i][1])
+            lat_i = Float64(cents_tmp[i][2])
+            
+            # 1. Intersects with user provided polygons
+            if sppoly_polys !== nothing && point_in_polygon(lon_i, lat_i, sppoly_polys)
+                final_mask[i] = true
+                continue
+            end
+            
+            # 2. North and west of the SGSL shallow/deep intersection
+            # (Roughly bounded by the Laurentian channel to the East and land to South/East)
+            if lon_i < -59.0 && lat_i < 50.0 && lat_i > 45.0
+                final_mask[i] = true
+                continue
+            end
+            
+            # Fallback if no polygon provided
+            if sppoly_polys === nothing
+                final_mask[i] = true
             end
         end
 
-        # Ensure active endpoints in obs_df are preserved
+        # 3. Add tessellations with observation points landing on them
         for r in eachrow(obs_df)
-            if 1 <= r.release <= length(keep_mesh_mask)
-                keep_mesh_mask[r.release] = true
+            if 1 <= r.release <= n_spatial && keep_mesh_mask[r.release]
+                final_mask[r.release] = true
             end
-            if 1 <= r.recapture <= length(keep_mesh_mask)
-                keep_mesh_mask[r.recapture] = true
+            if 1 <= r.recapture <= n_spatial && keep_mesh_mask[r.recapture]
+                final_mask[r.recapture] = true
             end
         end
+
+        keep_mesh_mask .= final_mask
 
         n_pruned = count(!, keep_mesh_mask)
         if n_pruned > 0 && count(keep_mesh_mask) > 0
@@ -1118,13 +1143,13 @@ end
         end
     end
 
-    # Render and display/save map of resulting polygons after tessellation and pruning
+    # Render and display/save map of resulting polygons after gridding and pruning
     if params.render_html
         try
             tess_dir = params.output_dir
             mkpath(tess_dir)
             tess_path = joinpath(tess_dir, "tessellation_polygons.html")
-            tess_map = leaflet_tessellation_map(
+            tess_map = plot_tessellation_map(
                 mesh;
                 title = "$(params.species_name) Tessellated Spatial Domain",
                 depth = resharded_depths,
@@ -1133,9 +1158,9 @@ end
                 output_file = tess_path
             )
             show_map(tess_map; output_file = tess_path)
-            verbose && println("  Tessellation polygon map: $tess_path")
+            verbose && println("  Grid polygon map: $tess_path")
         catch err_map
-            _record_panel_skip("Tessellation map", err_map);             verbose && println("  (Tessellation map note: $(_error_note(err_map)))")
+            _record_panel_skip("Grid map", err_map);             verbose && println("  (Grid map note: $(_error_note(err_map)))")
         end
     end
 
@@ -2214,7 +2239,7 @@ end
 """
     export_dashboards(loaded, kernels, path_results, diagnostics, params)
 
-Phase 6 of the pipeline. Exports interactive Leaflet HTML dashboards to
+Phase 6 of the pipeline. Exports interactive PlotlyJS HTML dashboards to
 `params.output_dir`. Individual dashboards are silently skipped on
 rendering errors so the pipeline is never aborted. Exports:
 
@@ -2233,7 +2258,7 @@ validation = nothing,
     params.render_html || return nothing
     verbose = params.verbose
 
-    verbose && println("\n[Phase 6] Generating Leaflet dashboards...")
+    verbose && println("\n[Phase 6] Generating PlotlyJS dashboards...")
     out_dir = params.output_dir
     mkpath(out_dir)
 
@@ -2288,7 +2313,7 @@ validation = nothing,
     reshard_lbl = (params.reshard_hex || params.use_hydrodynamics) ?
                   " (Fine Hexagons)" : ""
 
-    # -- Build rich path NamedTuples for the tracks dashboard ------
+    # -- Build path NamedTuples for the tracks dashboard ------
     #
     # Convert raw Dict{String, Vector{Int}} into NamedTuples with
     # centroid coordinates, per-path distance, displacement,
@@ -2376,7 +2401,7 @@ validation = nothing,
     end
 
     verbose && println(
-        "  Rich path NamedTuples built: $(length(all_paths_rich))"
+        "  Path NamedTuples built: $(length(all_paths_rich))"
     )
 
     # -- Append IBM stochastic path realizations -------------------------
@@ -2489,29 +2514,29 @@ validation = nothing,
     end
 
     # -- Movement paths dashboard ---------------------------------
+    # Projected agents use the same format as observed tags to display on a single map.
+    # Each path type has a toggleable layer. Reconstructed paths depend on both endpoints,
+    # while projected paths do not.
+    agent_segs = nothing
+    if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
+        segs = Vector{Vector{Tuple{Float64, Float64}}}()
+        for gdf in groupby(agent_trajectories, :tagid)
+            srt = sort(gdf, :step)
+            pts = [(Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
+                   for u in srt.mesh_unit if 1 <= u <= n_units]
+            length(pts) >= 2 && push!(segs, pts)
+        end
+        isempty(segs) || (agent_segs = segs)
+    end
+
     try
         html_file = joinpath(out_dir, "movement_paths_dashboard.html")
-# Projected agents in the same shape the map expects for observed tags, so every
-      # path source lands on one interactive map. They get their own toggleable
-      # layer: reconstructed paths are conditioned on both observed endpoints,
-      # projected ones on neither, and conflating them would be misleading.
-      agent_segs = nothing
-      if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
-          segs = Vector{Vector{Tuple{Float64, Float64}}}()
-          for gdf in groupby(agent_trajectories, :tagid)
-              srt = sort(gdf, :step)
-              pts = [(Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
-                     for u in srt.mesh_unit if 1 <= u <= n_units]
-              length(pts) >= 2 && push!(segs, pts)
-          end
-          isempty(segs) || (agent_segs = segs)
-      end
 
-      map_obj = leaflet_tracks_map(
-                all_paths_rich, au_mesh;
-                empirical_paths     = emp_tracks,
-                agent_paths         = agent_segs,
-                max_agent_paths     = 200,
+        map_obj = plot_tracks_map(
+            all_paths_rich, au_mesh;
+            empirical_paths     = emp_tracks,
+            agent_paths         = agent_segs,
+            max_agent_paths     = 200,
             max_paths           = max(100, length(all_paths_rich)),
             max_empirical_paths = length(emp_tracks),
             hsi                 = nothing,
@@ -2523,7 +2548,7 @@ validation = nothing,
         save_html(map_obj, html_file)
         verbose && println("  Paths dashboard: $html_file")
     catch e
-        _record_panel_skip("Leaflet paths", e);         verbose && println("  (Leaflet paths note: $(_error_note(e)))")
+        _record_panel_skip("PlotlyJS paths", e);         verbose && println("  (PlotlyJS paths note: $(_error_note(e)))")
     end
 
     # -- Movement ecology statistics & phenology ----------------------
@@ -2594,25 +2619,21 @@ _record_panel_skip("Summary diagnostics", e); verbose && println(
         _record_panel_skip("Network flow", e);         verbose && println("  (Network flow note: $(_error_note(e)))")
     end
 
-    # -- Interactive two-click corridor explorer -----------------------------
+    # -- Interactive corridor map -----------------------------
     try
         corr_file  = joinpath(out_dir, "movement_interactive_corridor.html")
-        corr_file_pl = joinpath(out_dir, "movement_interactive_corridors.html")
-# Projected agents, in the same shape the explorer expects for observed tags.
-            # Rendered on their own toggleable layer so the two kinds of path stay
-            # distinguishable: reconstructed paths are conditioned on both
-            # endpoints, projected ones on neither.
-corr_map   = leaflet_interactive_corridor_dashboard(
-                  P_kernel, au_mesh;
-                  hsi             = params.overlay_hsi ? hsi_vec : nothing,
-                  overlay_hsi     = params.overlay_hsi,
-                  empirical_paths = emp_tracks,
-                  dark_mode       = params.dark_mode,
-                title           = "$spp Dynamic Migration Corridor" *
-                                  reshard_lbl * depth_lbl
-            )
+        # Projected agents, in the same format the map expects for observed tags.
+        # Rendered on their own toggleable layer.
+        corr_map   = plot_interactive_corridor_dashboard(
+            P_kernel, au_mesh;
+            hsi             = params.overlay_hsi ? hsi_vec : nothing,
+            overlay_hsi     = params.overlay_hsi,
+            empirical_paths = emp_tracks,
+            dark_mode       = params.dark_mode,
+            title           = "$spp Dynamic Migration Corridor" *
+                              reshard_lbl * depth_lbl
+        )
         save_html(corr_map, corr_file)
-        save_html(corr_map, corr_file_pl)
         verbose && println("  Corridor dashboard: $corr_file")
     catch e
         _record_panel_skip("Corridor dashboard", e);         verbose && println("  (Corridor dashboard note: $(_error_note(e)))")
@@ -2627,7 +2648,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if !isnothing(ensemble) && !isempty(ensemble.ensemble_paths)
         try
             ens_file = joinpath(out_dir, "movement_posterior_path_ensemble.html")
-            ens_map  = leaflet_posterior_path_ensemble(
+            ens_map  = plot_posterior_path_ensemble(
                 ensemble, au_mesh;
                 hsi         = params.overlay_hsi ? hsi_vec : nothing,
                 overlay_hsi = params.overlay_hsi,
@@ -2645,7 +2666,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if !isnothing(loaded.resharded_hydro)
         try
             hydro_file = joinpath(out_dir, "hydrodynamic_hex_dashboard.html")
-            dash = leaflet_hydrodynamic_dashboard(
+            dash = plot_hydrodynamic_dashboard(
                 loaded.resharded_hydro, au_mesh;
                 title = "Hydrodynamics & Stratification (Fine Hexagons)",
                 dark_mode = params.dark_mode
@@ -2662,14 +2683,14 @@ corr_map   = leaflet_interactive_corridor_dashboard(
         circ = diagnostics.circuit
         try
             circ_file = joinpath(out_dir, "movement_current_density.html")
-            leaflet_current_density_map(
+            plot_current_density_map(
                 mesh, circ.current_density;
                 pinch_mask        = circ.pinch_mask,
                 pinch_score       = circ.pinch_score,
                 centroids         = path_results.cents_lonlat,
                 output_html       = circ_file,
                 dark_mode         = params.dark_mode,
-                title             = "$spp Migratory Current Density & Pinch-Points",
+                title             = "$spp Migratory Current Density & Bottlenecks",
                 transparent_zeros = true,
                 badge             = nothing
             )
@@ -2680,12 +2701,12 @@ corr_map   = leaflet_interactive_corridor_dashboard(
 
         try
             stoch_file = joinpath(out_dir, "movement_stochastic_circuit.html")
-            leaflet_current_density_map(
+            plot_current_density_map(
                 mesh, circ.stochastic;
                 prob_threshold    = 0.80,
                 output_html       = stoch_file,
                 dark_mode         = params.dark_mode,
-                title             = "$spp Posterior Migratory Flux & Pinch-Points",
+                title             = "$spp Posterior Migratory Flux & Bottlenecks",
                 transparent_zeros = true,
                 badge             = nothing
             )
@@ -2700,7 +2721,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
         bn = path_results.domain_bottlenecks
         try
             bn_file = joinpath(out_dir, "movement_domain_bottlenecks.html")
-            leaflet_current_density_map(
+            plot_current_density_map(
                 mesh, bn.transit_density;
                 pinch_mask        = bn.bottleneck_mask,
                 pinch_score       = bn.bottleneck_score,
@@ -2728,7 +2749,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if !isempty(path_results.paths)
         try
             step_file = joinpath(out_dir, "movement_step_diagnostics.html")
-            map_obj = leaflet_step_diagnostics(
+            map_obj = plot_step_diagnostics(
                 path_results.paths, au_mesh;
                 dark_mode = params.dark_mode,
                 title = "$spp Speeds and Directions Distributions"
@@ -2750,7 +2771,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if has_regions
         try
             conn_file = joinpath(out_dir, "movement_regional_connectivity.html")
-            map_obj = leaflet_regional_connectivity(
+            map_obj = plot_regional_connectivity(
                 kernels.P_kernel;
                 dark_mode = params.dark_mode,
                 title = "$spp Regional Connectivity and Home Range Estimates"
@@ -2783,7 +2804,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
                     vec(hydro.u[:, 1]) : nothing
             v_vel = (hydro !== nothing && hasproperty(hydro, :v) && !isempty(hydro.v)) ?
                     vec(hydro.v[:, 1]) : nothing
-            map_obj = leaflet_advection_arrows(
+            map_obj = plot_advection_arrows(
                 au_mesh;
                 hsi        = params.overlay_hsi ? loaded.hsi_vec : nothing,
                 background = params.overlay_hsi ? :hsi : :mesh,
@@ -2816,7 +2837,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
         if all(isfinite, A) && all(isfinite, K) && any(!iszero, K)
             try
                 ad_file = joinpath(out_dir, "movement_ad_ratio_distribution.html")
-                map_obj = leaflet_ad_ratio_distribution(
+                map_obj = plot_ad_ratio_distribution(
                     A, K;
                     dark_mode = params.dark_mode,
                     title = "$spp Advection/Diffusion Ratio"
@@ -2840,7 +2861,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if hasproperty(kernels, :residence_by_unit) && !isnothing(kernels.residence_by_unit)
         try
             res_file = joinpath(out_dir, "movement_residence_time.html")
-            map_obj = leaflet_residence_time_map(
+            map_obj = plot_residence_time_map(
                 kernels.residence_by_unit, au_mesh;
                 cmap    = params.cmap,
                     title = "$spp Residence Time Map"
@@ -2852,7 +2873,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
         end
     end
 
-    # `leaflet_diffusion_map` takes one value per spatial unit, so the
+    # `plot_diffusion_map` takes one value per spatial unit, so the
     # (depth x month) diffusivity field is collapsed to a long-run mean here.
     #
     # Diffusivity is not carried onto the resharded mesh (todo.md 1.2), so the
@@ -2875,7 +2896,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
         else
             try
                 diff_file = joinpath(out_dir, "movement_diffusion_field.html")
-                map_obj = leaflet_diffusion_map(
+                map_obj = plot_diffusion_map(
                     D_by_unit, au_mesh;
                     cmap      = params.cmap,
                     title = "$spp Diffusion Field"
@@ -2892,7 +2913,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if !isnothing(loaded.hsi_vec)
         try
             hsi_file = joinpath(out_dir, "movement_hsi_map.html")
-            map_obj = leaflet_hsi_map(
+            map_obj = plot_hsi_map(
                 loaded.hsi_vec, au_mesh;
                 cmap    = params.cmap,
                     title = "$spp Habitat Suitability Index (HSI)",
@@ -2909,7 +2930,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if !isnothing(kernels.P_kernel)
         try
             disp_file = joinpath(out_dir, "movement_dispersal_kernel.html")
-            map_obj = leaflet_dispersal_kernel(
+            map_obj = plot_dispersal_kernel(
                 kernels.P_kernel,                 au_mesh;
                 title = "$spp Empirical Dispersal Kernel",
                 dark_mode = params.dark_mode
@@ -2921,10 +2942,10 @@ corr_map   = leaflet_interactive_corridor_dashboard(
         end
     end
 
-    # 7. Tessellation Polygons Map
+    # 7. Grid Polygons Map
     try
         tess_file = joinpath(out_dir, "tessellation_polygons.html")
-        tess_map = leaflet_tessellation_map(
+        tess_map = plot_tessellation_map(
             mesh;
             title = "$spp Tessellated Spatial Domain" * reshard_lbl * depth_lbl,
             depth = loaded.resharded_depths,
@@ -2933,78 +2954,15 @@ corr_map   = leaflet_interactive_corridor_dashboard(
             output_file = tess_file
         )
         show_map(tess_map; output_file = tess_file)
-        verbose && println("  Tessellation polygon map: $tess_file")
+        verbose && println("  Grid polygon map: $tess_file")
     catch e
-        _record_panel_skip("Tessellation polygon map", e);         verbose && println("  (Tessellation polygon map note: $(_error_note(e)))")
+        _record_panel_skip("Grid polygon map", e);         verbose && println("  (Grid polygon map note: $(_error_note(e)))")
     end
 
-    # -- Agent-Based Model trajectory dashboard ----------------------------
-    # agent_trajectories is a DataFrame with columns: tagid, step, mesh_unit.
-    # Convert to lightweight NamedTuples compatible with leaflet_tracks_map
-    # and export, then write a companion CSV.
+    # -- Agent-Based Model outputs ----------------------------
+    # Write companion CSV: mean visit frequency per mesh unit
     if !isnothing(agent_trajectories) && nrow(agent_trajectories) > 0
         try
-            # Build per-agent coordinate sequences grouped by tagid
-            agent_rich = NamedTuple[]
-            agent_idx = 0
-            for gdf in groupby(agent_trajectories, :tagid)
-                sorted = sort(gdf, :step)
-                nodes  = sorted.mesh_unit
-                agent_idx += 1
-                coords = Tuple{Float64, Float64}[
-                    (Float64(cents_ll[u][1]), Float64(cents_ll[u][2]))
-                    for u in nodes
-                    if 1 <= u <= n_units
-                ]
-                length(coords) < 2 && continue
-                path_dist = sum(
-                    haversine_distance(
-                        coords[h-1][1], coords[h-1][2],
-                        coords[h][1],   coords[h][2]
-                    ) / 1_000.0
-                    for h in 2:length(coords)
-                )
-                end_to_end = haversine_distance(
-                    coords[1][1], coords[1][2],
-                    coords[end][1], coords[end][2]
-                ) / 1_000.0
-                # The kernel is pooled, so every agent shares one transition law and
-                # colouring by group no longer distinguishes anything. Cycle the
-                # palette by agent instead, so overlapping tracks stay separable.
-                color = palette_colors[(agent_idx - 1) % length(palette_colors) + 1]
-                push!(agent_rich, (
-                    tagid           = string("agent", first(sorted.tagid)),
-                    path            = nodes,
-                    coords          = coords,
-                    n_steps         = length(coords) - 1,
-                    total_dist_km   = path_dist,
-                    displacement_km = end_to_end,
-                    # Straight-line over walked distance. Reported as 1.0 when the
-                    # animal returned to its release cell, where the ratio is
-                    # genuinely undefined rather than perfectly untangled.
-                    tortuosity      = end_to_end > 1e-9 ? path_dist / end_to_end : 1.0,
-                    mean_hsi        = mean(
-                        (1 <= u <= length(hsi_vec)) ? hsi_vec[u] : 0.5
-                        for u in nodes
-                    ),
-                    color           = color,
-                    duration_days   = Float64(length(coords) - 1),
-                ))
-            end
-            if !isempty(agent_rich)
-                agent_file = joinpath(out_dir, "movement_agent_trajectories.html")
-                agent_map  = leaflet_tracks_map(
-                    agent_rich, au_mesh;
-                    max_paths   = length(agent_rich),
-                    hsi         = params.overlay_hsi ? hsi_vec : nothing,
-                    overlay_hsi = params.overlay_hsi,
-                    dark_mode   = params.dark_mode,
-                    title       = "$spp Agent-Based Model Trajectories"
-                )
-                save_html(agent_map, agent_file)
-                verbose && println("  Agent trajectory dashboard: $agent_file")
-
-                # Companion CSV: mean visit frequency per mesh unit
                 visit_freq = zeros(Float64, n_units)
                 for row in eachrow(agent_trajectories)
                     u = row.mesh_unit
@@ -3020,7 +2978,6 @@ corr_map   = leaflet_interactive_corridor_dashboard(
                     end
                 end
                 verbose && println("  Agent visit-frequency CSV: $csv_agent")
-            end
 
             # Projected space use. The track map shows individual samples; this
             # shows what the projection implies for the population, which is the
@@ -3028,7 +2985,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
             # forward projection produced a frame that nothing summarised.
             if agent_space_use !== nothing && !isempty(agent_space_use.visit_probability)
                 su_file = joinpath(out_dir, "movement_agent_space_use.html")
-                su_map = leaflet_choropleth(
+                su_map = plot_choropleth(
                     au_mesh.polygons_lonlat, agent_space_use.visit_probability;
                     title       = "$spp Projected Space Use (untagged animals)",
                     cmap        = params.cmap,
@@ -3154,7 +3111,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
             cmax = maximum(corr_agg)
             cmax > 0 && (corr_agg ./= cmax)
             corr_file = joinpath(out_dir, "movement_corridors_heatmap.html")
-            corr_map  = leaflet_choropleth(
+            corr_map  = plot_choropleth(
                 polys_ll, corr_agg;
                 title             = "$spp Markov-Bridge Corridor Visitation (Aggregate)",
                 cmap              = params.cmap,
@@ -3206,7 +3163,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
     if bse_vec !== nothing
         try
             bse_file = joinpath(out_dir, "movement_bottleneck_uncertainty.html")
-            bse_map  = leaflet_choropleth(
+            bse_map  = plot_choropleth(
                 polys_ll, bse_vec;
                 title             = "$spp Bottleneck Index Uncertainty (SE)",
                 cmap              = params.cmap,
@@ -3230,7 +3187,7 @@ corr_map   = leaflet_interactive_corridor_dashboard(
            size(conn.connectivity_matrix, 1) > 1
             try
                 conn_html = joinpath(out_dir, "movement_stock_connectivity.html")
-                conn_map  = leaflet_regional_connectivity(
+                conn_map  = plot_regional_connectivity(
                     conn.connectivity_matrix;
                     dark_mode = params.dark_mode,
                     title     = "$spp Stock Connectivity Matrix"
@@ -3567,7 +3524,7 @@ are called in sequence:
 3. `extract_transition_kernels`         -- posterior kernel construction
 4. `reconstruct_paths_and_diagnostics` -- paths, corridors, bottlenecks
 5. `compute_advanced_diagnostics`      -- circuit theory
-6. `export_dashboards`                 -- interactive Leaflet HTML maps
+6. `export_dashboards`                 -- interactive PlotlyJS HTML maps
 
 # Arguments
 - `params`: Configuration NamedTuple. Start from a parameter preset and
@@ -3795,3 +3752,4 @@ depth_range        = loaded.parsed_depth_range,
           panel_skips       = copy(PANEL_SKIPS),
       )
     end
+

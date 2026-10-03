@@ -19,7 +19,7 @@ group-stratified transition modeling while maintaining matrix indexing compatibi
 - `ks`: Elapsed discrete time intervals between consecutive detections.
 - `groups`: Biological stratum / group identifiers (1-indexed integers).
 - `covariates`: Individual-level continuous covariates.
-- `G`: Total count of distinct biological strata / groups.
+- `G`: Total count of distinct biological groups.
 - `max_k`: Maximum observed elapsed transition step count.
 - `matrix`: `Matrix{Float64}` representation of size `(N, 4)`.
 """
@@ -203,7 +203,7 @@ population density surveys and individual mark-recapture telemetry.
 - `n_units::Int`: Target number of spatial partitioning units.
 - `n_years::Int`: Number of discrete temporal observation years.
 - `n_marks::Int`: Number of tagged individuals released in mark-recapture telemetry.
-- `area_method::Symbol`: Spatial tessellation method (`:hexagonal`, `:cvt`, `:voronoi`, `:grid`).
+- `area_method::Symbol`: Spatial grid method (`:hexagonal`, `:cvt`, `:voronoi`, `:grid`).
 - `rng::AbstractRNG`: Random number generator instance.
 
 # Returns
@@ -739,7 +739,7 @@ end
 """
     synthesize_adr_results(chain_or_res, sim_data, vel_vectors; au=sim_data.au)
 
-Performs comprehensive post-processing, parameter extraction, and diagnostic visualization
+Performs post-processing, parameter extraction, and diagnostic visualization
 for a fitted Advection-Diffusion-Reaction movement model.
 
 # Returns
@@ -814,8 +814,8 @@ function synthesize_adr_results(
     # 3. Visualization 1: Regional Connectivity Matrix
     cents_x = [c[1] for c in au.centroids]
     mid_x = (minimum(cents_x) + maximum(cents_x)) / 2.0
-    strata = [x > mid_x ? "East" : "West" for x in cents_x]
-    conn_mat = calculate_regional_connectivity(Gamma_mean, strata)
+    groups = [x > mid_x ? "East" : "West" for x in cents_x]
+    conn_mat = calculate_regional_connectivity(Gamma_mean, groups)
     
     plt_conn = Plots.heatmap(
         ["West", "East"], ["West", "East"], conn_mat,
@@ -854,12 +854,12 @@ function synthesize_adr_results(
       Projections", legend=:outerright)
     render_paths!(plt_dyn, dynamic_paths; au=au, color=:darkgreen, lw=1.5)
 
-    # 7. Visualization 5: Comprehensive Interactive Leaflet Dashboard
+    # 7. Visualization 5: Interactive Leaflet Dashboard
     dash_html = leaflet_movement_dashboard(
         (au = au, transition_matrix = Gamma_mean, opts = (hsi = nothing,),
          d_val = D_coeff_mean, v_val = S_strength_mean),
         paths_persistent;
-        strata = strata,
+        groups = groups,
         title = "ADR Movement Estimation Dashboard"
     )
 
@@ -1199,7 +1199,7 @@ const _reconstruct_posterior_kernel = reconstruct_posterior_kernel
     )::Vector{Float64}
 
 Reshards an input Habitat Suitability Index (HSI) vector or surface from an
-arbitrary source spatial geometry onto the destination spatial tessellation
+arbitrary source spatial geometry onto the destination spatial grid
 `au_dest` (defaulting to `:hexagonal`).
 
 # Mathematical Formulation
@@ -1212,10 +1212,10 @@ spatial interpolation / area-overlap transfer matrix between `au_src` and `au_de
 
 # Arguments
 - `hsi_raw::AbstractVector{<:Real}`: Raw source HSI values of length ``S_{\\text{src}}``.
-- `au_dest::NamedTuple`: Destination spatial tessellation (e.g., hexagonal or CVT units).
-- `au_src::Union{Nothing, NamedTuple}`: Explicit source spatial tessellation with `:centroids` and `:polygons`.
+- `au_dest::NamedTuple`: Destination spatial grid (e.g., hexagonal or CVT units).
+- `au_src::Union{Nothing, NamedTuple}`: Explicit source spatial grid with `:centroids` and `:polygons`.
 - `hsi_coords::Union{Nothing, Vector{Tuple{Float64, Float64}}}`: Explicit coordinate points for each source HSI unit.
-- `hsi_area_method::Symbol`: Source tessellation geometry when constructing from coordinates/bbox (`:grid`, `:cvt`, `:voronoi`, `:hexagonal`). Default: `:grid`.
+- `hsi_area_method::Symbol`: Source grid geometry when constructing from coordinates/bbox (`:grid`, `:cvt`, `:voronoi`, `:hexagonal`). Default: `:grid`.
 - `domain_bbox::Union{Nothing, Tuple{Float64, Float64, Float64, Float64}}`: Optional domain bounding box `(min_lon, max_lon, min_lat, max_lat)`.
 
 # Returns
@@ -1232,7 +1232,7 @@ function reshard_hsi_field(
     S_dest = length(au_dest.centroids)
     S_src = length(hsi_raw)
 
-    # 1. If explicit source tessellation is provided
+    # 1. If explicit source grid is provided
     if !isnothing(au_src) && length(au_src.centroids) == S_src
         hsi_dest = reshard_spatial_field(hsi_raw, au_src, au_dest)
         return clamp.(Vector{Float64}(hsi_dest), 0.0, 1.0)
@@ -4039,7 +4039,7 @@ end
 
 
 # ==============================================================================
-# Domain Tessellation, Autocorrelation Infilling & Land Barrier Engine
+# Domain Grid, Autocorrelation Infilling & Land Barrier Engine
 # ==============================================================================
 
 """
@@ -4354,7 +4354,7 @@ preventing movement models from allowing transitions that cross overland barrier
 # Arguments
 - `W`: Spatial graph adjacency matrix (size ``S \\times S``). Modified in-place if mutable.
 - `centroids`: Centroids coordinate vector (length ``S``).
-- `land_polygons`: Boundary polygons, or `nothing` to sever nothing.
+- `land_polygons`: Boundary polygons, or `nothing` to block nothing.
 
 # Returns
 - `Int`: Total number of directed edges severed.
@@ -4364,7 +4364,7 @@ function sever_land_crossing_edges!(
     centroids::AbstractVector;
     land_polygons = nothing
 )::Int
-    # `nothing` means no polygon criterion; only explicit polygons sever edges.
+    # `nothing` means no polygon criterion; only explicit polygons block edges.
     polys = land_polygons in (:none, :false, false) ? nothing : land_polygons
 
     polys === nothing && return 0
@@ -4643,7 +4643,7 @@ end
         datum = WGS84Latest
     ) -> NamedTuple
 
-Generates a unified data-driven spatial tessellation covering the complete movement domain
+Generates a unified data-driven spatial grid covering the complete movement domain
 (including areas outside the core survey domain), identifies terrestrial land units, and
 severs land edges to form contiguous marine movement channels.
 
@@ -4796,7 +4796,7 @@ function construct_full_movement_domain(
         depth_threshold=depth_threshold
     )
 
-    # Sever land edges in W and topological land-crossing links
+    # Block land edges in W and topological land-crossing links
     W_water, _ = apply_land_barrier(W_init, zeros(Float64, S), land_mask)
     sever_land_crossing_edges!(W_water, centroids_lonlat; land_polygons=land_polygons)
 
@@ -4838,7 +4838,7 @@ end
     ) -> NamedTuple
 
 High-level end-to-end data preparation pipeline for individual animal movement and telemetry.
-Builds the full-domain tessellation, classifies and blocks terrestrial land barriers, reshards
+Builds the full-domain grid, classifies and blocks terrestrial land barriers, reshards
 and autocorrelates HSI into external marine areas, maps telemetry observations, and extracts
 mark-recapture transition events with biological group stratifications.
 
@@ -4860,7 +4860,7 @@ mark-recapture transition events with biological group stratifications.
 # Returns
 - `NamedTuple`:
   - `tagging`: Processed telemetry DataFrame with `:s_idx` and `:hsi`.
-  - `mesh`: Full-domain tessellation NamedTuple.
+  - `mesh`: Full-domain grid NamedTuple.
   - `W`: Adjacency matrix with severed land boundaries.
   - `hsi_vec`: Infilled spatial HSI vector (length ``S``).
   - `monthly_hsi`: Monthly HSI matrix (size ``S \\times T``).
@@ -4952,7 +4952,7 @@ function prepare_movement_data(
     filter!(:tagid => ∈(valid_set), tag_df)
     sort!(tag_df, [:tagid, :tag, :time])
 
-    # 1. Full-domain tessellation with land barriers
+    # 1. Full-domain grid with land barriers
     mesh = if pre_mapped !== nothing
         verbose && println("  [prepare] Using user pre-mapped domain mesh …")
         c_lon = hasproperty(pre_mapped, :center_lon) ?
@@ -5240,7 +5240,7 @@ end
 """
     compute_movement_statistics(paths_rich, path_results, loaded; params = nothing)
 
-Computes comprehensive movement ecology metrics across all reconstructed
+Computes movement ecology metrics across all reconstructed
 individual trajectories:
 1. Net displacement: Straight-line distance between release and recapture
    locations using spherical Haversine distance.
@@ -7290,7 +7290,7 @@ end
         filepath, species, dists, vels, bearings, paths_rich, mov_stats = nothing
     )
 
-Exports the comprehensive summary diagnostics HTML dashboard with
+Exports the summary diagnostics HTML dashboard with
 distributions and per-path table.
 """
 function export_movement_summary_dashboard(

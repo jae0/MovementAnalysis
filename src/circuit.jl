@@ -889,7 +889,7 @@ P(\\text{PinchPoint}_i \\mid \\text{data}) =
 - `seed`: Optional random seed for reproducibility.
 
 # Returns
-- `PosteriorCircuitResult`: Comprehensive summary of posterior current density,
+- `PosteriorCircuitResult`: Complete summary of posterior current density,
   credible intervals, bottleneck probabilities, and edge branch fluxes.
 
 # References

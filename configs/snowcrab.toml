@@ -56,7 +56,7 @@ reshard_hex = false
 hex_radius_km = 5.0
 use_hydrodynamics = true
 depth_barrier_mode = "hsi_only"  # hsi_only | bathy_only | intersection
-depth_range = [25.0, 400.0]      # principal benthic habitat band, metres
+depth_range = [25.0, 350.0]      # principal benthic habitat band, metres
 hsi_ood_floor = 0.01
 
 # -----------------------------------------------------------------------------

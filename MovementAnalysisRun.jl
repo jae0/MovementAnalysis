@@ -2,11 +2,7 @@
 
 import Pkg
 
-let
-    curr_dir = @__DIR__
-    proj_dir = normpath(joinpath(curr_dir, ".."))
-    Pkg.activate(proj_dir)
-end
+Pkg.activate(@__DIR__)
 
 using MovementAnalysis
 

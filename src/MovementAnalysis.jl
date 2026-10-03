@@ -5,7 +5,7 @@ Standalone Spatial Animal Movement, Trajectory Reconstruction, and Ecological
 Connectivity Analysis Engine. Provides mark-recapture telemetry ingestion,
 stochastic transition kernel estimation, explicit Turing.jl probabilistic
 telemetry calibration, A* least-cost trajectory and corridor routing, electrical
-circuit theory pinchpoint analysis, and interactive Leaflet HTML dashboard generation.
+circuit theory pinchpoint analysis, and interactive PlotlyJS HTML dashboard generation.
 """
 module MovementAnalysis
 
@@ -14,6 +14,7 @@ using SparseArrays
 using Statistics
 using StatsBase
 using Distributions
+import Distributions: Normal, Categorical, truncated, MvNormal
 using Random
 using Dates
 using DataFrames
@@ -162,33 +163,33 @@ export
     get_circuit_paths,
     resistance_covariance_matrix,
 
-    # Interactive HTML / Leaflet Visualization
-    LeafletMap,
+    # Interactive HTML / PlotlyJS Visualization
+    InteractiveMap,
     save_html,
     utm_to_lonlat,
     lonlat_to_utm,
-    leaflet_choropleth,
-    leaflet_spatial_map,
-    leaflet_spatial_graph,
-    leaflet_tessellation_map,
+    plot_choropleth,
+    plot_spatial_map,
+    plot_spatial_graph,
+    plot_tessellation_map,
     show_map,
-    leaflet_hsi_map,
-    leaflet_diffusion_map,
-    leaflet_residence_time_map,
-    leaflet_advection_arrows,
-    leaflet_velocity_field,
-    leaflet_tracks_map,
-    leaflet_render_paths,
-    leaflet_spacetime_map,
-    leaflet_movement_dashboard,
-    leaflet_interactive_corridor_dashboard,
-    leaflet_posterior_path_ensemble,
-    leaflet_dispersal_kernel,
-    leaflet_step_diagnostics,
-    leaflet_regional_connectivity,
-    leaflet_ad_ratio_distribution,
-    leaflet_hydrodynamic_dashboard,
-    leaflet_current_density_map,
+    plot_hsi_map,
+    plot_diffusion_map,
+    plot_residence_time_map,
+    plot_advection_arrows,
+    plot_velocity_field,
+    plot_tracks_map,
+    plot_render_paths,
+    plot_spacetime_map,
+    plot_movement_dashboard,
+    plot_interactive_corridor_dashboard,
+    plot_posterior_path_ensemble,
+    plot_dispersal_kernel,
+    plot_step_diagnostics,
+    plot_regional_connectivity,
+    plot_ad_ratio_distribution,
+    plot_hydrodynamic_dashboard,
+    plot_current_density_map,
     export_movement_posterior_dashboard,
     export_movement_flow_dashboard,
     export_movement_summary_dashboard,
