@@ -14,6 +14,9 @@ using DynamicPPL
 using ForwardDiff
 using ArgParse
 using TOML
+using JLD2
+using JSON
+using LibGEOS
 
 # Scratch for tests that must write a real file. It lives inside the package
 # rather than the OS temp directory: mktempdir requires its parent to exist, and
@@ -86,6 +89,34 @@ end
         @test c2.cmap === :plasma
         @test c2.region_labels == ["A", "B"]
         @test c2.render_html === false
+
+        # `--tessellation-only` is a switch, not a value flag: the natural way to
+        # ask "build the mesh, show it, stop" is bare.
+        @test load_config(cli_args = ["--tessellation-only"]).tessellation_only === true
+        @test load_config().tessellation_only === false
+
+        # `source` on `load_open_bathymetry` was unreachable from configuration, so
+        # a measured depth grid could not be supplied at all. Without one the
+        # loader fabricates a shelf and the depth rules are inert.
+        @test load_config().bathymetry_source === nothing
+        @test load_config(cli_args = ["--bathymetry-source=data/bathy.csv"]
+                         ).bathymetry_source == "data/bathy.csv"
+        mktempdir(TEST_TMP) do dir
+            p = joinpath(dir, "c.toml")
+            write(p, "bathymetry_source = \"data/real_bathy.jld2\"\n")
+            @test load_config(config_path = p).bathymetry_source ==
+                  "data/real_bathy.jld2"
+        end
+
+        # `store_true` leaves `default = false` in ArgParse, which is exactly the
+        # case the drop-defaults rule has to get right in both directions.
+        mktempdir(TEST_TMP) do dir
+            p = joinpath(dir, "tess.toml")
+            write(p, "tessellation_only = true\n")
+            @test load_config(config_path = p).tessellation_only === true
+            write(p, "tessellation_only = false\n")
+            @test load_config(config_path = p).tessellation_only === false
+        end
 
         # An absent flag must not displace a value coming from a config file, so
         # the defaults ArgParse fills in are dropped rather than applied.
@@ -167,13 +198,32 @@ end
         @test bbox_raw[1] == -67.0
         @test bbox_raw[2] == 41.5
 
-        # With sppoly_bounds (delimiting south and west)
+        # With sppoly_bounds the extent is the UNION of the padded data extent and
+        # the footprint bounds, on every edge.
+        #
+        # This used to clamp inward with `max` on the west and south, on the theory
+        # that the grid should not expand past the survey. That is backwards when
+        # the footprint *is* the declared domain: the snow crab footprint reaches
+        # lon -65.59 and lat 42.99 while its telemetry reaches -65.42 and 43.02, so
+        # the clamp discarded the footprint's own outer slivers and no amount of
+        # downstream filtering could put those cells back.
         sp_b = (-65.48, 43.04, -57.32, 47.27)
         bbox_delim = resolve_bbox(nothing, 0.5, lons, lats; sppoly_bounds = sp_b)
-        @test bbox_delim[1] == -65.48
-        @test bbox_delim[2] == 43.04
-        @test bbox_delim[3] == -57.5
-        @test bbox_delim[4] == 47.5
+        @test bbox_delim[1] == -67.0      # data reaches further west than the footprint
+        @test bbox_delim[2] == 41.5      # and further south
+        @test bbox_delim[3] == -57.32    # footprint reaches further east than the data
+        @test bbox_delim[4] == 47.5      # and further north
+
+        # The footprint must be contained by the union, on all four sides.
+        @test bbox_delim[1] <= sp_b[1]
+        @test bbox_delim[2] <= sp_b[2]
+        @test bbox_delim[3] >= sp_b[3]
+        @test bbox_delim[4] >= sp_b[4]
+
+        # An explicit --bbox still overrides the union entirely.
+        bbox_explicit = resolve_bbox([-62.0, 44.0, -60.0, 46.0], 0.5, lons, lats;
+                                     sppoly_bounds = sp_b)
+        @test bbox_explicit == (-62.0, 44.0, -60.0, 46.0)
 
         # 2. extract_sppoly_bounds on data/sppoly.jld2 if present
         if isfile("data/sppoly.jld2")
@@ -195,6 +245,242 @@ end
         @test length(m_pruned.polygons_lonlat) == div(S_orig, 2)
         @test size(m_pruned.W) == (div(S_orig, 2), div(S_orig, 2))
         @test_throws ArgumentError prune_mesh(m_test, falses(S_orig))
+    end
+
+    @testset "Domain footprint from a spatial-unit file" begin
+        # Regression: `data/sppoly.jld2` is an areal-unit definition -- 707 units,
+        # each with `wkt_geo` in EPSG:4326, stored as a `Dict` of named variables.
+        # The polygon reader looked for a vector of rings, found `wkt_planar` (a
+        # vector of WKT *strings* in a projected CRS), and threw. The caller in
+        # `load_movement_data` caught that with an empty `catch`, so the run
+        # continued with no footprint and the domain became the whole mesh extent.
+        mktempdir(TEST_TMP) do dir
+            # Two adjacent unit squares, plus a decoy `wkt_planar` that must not be
+            # picked: it is WKT in a projected CRS and would be read the wrong way.
+            units = DataFrame(
+                AUID     = [1, 2],
+                wkt_geo  = [
+                    "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
+                    "POLYGON ((2 0, 4 0, 4 2, 2 2, 2 0))",
+                ],
+                wkt_planar = [
+                    "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
+                    "POLYGON ((2 0, 4 0, 4 2, 2 2, 2 0))",
+                ],
+            )
+            path = joinpath(dir, "sppoly.jld2")
+            JLD2.save(path, Dict("graph" => [1, 2], "sppoly" => units))
+
+            geom = read_domain_polygon(path)
+            @test geom !== nothing
+
+            # Dissolved: adjacent units share an edge, so the footprint is one
+            # connected polygon spanning x = 0..4, not two.
+            @test geometry_contains(geom, 1.0, 1.0)
+            @test geometry_contains(geom, 3.0, 1.0)
+            @test !geometry_contains(geom, 5.0, 1.0)
+            @test !geometry_contains(geom, 1.0, 5.0)
+
+            # A centroid in the shared edge belongs to the domain, not to neither.
+            @test geometry_contains(geom, 2.0, 1.0)
+
+            @test geometries_in_domain(geom, [(1.0, 1.0), (3.0, 1.0), (5.0, 1.0)]) ==
+                  BitVector([true, true, false])
+
+            # No footprint configured means no spatial restriction, not "nothing
+            # is in the domain".
+            @test geometries_in_domain(nothing, [(1.0, 1.0), (5.0, 1.0)]) ==
+                  BitVector([true, true])
+            @test read_domain_polygon(nothing) === nothing
+
+            # A configured file that cannot be read must fail loudly. Silently
+            # falling back to "no footprint" is what produced a wrong domain.
+            @test_throws ArgumentError read_domain_polygon(joinpath(dir, "absent.jld2"))
+            bad = joinpath(dir, "bad.jld2")
+            JLD2.save(bad, Dict("sppoly" => DataFrame(AUID = [1], depth = [12.0])))
+            @test_throws ArgumentError read_domain_polygon(bad)
+        end
+
+        # Long-format tables still work, and WKT strings/vectors are accepted.
+        mktempdir(TEST_TMP) do dir
+            path = joinpath(dir, "long.jld2")
+            JLD2.save(path, Dict("sppoly" => DataFrame(
+                lon = [0.0, 1.0, 1.0, 0.0], lat = [0.0, 0.0, 1.0, 1.0])))
+            g = read_domain_polygon(path)
+            @test geometry_contains(g, 0.5, 0.5)
+            @test !geometry_contains(g, 1.5, 0.5)
+        end
+
+        # Rings survive the round trip with every vertex, not every other one.
+        rings = MovementAnalysis.geometry_rings(LibGEOS.readgeom(
+            "POLYGON ((0 0, 3 0, 3 2, 0 2, 0 0))"))
+        @test length(rings) == 1
+        @test rings[1] ==
+              [(-0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0), (0.0, 0.0)]
+
+        # A multi-part geometry yields one ring per part.
+        @test length(MovementAnalysis.geometry_rings(LibGEOS.readgeom(
+            "MULTIPOLYGON (((0 0, 1 0, 1 1, 0 1, 0 0)), ((5 5, 6 5, 6 6, 5 6, 5 5)))"))) == 2
+
+        @test_throws ArgumentError dissolve_geometries(LibGEOS.AbstractGeometry[])
+    end
+
+    @testset "GeoJSON and shapefile polygon readers" begin
+        # Both were broken and neither had ever run: `_rings_from_geojson` called
+        # `JSON` without importing it, and both readers declared `rings` with one
+        # level of nesting too many, so pushing a single ring tried to convert a
+        # `Tuple` into a `Vector` of rings.
+        mktempdir(TEST_TMP) do dir
+            p = joinpath(dir, "poly.geojson")
+            open(p, "w") do io
+                JSON.print(io, Dict(
+                    "type" => "FeatureCollection",
+                    "features" => [Dict(
+                        "type" => "Feature",
+                        "properties" => Dict("name" => "square"),
+                        "geometry" => Dict(
+                            "type" => "Polygon",
+                            "coordinates" => [[[0.0, 0.0], [1.0, 0.0],
+                                               [1.0, 1.0], [0.0, 0.0]]],
+                        ),
+                    )],
+                ))
+            end
+            rings = read_polygon_file(p)
+            @test length(rings) == 1
+            @test length(rings[1]) == 4
+            @test rings[1][1] == (0.0, 0.0)
+            @test rings[1][3] == (1.0, 1.0)
+
+            # And it feeds the land mask the same way a raster does.
+            cents = [(0.5, 0.5), (5.0, 5.0)]
+            @test land_mask_from_polygon_files([p], cents) == BitVector([true, false])
+        end
+    end
+
+    @testset "Pruned domain is reconnected" begin
+        # A 6x5 lattice. Rows 1-2 form the main body, row 4 a lobe; row 3 is
+        # pruned, so the lobe is one cell away from being reattached.
+        nx, ny = 6, 5
+        n = nx * ny
+        idx(i, j) = (j - 1) * nx + i
+        W = spzeros(n, n)
+        nbr = [Int[] for _ in 1:n]
+        for j in 1:ny, i in 1:nx
+            i < nx && (W[idx(i, j), idx(i + 1, j)] = 1.0; W[idx(i + 1, j), idx(i, j)] = 1.0)
+            j < ny && (W[idx(i, j), idx(i, j + 1)] = 1.0; W[idx(i, j + 1), idx(i, j)] = 1.0)
+        end
+        rows, cols, _ = findnz(W)
+        for (r, c) in zip(rows, cols)
+            push!(nbr[r], Int(c))
+        end
+        cents = [(-60.0 + 0.1 * (i - 1), 44.0 + 0.1 * (j - 1))
+                 for j in 1:ny for i in 1:nx]
+
+        keep = falses(n)
+        for j in (1, 2), i in 1:nx
+            keep[idx(i, j)] = true          # main body, 12 cells
+        end
+        for i in 1:nx
+            keep[idx(i, 4)] = true          # lobe, 6 cells
+        end
+        @test count(keep) == 18
+        @test sort(length.(MovementAnalysis._connected_components(keep, nbr))) ==
+              [6, 12]
+
+        out, n_link, n_unlinked =
+            MovementAnalysis.reconnect_severed_components(keep, W, cents)
+        @test n_link == 1
+        @test n_unlinked == 0
+        @test count(out) == 19
+        @test length(MovementAnalysis._connected_components(out, nbr)) == 1
+        # The one added cell is in the pruned row between the two bodies, and
+        # nothing else changed.
+        added = [i for i in 1:n if out[i] && !keep[i]]
+        @test length(added) == 1
+        @test 13 <= added[1] <= 18
+
+        # Beyond the budget a component is reported, not bridged through a ribbon
+        # of re-added cells. A lobe on row 5 with row 4 also pruned needs two
+        # cells of bridge.
+        far = falses(n)
+        for j in (1, 2, 5), i in 1:nx
+            far[idx(i, j)] = true
+        end
+        @test sort(length.(MovementAnalysis._connected_components(far, nbr))) ==
+              [6, 12]
+
+        out2, n_link_ok, n_unlinked_ok =
+            MovementAnalysis.reconnect_severed_components(far, W, cents;
+                                                         max_bridge_cells = 64)
+        @test n_link_ok == 2
+        @test n_unlinked_ok == 0
+        @test length(MovementAnalysis._connected_components(out2, nbr)) == 1
+
+        _, n_link_no, n_unlinked_no =
+            MovementAnalysis.reconnect_severed_components(far, W, cents;
+                                                         max_bridge_cells = 1)
+        @test n_link_no == 0
+        @test n_unlinked_no == 6          # the row-5 lobe, reported once
+
+        # An already-connected mask is returned untouched.
+        out4, n_link4, n_unlinked4 =
+            MovementAnalysis.reconnect_severed_components(trues(n), W, cents)
+        @test n_link4 == 0 && n_unlinked4 == 0
+        @test out4 == trues(n)
+
+        @test MovementAnalysis.reconnect_severed_components(falses(n), W, cents) ==
+              (falses(n), 0, 0)
+    end
+
+    @testset "Tessellation preview" begin
+        mesh = build_hex_mesh_planar([-64.0, -62.0], [44.0, 46.0]; radius_km = 30.0)
+        loaded = (
+            mesh               = mesh,
+            resharded_depths   = Float64[],
+            hsi_vec            = Float64[],
+            parsed_depth_range = nothing,
+            data               = nothing,
+        )
+
+        mktempdir(TEST_TMP) do dir
+            # Independent of `render_html`. Gating the preview on it would make
+            # `--render-html=false --tessellation-only` show nothing at all, which
+            # is the one combination where the user is checking the domain and
+            # least wants it suppressed.
+            params = load_config(cli_args = [
+                "--output-dir=$dir", "--render-html=false", "--quiet=true",
+            ])
+            @test params.render_html === false
+
+            path = tessellation_preview(loaded, params)
+            @test isfile(path)
+            @test basename(path) == "tessellation_polygons.html"
+            @test abspath(path) == path          # returns an absolute path
+            @test filesize(path) > 0
+            @test occursin("<html", lowercase(read(path, String)))
+        end
+
+        # A launcher that cannot be found must not fail the run: the file is already
+        # written, and a headless batch session is a normal outcome.
+        @test open_in_browser(joinpath(mktempdir(TEST_TMP), "absent.html")) === false
+
+        # The truncated result keeps the full key set, so a caller reading it gets
+        # `nothing` rather than a missing field, and says it was a preview.
+        res = MovementAnalysis._tessellation_only_result(
+            loaded, "somewhere.html",
+            load_config(cli_args = ["--render-html=false"]),
+        )
+        for k in (:models, :chains, :P_kernel, :paths, :corridors,
+                  :stochastic_paths, :domain_bottlenecks, :circuit,
+                  :validation_analyses, :agent_trajectories, :agent_space_use,
+                  :movement_stats, :phenology, :trait_models, :parameters)
+            @test res[k] === nothing
+        end
+        @test res.tessellation_only === true
+        @test res.tessellation_path == "somewhere.html"
+        @test res.mesh.n_units == mesh.n_units
+        @test res.depth_range === nothing
     end
 
     @testset "Global Land/Sea Mask" begin
@@ -524,6 +810,125 @@ end
         @test sum(raw[(4, 2)]) ≈ 1.0 atol = 1e-10
         @test all(>=(0.0), raw[(4, 2)])
         @test minimum(raw[(4, 2)]) < minimum(naive[(4, 2)])   # no floor applied
+    end
+
+    @testset "pruned mesh units cannot leak into observation endpoints" begin
+        # Regression: the mesh prune reindexed observations with `old_to_new`, which
+        # is `zeros(Int, n_spatial)` and only assigns a nonzero entry to retained
+        # units. An observation endpoint on a unit the prune deleted was therefore
+        # reindexed to 0 and reached Phase 2 as
+        # `KeyError: key (0, 729) not found` from the k-step cache lookup -- the
+        # cache skips release indices outside `1:S`, so it never built `(0, 729)`.
+        cents = [(0.0, 0.0), (1.0, 0.0), (9.0, 0.0),
+                 (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)]
+        keep  = [true, false, false, true, true, false]
+        obs = DataFrame(
+            tagid   = ["a", "b", "c"],
+            release = [2, 3, 1],
+            k       = [4, 9, 729],
+            recapture = [6, 5, 4],
+        )
+        before = copy(obs)
+
+        n_rel, n_rec = MovementAnalysis._snap_pruned_endpoints!(obs, keep, cents)
+        @test (n_rel, n_rec) == (2, 1)
+
+        # Each stale endpoint moves to the nearest *retained* unit. Unit 2 sits at
+        # x = 1 and snaps back to unit 1 (x = 0) rather than forward to unit 4
+        # (x = 10); unit 3 at x = 9 snaps forward to unit 4; unit 6 at x = 30 snaps
+        # back to unit 5 (x = 20).
+        @test obs.release == [1, 4, 1]
+        @test obs.recapture == [5, 5, 4]
+
+        # Rows that were already on retained units are untouched, including the
+        # k = 729 one that produced the original crash.
+        @test obs.k == before.k
+        @test obs.tagid == before.tagid
+
+        # The invariant the prune actually needs: applying `old_to_new` after the
+        # snap cannot produce 0 or an out-of-range index.
+        old_to_new = zeros(Int, length(keep))
+        new_idx = 0
+        for i in eachindex(keep)
+            keep[i] && (new_idx += 1; old_to_new[i] = new_idx)
+        end
+        reindexed_rel = [old_to_new[r] for r in obs.release]
+        reindexed_rec = [old_to_new[r] for r in obs.recapture]
+        @test all(r -> 1 <= r <= new_idx, reindexed_rel)
+        @test all(r -> 1 <= r <= new_idx, reindexed_rec)
+        @test new_idx == 3
+
+        # A no-op on already-clean endpoints: reports nothing, mutates nothing.
+        clean = DataFrame(tagid = ["d"], release = [1], k = [3], recapture = [4])
+        @test MovementAnalysis._snap_pruned_endpoints!(clean, keep, cents) == (0, 0)
+        @test clean.release == [1] && clean.recapture == [4]
+
+        # Without centroids there is nothing to snap to. The caller's post-reindex
+        # range check is what has to catch the result, so this stays silent rather
+        # than pretending the endpoints were fine.
+        stale = DataFrame(tagid = ["e"], release = [2], k = [1], recapture = [6])
+        @test MovementAnalysis._snap_pruned_endpoints!(stale, keep, nothing) == (0, 0)
+        @test stale.release == [2]
+
+        @test MovementAnalysis._snap_pruned_endpoints!(obs, keep, cents) == (0, 0)
+        @test MovementAnalysis._snap_pruned_endpoints!(clean, keep, nothing) == (0, 0)
+
+        # An out-of-range endpoint is a caller error, not something to clamp: the
+        # reachability filter in Phase 1c drops those rows before the prune runs.
+        oob = DataFrame(tagid = ["f"], release = [0], k = [1], recapture = [4])
+        @test_throws ErrorException MovementAnalysis._snap_pruned_endpoints!(
+            oob, keep, cents)
+
+        # Nothing retained is unrecoverable, and must not silently pass.
+        @test_throws ErrorException MovementAnalysis._snap_pruned_endpoints!(
+            copy(obs), falses(length(keep)), cents)
+
+        # A centroid/unit mismatch would index off the end of the centroid vector.
+        @test_throws ErrorException MovementAnalysis._snap_pruned_endpoints!(
+            copy(obs), keep, cents[1:3])
+    end
+
+    @testset "validate_mark_recapture_indices names the offending rows" begin
+        # The crash this guards against reported only `KeyError: key (0, 729) not
+        # found`, which does not say which observation carried the 0 or that 0 is
+        # not a valid unit index at all.
+        @test validate_mark_recapture_indices([1, 2, 3], [3, 2, 1], 3) === nothing
+        @test validate_mark_recapture_indices(Int[], Int[], 4) === nothing
+
+        err = try
+            validate_mark_recapture_indices([0, 2], [2, 0], 3)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        msg = sprint(showerror, err)
+        @test occursin("row 1: release = 0", msg)
+        @test occursin("row 2: recapture = 0", msg)
+        @test occursin("1:3", msg)
+
+        # Upper bound too, not just the 0 case -- a stale index is stale in either
+        # direction once the mesh has been pruned.
+        err_hi = try
+            validate_mark_recapture_indices([4], [1], 3)
+            nothing
+        catch e
+            e
+        end
+        @test err_hi isa ArgumentError
+        @test occursin("row 1: release = 4", sprint(showerror, err_hi))
+
+        # Long offending lists are summarized rather than dumped.
+        many = try
+            validate_mark_recapture_indices(zeros(Int, 12), ones(Int, 12), 3)
+            nothing
+        catch e
+            e
+        end
+        @test occursin("more)", sprint(showerror, many))
+
+        @test_throws ArgumentError validate_mark_recapture_indices([1, 2], [1], 3)
+        @test_throws ArgumentError validate_mark_recapture_indices([1], [1], 0)
     end
 
     @testset "A* Least-Cost Routing" begin

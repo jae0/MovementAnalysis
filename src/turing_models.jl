@@ -307,6 +307,65 @@ function kstep_transition_cache(
 end
 
 """
+    validate_mark_recapture_indices(releases, recaptures, n_units; n_report = 5)
+
+Throw an `ArgumentError` naming the offending rows if any release or recapture
+index lies outside `1:n_units`. Returns `nothing` when every index is valid.
+
+# Why this exists
+The mark-recapture likelihood indexes a `Dict` keyed by `(release, k)`:
+
+    recaptures[n] ~ Categorical(cache[(releases[n], ks[n])])
+
+[`kstep_transition_cache`](@ref) deliberately skips release indices outside
+`1:S` rather than erroring, so a stale index does not fail there — it fails at the
+lookup, in the model body, several hundred lines of stack trace away from the code
+that produced it. On the snow crab dataset that surfaced as
+`KeyError: key (0, 729) not found`, which says only that some release index was 0,
+not which observation or why.
+
+This check runs once, at the model boundary, on the extracted index vectors, so the
+failure names the rows and the invariant instead. It is deliberately *not* in the
+`@model` body: there it would re-run on every likelihood evaluation.
+
+# Arguments
+- `releases`, `recaptures`: per-observation 1-based mesh unit indices.
+- `n_units`: number of mesh units, i.e. the support length of every `Categorical`.
+- `n_report`: how many offending rows to name before summarizing the rest.
+"""
+function validate_mark_recapture_indices(
+    releases  ::AbstractVector{<:Integer},
+    recaptures ::AbstractVector{<:Integer},
+    n_units   ::Integer;
+    n_report  ::Int = 5
+)
+    length(releases) == length(recaptures) || throw(ArgumentError(
+        "release and recapture index vectors must be the same length, got " *
+        "$(length(releases)) and $(length(recaptures))."
+    ))
+    n_units >= 1 || throw(ArgumentError(
+        "n_units must be positive, got $n_units."
+    ))
+
+    bad = Tuple{Int, String, Int}[]
+    for (name, units) in (("release", releases), ("recapture", recaptures))
+        for (i, u) in pairs(units)
+            (1 <= u <= n_units) || push!(bad, (Int(i), name, Int(u)))
+        end
+    end
+    isempty(bad) && return nothing
+
+    shown = join(("row $i: $name = $u" for (i, name, u) in first(bad, n_report)), "; ")
+    extra = length(bad) > n_report ? " (+$(length(bad) - n_report) more)" : ""
+    throw(ArgumentError(
+        "$length(bad) mark-recapture endpoint(s) fall outside the mesh " *
+        "1:$n_units. First: $shown$extra. Every endpoint must be a retained mesh " *
+        "unit; a 0 means the mesh prune reindexed an observation onto a unit it " *
+        "had already deleted -- see `_snap_pruned_endpoints!` in src/pipeline.jl."
+    ))
+end
+
+"""
     pure_telemetry_turing_model(releases, recaptures, ks, W, hsi, land_mask)
 
 Mark-recapture telemetry model for a single, unstratified population.
@@ -330,6 +389,13 @@ Estimates advection velocity, diffusion rate, and habitat gradient responsivenes
 
 # Likelihood
     recapture ~ Categorical(P^k[release, :])
+
+# Preconditions
+`releases` and `recaptures` must both lie in `1:size(W, 1)`. That is not checked in
+the body — the body runs on every likelihood evaluation — but at the call site by
+[`validate_mark_recapture_indices`](@ref). An out-of-range release index is skipped
+by [`kstep_transition_cache`](@ref) and then looked up anyway, which reports only
+`KeyError: key (release, k) not found` from deep inside the likelihood.
 
 # Note on individual heterogeneity
 This is a **population-level** model. An earlier revision carried per-individual

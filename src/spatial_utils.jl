@@ -625,6 +625,174 @@ function build_hex_mesh_planar(
     )
 end
 
+"""
+    build_hex_mesh_clipped(
+        boundary_polygons::Vector{Vector{Tuple{Float64, Float64}}};
+        radius_km::Real = 5.0,
+        crs = nothing,
+        datum = WGS84Latest
+    )::NamedTuple
+
+Build a hexagonal mesh clipped to the given boundary polygons. Only hexagons
+whose centroids fall within any of the boundary polygons are included.
+
+# Arguments
+- `boundary_polygons`: Vector of polygon rings in (lon, lat) coordinates.
+- `radius_km`: Hexagon circumradius in kilometres.
+- `crs`: Optional Coordinate Reference System for projection.
+- `datum`: Geographic datum (default: `WGS84Latest`).
+
+# Returns
+- NamedTuple with the same fields as `build_hex_mesh_planar`, but containing
+  only hexagons whose centroids are inside the boundary polygons.
+"""
+function build_hex_mesh_clipped(
+    boundary_polygons::Vector{Vector{Tuple{Float64, Float64}}};
+    radius_km::Real = 5.0,
+    crs = nothing,
+    datum = WGS84Latest
+)::NamedTuple
+    # First, compute the overall bounding box of the boundary polygons
+    all_lons = Float64[]
+    all_lats = Float64[]
+    for poly in boundary_polygons
+        for pt in poly
+            if length(pt) >= 2 && !isnan(pt[1]) && !isnan(pt[2])
+                push!(all_lons, Float64(pt[1]))
+                push!(all_lats, Float64(pt[2]))
+            end
+        end
+    end
+    isempty(all_lons) && error("No valid coordinates in boundary polygons")
+    
+    min_lon, max_lon = extrema(all_lons)
+    min_lat, max_lat = extrema(all_lats)
+    
+    # Use the center of the bounding box as projection center
+    center_lon = (min_lon + max_lon) / 2.0
+    center_lat = (min_lat + max_lat) / 2.0
+    
+    # Convert boundary polygons to planar km for efficient point-in-polygon testing
+    boundary_polys_km = Vector{Vector{Tuple{Float64, Float64}}}()
+    for poly in boundary_polygons
+        poly_km = Tuple{Float64, Float64}[]
+        for pt in poly
+            if length(pt) >= 2 && !isnan(pt[1]) && !isnan(pt[2])
+                x, y = lonlat_to_xy_km(Float64(pt[1]), Float64(pt[2]);
+                                      center_lon=center_lon, center_lat=center_lat,
+                                      crs=crs, datum=datum)
+                push!(poly_km, (x, y))
+            end
+        end
+        if length(poly_km) >= 3
+            # Close the polygon
+            if poly_km[1] != poly_km[end]
+                push!(poly_km, poly_km[1])
+            end
+            push!(boundary_polys_km, poly_km)
+        end
+    end
+    
+    r  = Float64(radius_km)
+    dx = sqrt(3.0) * r
+    dy = 1.5 * r
+    
+    # Determine planar domain bounds from the boundary polygons
+    x_coords = [p[1] for poly in boundary_polys_km for p in poly]
+    y_coords = [p[2] for poly in boundary_polys_km for p in poly]
+    x_min, x_max = extrema(x_coords)
+    y_min, y_max = extrema(y_coords)
+    
+    x_min -= r
+    x_max += r
+    y_min -= r
+    y_max += r
+    
+    row_min = floor(Int, y_min / dy)
+    row_max = ceil(Int, y_max / dy)
+    
+    centroids_km = Tuple{Float64, Float64}[]
+    for row in row_min:row_max
+        yk   = row * dy
+        xoff = isodd(row) ? (dx / 2.0) : 0.0
+        col_min = floor(Int, (x_min - xoff) / dx)
+        col_max = ceil(Int, (x_max - xoff) / dx)
+        for col in col_min:col_max
+            xk = col * dx + xoff
+            # Test if this centroid is inside any boundary polygon
+            if point_in_polygon(xk, yk, boundary_polys_km)
+                push!(centroids_km, (xk, yk))
+            end
+        end
+    end
+    
+    sort!(centroids_km, by = c -> (c[2], c[1]))
+    S = length(centroids_km)
+    S > 0 || error("No hexagons generated within boundary polygons")
+    
+    polygons_km      = Vector{Vector{Tuple{Float64, Float64}}}(undef, S)
+    polygons_lonlat  = Vector{Vector{Tuple{Float64, Float64}}}(undef, S)
+    centroids_lonlat = Vector{Tuple{Float64, Float64}}(undef, S)
+    
+    hex_angles = (30.0 .+ 60.0 .* (0:5)) .* (π / 180.0)
+    
+    for (i, (cx, cy)) in enumerate(centroids_km)
+        verts_km = [(cx + r * cos(a), cy + r * sin(a)) for a in hex_angles]
+        push!(verts_km, verts_km[1])
+        
+        polygons_km[i]      = verts_km
+        polygons_lonlat[i]  = [xy_km_to_lonlat(v[1], v[2];
+                                    center_lon=center_lon, center_lat=center_lat,
+                                    crs=crs, datum=datum)
+                                for v in verts_km]
+        
+        centroids_lonlat[i] = xy_km_to_lonlat(cx, cy;
+                                    center_lon=center_lon, center_lat=center_lat,
+                                    crs=crs, datum=datum)
+    end
+    
+    c_mat = Matrix{Float64}(undef, 2, S)
+    for i in 1:S
+        c_mat[1, i] = centroids_km[i][1]
+        c_mat[2, i] = centroids_km[i][2]
+    end
+    
+    tree       = KDTree(c_mat)
+    adj_thresh = sqrt(3.0) * r * 1.05
+    
+    rows_idx = Int[]
+    cols_idx = Int[]
+    for i in 1:S
+        nbrs = inrange(tree, [centroids_km[i][1], centroids_km[i][2]], adj_thresh)
+        for j in nbrs
+            if j != i
+                push!(rows_idx, i)
+                push!(cols_idx, j)
+            end
+        end
+    end
+    
+    W = sparse(rows_idx, cols_idx, ones(Float64, length(rows_idx)), S, S)
+    W = max.(W, W')
+    
+    area_km2 = (3.0 * sqrt(3.0) / 2.0) * r^2
+    
+    return (
+        centroids        = centroids_lonlat,
+        centroids_km     = centroids_km,
+        centroids_lonlat = centroids_lonlat,
+        polygons         = polygons_lonlat,
+        polygons_km      = polygons_km,
+        polygons_lonlat  = polygons_lonlat,
+        n_units          = S,
+        W                = W,
+        radius_km        = r,
+        areas_km2        = fill(area_km2, S),
+        center_lon       = center_lon,
+        center_lat       = center_lat
+    )
+end
+
 # ── point → unit mapping ───────────────────────────────────────────────────
 
 
@@ -1039,7 +1207,11 @@ function load_open_bathymetry(;
         polygons = polygons,
         au = au,
         bbox = actual_bbox,
-        crs = crs
+        crs = crs,
+        # Whether `depth` is measured or fabricated. Nothing downstream may use a
+        # synthetic depth field as if it were a measurement; `load_movement_data`
+        # refuses to prune the spatial domain on one.
+        is_synthetic = !loaded_from_file
     )
 end
 
@@ -2228,4 +2400,31 @@ function load_hsi_jld2(
         monthly_hsi      = monthly_hsi,
         month_lookup     = month_lookup
     )
+end
+
+"""
+    polygons_intersect(poly1::Vector{Tuple{Float64, Float64}}, poly2::Vector{Tuple{Float64, Float64}}) -> Bool
+
+Check if two polygons intersect using LibGEOS. Returns true if they intersect
+or touch, false otherwise. Handles invalid/empty polygons gracefully.
+"""
+function polygons_intersect(
+    poly1::Vector{Tuple{Float64, Float64}},
+    poly2::Vector{Tuple{Float64, Float64}}
+)::Bool
+    length(poly1) < 3 && return false
+    length(poly2) < 3 && return false
+    try
+        lg_p1 = LibGEOS.Polygon([[[Float64(pt[1]), Float64(pt[2])] for pt in poly1]])
+        lg_p2 = LibGEOS.Polygon([[[Float64(pt[1]), Float64(pt[2])] for pt in poly2]])
+        if !LibGEOS.isValid(lg_p1)
+            lg_p1 = LibGEOS.buffer(lg_p1, 0.0)
+        end
+        if !LibGEOS.isValid(lg_p2)
+            lg_p2 = LibGEOS.buffer(lg_p2, 0.0)
+        end
+        return LibGEOS.intersects(lg_p1, lg_p2)
+    catch
+        return false
+    end
 end

@@ -6,7 +6,7 @@ Provides interactive PlotlyJS dashboards exported as self-contained offline HTML
 using PlotlyJS
 import GeometryBasics
 
-export InteractiveMap, save_html, show_map
+export InteractiveMap, save_html, show_map, open_in_browser
 export plot_tessellation_map, plot_choropleth, plot_tracks_map
 export plot_interactive_corridor_dashboard, plot_posterior_path_ensemble
 export plot_hydrodynamic_dashboard, plot_current_density_map
@@ -36,6 +36,42 @@ function show_map(m::InteractiveMap; output_file=nothing)
         save_html(m, output_file)
     end
     return m
+end
+
+"""
+    open_in_browser(path) -> Bool
+
+Open `path` in the OS default browser and return whether a launcher was invoked.
+
+PlotlyJS 0.18 exports no browser-opening display method (`show_map` was removed, and
+its WebIO display only works inside a notebook), so an interactive Plotly figure
+reaches a screen by writing the self-contained HTML that
+[`save_html`](@ref) produces and handing that path to the platform launcher.
+
+Never throws. The file is already written by the time this runs, and a headless
+session or an unrecognised platform is a normal outcome for a batch job, not an
+error worth failing the run over; the caller reports the returned value instead.
+"""
+function open_in_browser(path::AbstractString)::Bool
+    apath = abspath(path)
+    isfile(apath) || return false
+    cmd = if Sys.iswindows()
+        # `start` is a cmd builtin. The `""` is the window title: without it cmd
+        # takes the first quoted token as the title, so a path containing a space
+        # opens nothing.
+        `cmd /c start "" $apath`
+    elseif Sys.isapple()
+        `open $apath`
+    else
+        Sys.which("xdg-open") === nothing && return false
+        `xdg-open $apath`
+    end
+    try
+        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = false)
+        return true
+    catch
+        return false
+    end
 end
 
 # Internal helpers

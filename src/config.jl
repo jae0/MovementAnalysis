@@ -104,6 +104,22 @@ Base.@kwdef struct MovementAnalysisConfig
     # :exp_difference, :exp_ratio, or :exp_log_ratio.
     rest_advantage_form::Symbol = :difference
 
+    # --- Bathymetry -----------------------------------------------------------
+    # Path to a measured depth grid, or `nothing` for none. Without it the
+    # pipeline has no depth field at all: `load_open_bathymetry` falls back to a
+    # synthetic shelf, and a synthetic shelf cannot decide which units are
+    # navigable, so `depth_range` and `depth_barrier_mode` are inert.
+    #
+    # Accepted, by `load_open_bathymetry`:
+    #   * CSV with longitude/latitude and a depth or elevation column
+    #     (depths and elevations are told apart by the column name).
+    #   * JLD2 holding a `depth` or `elevation` matrix shaped
+    #     (n_lon, n_lat), or a `depths` vector in the same order the window is
+    #     laid out.
+    # A path that fails to parse falls back to synthetic with a warning, so check
+    # the log for "Falling back to synthetic shelf model" before trusting a run.
+    bathymetry_source::Union{Nothing, String} = nothing
+
     # --- Agent forward projection --------------------------------------------
     # Heading persistence for the agent projection, kappa in
     # exp(kappa * cos(bearing - heading)). Zero is the memoryless chain, where a
@@ -168,6 +184,11 @@ Base.@kwdef struct MovementAnalysisConfig
     # full results checkpoint (movement_results_checkpoint.jld2).  Implies
     # render_html=true.  Requires a prior successful run.
     figures_only::Bool = false
+    # When true, build the mesh, open the tessellation map in a browser, and stop.
+    # Phase 2 onward never runs, so this inspects the spatial domain without paying
+    # for MCMC.  Independent of `render_html`: a preview must still appear when
+    # HTML output is turned off.
+    tessellation_only::Bool = false
 end
 
 # =============================================================================
@@ -504,9 +525,20 @@ function create_argparse_settings()::ArgParseSettings
             metavar = "MODE"
         "--depth-range"
             dest_name = "depth_range"
-            help = "Depth range constraint as 'min,max' in metres."
+            help = "Depth range constraint as 'min,max' in metres. Inert " *
+                   "unless a measured bathymetry grid is supplied; see " *
+                   "--bathymetry-source."
             arg_type = String
             metavar = "MIN,MAX"
+        "--bathymetry-source"
+            dest_name = "bathymetry_source"
+            help = "Path to a measured depth grid (CSV with lon/lat and a depth " *
+                   "or elevation column, or JLD2 with a depth/elevation matrix). " *
+                   "Without it the pipeline has no depth field: it falls back to " *
+                   "a synthetic shelf, and depth_range and depth_barrier_mode " *
+                   "have no effect on the domain or on connectivity."
+            arg_type = String
+            metavar = "PATH"
         "--hsi-ood-floor"
             dest_name = "hsi_ood_floor"
             help = "Habitat suitability value below which a unit is out-of-domain."
@@ -662,6 +694,14 @@ function create_argparse_settings()::ArgParseSettings
                    "re-running MCMC, path reconstruction, or diagnostics. " *
                    "Implies --render-html=true. Requires a prior successful run."
             arg_type = Bool
+        "--tessellation-only"
+            dest_name = "tessellation_only"
+            help = "Build the mesh, open the tessellation map in a browser, then " *
+                   "stop. Model fitting, path reconstruction and diagnostics are " *
+                   "skipped, so this inspects the spatial domain without paying " *
+                   "for MCMC. Writes tessellation_polygons.html and opens it. " *
+                   "A switch, so it takes no value."
+            action = :store_true
         "--quiet"
             dest_name = "verbose"
             help = "Suppress progress output. Takes an explicit value: --quiet=true."

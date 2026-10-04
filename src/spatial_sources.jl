@@ -14,6 +14,8 @@ using GeoDatasets
 using GeoInterface
 using GeoJSON
 using JLD2
+using JSON
+using LibGEOS
 
 # =============================================================================
 # Bounding box
@@ -30,9 +32,14 @@ Determine the analysis domain as `(west, south, east, north)` in degrees.
 A configured `bbox` is authoritative and is only validated. When it is absent the
 extent is derived from the supplied coordinates -- the telemetry positions and, if
 available, the spatial-unit polygons -- and padded so the mesh is not clipped
-flush against the outermost detections. When `sppoly_bounds` is provided as
-`(min_lon, min_lat, max_lon, max_lat)`, the southern and south-western bounds are
-delimited so the grid does not expand beyond the survey bounds.
+flush against the outermost detections.
+
+When `sppoly_bounds` is provided as `(min_lon, min_lat, max_lon, max_lat)`, the
+extent becomes the **union** of the padded data extent and those bounds. Union,
+not clamp: the spatial-unit file declares the study domain, so a part of it that
+reaches further out than the telemetry has to be meshed. Taking `max` on the west
+and south edges instead pulled the extent inside the footprint and left the
+footprint's own outer slivers with no cells, which is not recoverable downstream.
 """
 function resolve_bbox(
     configured::Union{Nothing, AbstractVector{<:Real}},
@@ -66,9 +73,10 @@ function resolve_bbox(
     n = maximum(lats) + padding_deg
 
     if sppoly_bounds !== nothing
-        # Delimit south and south-western boundaries by sppoly bounds
-        w = max(w, sppoly_bounds[1])
-        s = max(s, sppoly_bounds[2])
+        w = min(w, sppoly_bounds[1])
+        s = min(s, sppoly_bounds[2])
+        e = max(e, sppoly_bounds[3])
+        n = max(n, sppoly_bounds[4])
     end
 
     # Clamp to the valid geographic range; padding must not run off the globe.
@@ -370,6 +378,18 @@ const LON_NAMES = (:lon, :long, :longitude, :x)
 const LAT_NAMES = (:lat, :latitude, :y)
 const GROUP_NAMES = (:region, :region_id, :id, :ring, :polygon, :part, :feature)
 
+# Columns that hold well-known-text geometry. `wkt_planar` is deliberately absent:
+# those coordinates are in a projected CRS (UTM km), so testing lon/lat against them
+# would answer a different question than the caller asked.
+const WKT_COLUMN_NAMES = (:wkt_geo, :wkt_lonlat, :wkt, :geometry, :geom)
+
+# Variable names that identify a spatial-unit table inside a multi-variable file.
+# A JLD2 file written with named variables loads as a `Dict`, whose iteration order
+# is unspecified, so "the first DataFrame or vector in the file" picks whichever
+# variable happens to come first -- for the shipped `data/sppoly.jld2` that is
+# `wkt_planar`, a vector of WKT *strings*, which is not a list of rings.
+const UNIT_TABLE_NAMES = ("sppoly", "units", "polygons", "features", "regions")
+
 function _coord_column(df::DataFrame, candidates, what::AbstractString)
     syms = Symbol.(propertynames(df))
     for c in candidates
@@ -414,34 +434,313 @@ function _rings_from_table(df::DataFrame)::Vector{Vector{NTuple{2, Float64}}}
     return rings
 end
 
+"""
+    parse_wkt_geometry(wkt) -> LibGEOS.AbstractGeometry
+
+Parse one WKT geometry with LibGEOS/GEOS.
+
+GEOS already does WKT parsing, ring ordering, and validity checking, and it raises
+on malformed input. Re-parsing the text here would buy nothing and would get
+`POLYGON` vs `MULTIPOLYGON` vs `GEOMETRYCOLLECTION` nesting wrong.
+"""
+parse_wkt_geometry(wkt::AbstractString) = LibGEOS.readgeom(String(wkt))
+
+"""
+    _ring_points(ring) -> Vector{Tuple{Float64, Float64}}
+
+Coordinates of one ring as `(lon, lat)` pairs.
+
+`GeoInterface` represents a ring either as a list of `(x, y)` points or as a flat
+interleaved coordinate vector, depending on the backend, so both are accepted
+rather than assuming one.
+"""
+function _ring_points(ring)
+    isempty(ring) && return Tuple{Float64, Float64}[]
+    if first(ring) isa Real
+        return [(Float64(ring[2i - 1]), Float64(ring[2i])) for i in 1:(length(ring) ÷ 2)]
+    end
+    return [(Float64(p[1]), Float64(p[2])) for p in ring]
+end
+
+"""
+    geometry_rings(geom) -> Vector{Vector{NTuple{2, Float64}}}
+
+Flatten a (Multi)Polygon or GeometryCollection into its rings, in lon/lat order,
+via `GeoInterface`. Interior rings are returned alongside exteriors: a caller that
+wants a union does not care about them, and one that wants holes can have them.
+"""
+function geometry_rings(geom)
+    rings = Vector{Vector{NTuple{2, Float64}}}()
+    _collect_rings!(rings, geom)
+    return rings
+end
+
+function _collect_rings!(rings, geom)
+    trait = GeoInterface.geomtrait(geom)
+    if trait isa GeoInterface.PolygonTrait
+        for ring in GeoInterface.coordinates(geom)
+            pts = _ring_points(ring)
+            # A closed ring repeats its first point last, so 3 distinct vertices
+            # is the floor for a polygon.
+            length(pts) >= 4 && push!(rings, pts)
+        end
+    elseif trait isa Union{GeoInterface.MultiPolygonTrait, GeoInterface.GeometryCollectionTrait}
+        for part in GeoInterface.getgeom(geom)
+            _collect_rings!(rings, part)
+        end
+    end
+    return rings
+end
+
+"""
+    dissolve_geometries(geoms) -> LibGEOS.AbstractGeometry
+
+Merge polygon geometries into one, dropping the shared boundaries between
+adjacent parts.
+
+Unioning pairwise rather than accumulating left-deep matters: 707 areal units
+dissolve in ~0.06 s as a balanced tree, against ~707 full recomputations for a
+single accumulator. The result is a single geometry, so a containment test is one
+predicate rather than a scan over parts.
+
+# Arguments
+- `geoms`: nonempty vector of geometries, e.g. one per areal unit.
+"""
+function dissolve_geometries(geoms::AbstractVector)
+    isempty(geoms) && throw(ArgumentError(
+        "dissolve_geometries needs at least one geometry, got none."
+    ))
+    level = collect(LibGEOS.AbstractGeometry, geoms)
+    while length(level) > 1
+        nxt = LibGEOS.AbstractGeometry[]
+        for i in 1:2:length(level)
+            push!(nxt,
+                  i + 1 <= length(level) ? LibGEOS.union(level[i], level[i + 1]) : level[i])
+        end
+        level = nxt
+    end
+    return level[1]
+end
+
+"""
+    geometry_contains(geom, lon, lat) -> Bool
+
+True when the point lies inside `geom`. Boundary points count as inside: a mesh
+unit centroid sitting exactly on a footprint edge belongs to the domain.
+"""
+geometry_contains(geom, lon::Real, lat::Real) =
+    LibGEOS.covers(geom, LibGEOS.Point(Float64(lon), Float64(lat)))
+
+"""
+    geometries_in_domain(geom, centroids_lonlat) -> BitVector
+
+Membership of each `(lon, lat)` centroid in `geom`, or all-`true` when `geom` is
+`nothing` (no footprint configured, so no spatial restriction).
+"""
+function geometries_in_domain(geom, centroids_lonlat)::BitVector
+    geom === nothing && return trues(length(centroids_lonlat))
+    return BitVector([
+        geometry_contains(geom, Float64(c[1]), Float64(c[2])) for c in centroids_lonlat
+    ])
+end
+
+"""
+    _first_present(df, candidates) -> Union{Symbol, Nothing}
+
+First column of `df` whose name appears in `candidates`, or `nothing`.
+"""
+function _first_present(df::DataFrame, candidates)::Union{Symbol, Nothing}
+    syms = Symbol.(propertynames(df))
+    for c in candidates
+        c in syms && return c
+    end
+    return nothing
+end
+
 # -- JLD2 / RData -------------------------------------------------------------
 
-function _rings_from_object(obj, path::AbstractString)
+"""
+    polygon_from_rings(rings) -> LibGEOS.AbstractGeometry
+
+Build a polygon from coordinate rings: the first ring is the exterior, any further
+rings are holes. The inverse of [`geometry_rings`](@ref) for the shapes a
+long-format vertex table produces.
+
+# Notes
+Vertex tables are often unclosed, and GEOS rejects a linear ring whose last point
+is not its first, so rings are closed here rather than requiring every input file
+to pre-close them. Rings with fewer than three distinct vertices are dropped: GEOS
+rejects them too, and one stray degenerate row should not fail the whole domain.
+"""
+function polygon_from_rings(rings)
+    closed = Vector{Vector{Float64}}[]
+    for ring in rings
+        pts = [[Float64(pt[1]), Float64(pt[2])] for pt in ring]
+        isempty(pts) && continue
+        pts[1] == pts[end] || push!(pts, copy(pts[1]))
+        length(pts) >= 4 || continue
+        push!(closed, pts)
+    end
+    isempty(closed) && throw(ArgumentError(
+        "polygon_from_rings found no usable ring; a polygon needs at least three " *
+        "distinct vertices."
+    ))
+    return LibGEOS.Polygon(closed)
+end
+
+"""
+    _geometries_from_unit_table(obj, path) -> Vector{LibGEOS.AbstractGeometry}
+
+Read a spatial-unit table as a list of polygon geometries.
+
+The file shipped as `data/sppoly.jld2` is the reason the WKT branch exists. It is
+an areal-unit definition -- 707 units, each with `wkt_geo` in EPSG:4326 -- stored
+as a `Dict` of named variables rather than as a ring list. It could not be read at
+all before: the reader looked for a vector of rings, found `wkt_planar`, and threw
+`Unsupported vector payload`. The caller in `src/pipeline.jl` caught that and
+carried on with no domain polygon, which is how the rendered domain became the
+whole mesh extent instead of the study footprint.
+
+A table with no geometry column is read as long-format vertices, which
+[`_rings_from_table`](@ref) already understands.
+"""
+function _geometries_from_unit_table(obj, path::AbstractString)
     if obj isa DataFrame
-        return _rings_from_table(obj)
-    elseif obj isa AbstractDict
-        # A JLD2 file written with named variables loads as a Dict; use the sole
-        # DataFrame or ring list it holds.
-        found = nothing
-        for v in values(obj)
-            (v isa DataFrame || v isa AbstractVector) && (found = v; break)
-        end
-        found === nothing && throw(ArgumentError(
-            "No DataFrame or polygon list found in $path; expected region " *
-            "vertices with longitude/latitude columns"
+        wktcol = _first_present(obj, WKT_COLUMN_NAMES)
+        wktcol === nothing || return [parse_wkt_geometry(string(w)) for w in obj[!, wktcol]]
+        return [polygon_from_rings(_rings_from_table(obj))]
+    end
+
+    if obj isa AbstractString
+        return [parse_wkt_geometry(obj)]
+    end
+
+    if obj isa AbstractVector
+        isempty(obj) && return LibGEOS.AbstractGeometry[]
+        all(v -> v isa AbstractString, obj) &&
+            return [parse_wkt_geometry(string(v)) for v in obj]
+        throw(ArgumentError(
+            "Unsupported vector payload in $path; expected a list of WKT geometries."
         ))
-        return _rings_from_object(found, path)
-    elseif obj isa AbstractVector
+    end
+
+    throw(ArgumentError(
+        "Unsupported payload in $path of type $(typeof(obj)); expected a table " *
+        "with a WKT geometry column or long-format lon/lat vertices, a WKT " *
+        "string, or a list of WKT geometries."
+    ))
+end
+
+"""
+    _unit_table_from_object(obj, path) -> Union{Nothing, Any}
+
+Pick the spatial-unit table out of a loaded file. `nothing` when the payload holds
+no table, so the caller can fall back to the long-format vertex reader.
+"""
+function _unit_table_from_object(obj, path::AbstractString)
+    obj isa DataFrame && return obj
+    obj isa AbstractDict || return obj
+    # A JLD2 file written with named variables loads as a Dict, whose iteration
+    # order is unspecified. Prefer a table that is *named* like a spatial-unit
+    # table over whatever happens to come first.
+    for name in UNIT_TABLE_NAMES
+        haskey(obj, name) && return obj[name]
+    end
+    for v in values(obj)
+        v isa DataFrame && return v
+    end
+    return nothing
+end
+
+function _rings_from_unit_table(obj, path::AbstractString)
+    if obj isa DataFrame
+        wktcol = _first_present(obj, WKT_COLUMN_NAMES)
+        wktcol === nothing || return reduce(
+            vcat, geometry_rings(parse_wkt_geometry(string(w))) for w in obj[!, wktcol];
+            init = Vector{Vector{NTuple{2, Float64}}}(),
+        )
+        return _rings_from_table(obj)
+    end
+
+    if obj isa AbstractString
+        return geometry_rings(parse_wkt_geometry(obj))
+    end
+
+    if obj isa AbstractVector
         isempty(obj) && return Vector{Vector{NTuple{2, Float64}}}[]
+        if all(v -> v isa AbstractString, obj)
+            return reduce(
+                vcat, geometry_rings(parse_wkt_geometry(string(v))) for v in obj;
+                init = Vector{Vector{NTuple{2, Float64}}}(),
+            )
+        end
         all(v -> v isa Union{Tuple, AbstractVector}, obj) || throw(ArgumentError(
-            "Unsupported vector payload in $path; expected a list of polygon rings."
+            "Unsupported vector payload in $path; expected a list of polygon " *
+            "rings, a list of WKT geometries, or a vector of coordinates."
         ))
         return [Vector{NTuple{2, Float64}}(_as_ring(r)) for r in obj]
     end
+
+    if hasproperty(obj, :polygons)
+        throw(ArgumentError(
+            "$path exposes unit polygons in a projected CRS, so they cannot be " *
+            "tested against lon/lat. Supply the unit footprints as WKT in " *
+            "EPSG:4326 (a `wkt_geo` column or field) instead."
+        ))
+    end
+
     throw(ArgumentError(
         "Unsupported payload in $path of type $(typeof(obj)); expected a DataFrame " *
-        "in long format, or a list of polygon rings."
+        "in long format or with a WKT geometry column, a WKT string, or a list of " *
+        "polygon rings."
     ))
+end
+
+function _rings_from_object(obj, path::AbstractString)
+    table = _unit_table_from_object(obj, path)
+    table === nothing && throw(ArgumentError(
+        "No DataFrame or polygon list found in $path; expected region " *
+        "vertices with longitude/latitude columns"
+    ))
+    return _rings_from_unit_table(table, path)
+end
+
+"""
+    read_domain_polygon(path) -> Union{Nothing, LibGEOS.AbstractGeometry}
+
+Read a domain footprint as a single dissolved geometry, or `nothing` when `path`
+is absent or unreadable.
+
+Used by the pipeline to decide which mesh units are inside the study area. The
+units are dissolved first so that one `covers` call per unit answers "inside any
+part", which is both faster and better defined than testing each part: a centroid
+in the gap between two adjacent areal units is inside the domain, and GEOS
+resolves that boundary case.
+"""
+function read_domain_polygon(path::Union{Nothing, AbstractString})
+    isnothing(path) && return nothing
+    isfile(path) || throw(ArgumentError("Domain polygon file does not exist: $path"))
+
+    ext = lowercase(splitext(path)[2])
+    obj = if ext == ".jld2"
+        JLD2.load(path)
+    elseif ext in (".rda", ".rdata", ".rds")
+        _read_rdata(path)
+    else
+        throw(ArgumentError(
+            "Unsupported domain polygon format \"$ext\"; expected .jld2, .rda, " *
+            ".rdata or .rds."
+        ))
+    end
+
+    table = _unit_table_from_object(obj, path)
+    table === nothing && throw(ArgumentError(
+        "No spatial-unit table found in $path; expected a table with WKT " *
+        "footprints (a `wkt_geo` column) or long-format lon/lat vertices."
+    ))
+    geoms = _geometries_from_unit_table(table, path)
+    isempty(geoms) && throw(ArgumentError("$path contains no polygon geometry."))
+    return dissolve_geometries(geoms)
 end
 
 function _as_ring(r)
@@ -469,7 +768,7 @@ end
 
 function _rings_from_shapefile(path::AbstractString)
     handle = Shapefile.Handle(path)
-    rings = Vector{Vector{NTuple{2, Float64}}}[]
+    rings = Vector{NTuple{2, Float64}}[]
     for shp in handle.shapes
         geom = GeoInterface.geometry(shp)
         coords = GeoInterface.coordinates(geom)
@@ -481,7 +780,11 @@ function _rings_from_shapefile(path::AbstractString)
 end
 
 function _rings_from_geojson(path::AbstractString)
-    return _collect_geojson(JSON.parsefile(path), Vector{Vector{NTuple{2, Float64}}}[])
+    # `Vector{NTuple{2, Float64}}[]` is an *empty* vector whose elements are rings.
+    # The extra nesting here (`Vector{Vector{NTuple{2, Float64}}}[]`) declares rings
+    # to be lists of rings, so every `push!` of a single ring then failed to convert.
+    # This path had never run: it is reached only by a `.geojson` polygon file.
+    return _collect_geojson(JSON.parsefile(path), Vector{NTuple{2, Float64}}[])
 end
 
 function _collect_geojson(node, rings)

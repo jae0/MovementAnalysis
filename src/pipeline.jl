@@ -502,6 +502,256 @@ function _is_graph_reachable(
 end
 
 """
+    reconnect_severed_components(keep, W, centroids; max_bridge_cells = 64) -> (keep, n_link, n_unlinked)
+
+Re-add the fewest possible units needed to make the retained set a single connected
+body, and report what could not be connected.
+
+# Why this exists
+Pruning the mesh to a footprint can leave it in pieces. The domain filter keeps the
+footprint and the units holding observation endpoints; everything between them may
+be dropped, so a lobe of the domain joined to the rest only through pruned cells
+comes away as its own component. The mark-recapture likelihood then conditions on a
+transition that cannot happen, and the dashboard draws islands of ocean.
+
+On the snow crab dataset that left 30 components around a 1,381-unit main body,
+including a 39-unit lobe *inside* the declared footprint whose nearest retained
+neighbour was two cells away.
+
+# Method
+Bridge through the lattice rather than inventing edges. Cost is 0 for a unit already
+retained and 1 for one that would have to come back, so a 0-1 BFS from the largest
+component returns the cheapest set of cells that reattaches each stranded component.
+The cells on that path are added to `keep`; the hexagon adjacency in `W` then carries
+the new connections with no synthetic edges and no invented distances.
+
+`max_bridge_cells` bounds the cost. A component further away than that is reported
+as unlinked rather than bridged through a long ribbon of re-added cells, which would
+silently enlarge the domain by hundreds of units to reach one observation.
+
+# Arguments
+- `keep`: boolean vector over mesh units; the units currently retained.
+- `W`: marine adjacency, the same graph the likelihood will use.
+- `centroids`: `(lon, lat)` per unit, used only to break ties deterministically.
+- `max_bridge_cells`: most cells that may be re-added to reattach one component.
+
+# Returns
+`(keep, n_link, n_unlinked)`: the amended mask, the number of units added, and the
+number of stranded units that stayed stranded.
+"""
+function reconnect_severed_components(
+    keep::AbstractVector{Bool},
+    W::AbstractMatrix{<:Real},
+    centroids::AbstractVector;
+    max_bridge_cells::Int = 64
+)::Tuple{BitVector, Int, Int}
+    n = length(keep)
+    keep = BitVector(keep)
+    isempty(keep) && return (keep, 0, 0)
+
+    # Adjacency lists, taken from `W` so the bridge uses the graph the model uses.
+    nbrs = [Int[] for _ in 1:n]
+    rows, cols = findnz(sparse(W))
+    for (r, c) in zip(rows, cols)
+        push!(nbrs[r], Int(c))
+    end
+
+    retained = findall(keep)
+    n_link = 0
+    n_unlinked = 0
+
+    # Repeat: each pass attaches whatever a single 0-1 BFS can reach within budget.
+    for _ in 1:(n + 1)
+        comp = _connected_components(keep, nbrs)
+        sizes = [length(c) for c in comp]
+        isempty(sizes) && break
+        main_k = argmax(sizes)
+        main_comp = comp[main_k]
+
+        # 0-1 BFS out of the main component over the whole lattice.
+        dist = fill(typemax(Int), n)
+        prev = zeros(Int, n)
+        q = Int[]
+        for u in main_comp
+            dist[u] = 0
+            push!(q, u)
+        end
+        head = 1
+        while head <= length(q)
+            u = q[head]; head += 1
+            du = dist[u]
+            for v in nbrs[u]
+                c = keep[v] ? 0 : 1
+                if du + c < dist[v]
+                    dist[v] = du + c
+                    prev[v] = u
+                    push!(q, v)
+                end
+            end
+        end
+
+        progressed = false
+        # Recomputed per pass and overwritten, not accumulated: a component that
+        # stays stranded is seen on every iteration, and summing those sightings
+        # reported the same units once per pass.
+        pass_unlinked = 0
+        for k in eachindex(comp)
+            k == main_k && continue
+            # Cheapest cell on a path from this component back to the main body.
+            best_u = 0; best_d = typemax(Int)
+            for u in comp[k]
+                (keep[u] && dist[u] < best_d) || continue
+                best_d = dist[u]; best_u = u
+            end
+            if best_u == 0 || best_d > max_bridge_cells
+                pass_unlinked += length(comp[k])
+                continue
+            end
+            # Walk `prev` back to the main component, re-adding pruned cells.
+            v = best_u
+            while v != 0 && dist[v] > 0
+                if !keep[v]
+                    keep[v] = true
+                    n_link += 1
+                end
+                v = prev[v]
+            end
+            progressed = true
+        end
+        n_unlinked = pass_unlinked
+        progressed || break
+    end
+
+    return (keep, n_link, n_unlinked)
+end
+
+"""
+    _connected_components(keep, nbrs) -> Vector{Vector{Int}}
+
+Connected components of the subgraph induced on `keep`, using adjacency list `nbrs`.
+Only edges between two retained units count, so a component is genuinely connected
+rather than connected through cells that are about to be removed.
+"""
+function _connected_components(
+    keep::AbstractVector{Bool},
+    nbrs::AbstractVector{<:AbstractVector{<:Integer}}
+)::Vector{Vector{Int}}
+    n = length(keep)
+    seen = falses(n)
+    comps = Vector{Vector{Int}}()
+    for i in 1:n
+        # Skip unless this unit is retained and not yet claimed. Written as a skip
+        # on the negation, because `cond && continue` skips only when `cond` holds:
+        # the inverse guard starts components at pruned cells and walks out of them.
+        (!keep[i] || seen[i]) && continue
+        comp = Int[]
+        seen[i] = true
+        q = [i]
+        head = 1
+        while head <= length(q)
+            u = q[head]; head += 1
+            push!(comp, u)
+            for v in nbrs[u]
+                (keep[v] && !seen[v]) || continue
+                seen[v] = true
+                push!(q, v)
+            end
+        end
+        push!(comps, comp)
+    end
+    return comps
+end
+
+"""
+    _snap_pruned_endpoints!(obs_df, keep, centroids) -> (n_rel, n_rec)
+
+Repoint every observation endpoint that `keep` marks for deletion at the nearest
+**retained** unit, in place. Returns the number of release and recapture endpoints
+moved.
+
+# Why this exists
+The mesh prune reindexes observations with `old_to_new[r]`, where `old_to_new` is
+`zeros(Int, n_spatial)` and only retained units get a nonzero entry. Nothing
+checked the endpoint against the prune mask first, so an observation sitting on a
+unit that the prune deleted was silently reindexed to **0**.
+
+The units that reach that state are the ones the endpoint remap earlier in Phase 1c
+does not cover. That remap flags endpoints with `out_bv`, which in the default
+`:hsi_only` mode is the land-only barrier, whereas the prune mask is
+`.!out_of_depth .& .!land_mask` — strictly stronger. An endpoint on an
+out-of-depth *marine* unit therefore passed the remap unchanged, failed the
+"observation points landing on them" protection in the mask pass (which requires
+`keep_mesh_mask`), and was pruned.
+
+Downstream this surfaced far from its cause, as a `KeyError: key (0, 729) not found`
+out of `kstep_transition_cache`: the cache skips release indices outside
+`1:S`, so `(0, 729)` was never built, and the likelihood then indexed it anyway.
+
+Snapping to the nearest retained unit rather than dropping the observation matches
+what Phase 1c already does for out-of-range endpoints, and displaces an endpoint by
+at most one cell. Dropping instead would change the fitted dataset without being
+counted anywhere.
+
+# Arguments
+- `obs_df`: observation table with `:release` and `:recapture` columns.
+- `keep`: boolean vector over the *current* mesh units; `false` means "being pruned".
+- `centroids`: `(lon, lat)` pairs, one per current mesh unit, or `nothing` when the
+  mesh carries no centroids. Without them no snapping is possible and the endpoints
+  are left alone for the caller's range check to reject.
+
+# Notes
+Endpoint indices are assumed to be in `1:length(keep)`, which
+[`_is_graph_reachable`](@ref) guarantees for every observation that survives the
+Phase 1c reachability filter: it returns `false` for an out-of-range endpoint, and
+those rows are dropped before the prune runs. An out-of-range endpoint here is a
+caller error and is reported rather than clamped.
+"""
+function _snap_pruned_endpoints!(
+    obs_df    ::DataFrame,
+    keep      ::AbstractVector{Bool},
+    centroids ::Union{Nothing, AbstractVector}
+)::Tuple{Int, Int}
+    (isempty(keep) || centroids === nothing || nrow(obs_df) == 0) && return (0, 0)
+
+    retained = findall(keep)
+    isempty(retained) && error(
+        "Mesh prune retained no units, so observation endpoints cannot be " *
+        "reindexed. Widen depth_range or supply a spatial-domain polygon."
+    )
+    length(centroids) == length(keep) || error(
+        "Endpoint snapping needs one centroid per mesh unit: got " *
+        "$(length(centroids)) centroids for $(length(keep)) units."
+    )
+    retained_cents = centroids[retained]
+
+    n_rel = 0
+    n_rec = 0
+    for (col, is_rel) in ((:release, true), (:recapture, false))
+        hasproperty(obs_df, col) || error(
+            "Endpoint snapping requires a `$(col)` column on the observation table."
+        )
+        units = obs_df[!, col]
+        for (i, u) in pairs(units)
+            (1 <= u <= length(keep)) || error(
+                "Observation row $i has $(col) = $u, outside 1:$(length(keep)). " *
+                "Endpoint indices must be valid mesh units before the prune reindex."
+            )
+        end
+        stale_idx = findall(u -> !keep[u], units)
+        isempty(stale_idx) && continue
+        lons = [Float64(centroids[units[i]][1]) for i in stale_idx]
+        lats = [Float64(centroids[units[i]][2]) for i in stale_idx]
+        obs_df[stale_idx, col] = retained[map_to_units(lons, lats, retained_cents)]
+        if is_rel
+            n_rel = length(stale_idx)
+        else
+            n_rec = length(stale_idx)
+        end
+    end
+    return (n_rel, n_rec)
+end
+
+"""
     _resolve_centroids(mesh, n_spatial)
         -> (cents_planar, cents_lonlat, cents_mesh)
 
@@ -594,9 +844,15 @@ end
     end
     sppoly_bounds = extract_sppoly_bounds(sppoly_path)
     if sppoly_bounds !== nothing && verbose
+        # Reported as a union, because that is what it now is. This line used to
+        # say "Delimiting southern/south-western domain", describing a clamp that
+        # shrank the mesh *inside* the footprint and left the footprint's own
+        # western and southern slivers unmeshed. It was the reason the rendered
+        # domain did not cover the spatial-unit file.
         println(
-            "  Delimiting southern/south-western domain with sppoly bounds: " *
-            "lon >= $(round(sppoly_bounds[1]; digits=4)), lat >= $(round(sppoly_bounds[2]; digits=4))"
+            "  Mesh extent unioned with sppoly bounds: " *
+            "lon $(round(sppoly_bounds[1]; digits=4))..$(round(sppoly_bounds[3]; digits=4)), " *
+            "lat $(round(sppoly_bounds[2]; digits=4))..$(round(sppoly_bounds[4]; digits=4))"
         )
     end
 
@@ -610,20 +866,31 @@ end
         sppoly_bounds = sppoly_bounds
     )
     verbose && println(
-        "  Domain bounding box (W, S, E, N) = " *
+        "  Mesh bounding box (W, S, E, N) = " *
         "($(domain_bbox[1]), $(domain_bbox[2]), $(domain_bbox[3]), $(domain_bbox[4]))"
     )
 
-    # Land identification is configuration-driven: a global land/sea raster,
-    # user polygons, bathymetry alone, or nothing.
-    land_polys = if params.land_source === :polygons
-        isempty(params.land_polygon_files) && error(
-            "land_source = :polygons requires land_polygon_files"
-        )
-        reduce(vcat, read_polygon_file.(params.land_polygon_files))
-    else
+    # User-supplied land polygons are *additional* to whatever `land_source`
+    # provides, not a replacement for it.
+    #
+    # They used to be read only when `land_source === :polygons`, in which case the
+    # global raster was skipped entirely. That made it impossible to say "this
+    # coastline is right, and this one feature is also land": choosing the polygons
+    # meant opting out of every continent and island on the map. `land_source`
+    # selects the base mask; the polygon files add to it.
+    land_polys = if isempty(params.land_polygon_files)
         nothing
+    else
+        rings = reduce(vcat, read_polygon_file.(params.land_polygon_files))
+        params.verbose && println(
+            "  Land polygons: $(length(params.land_polygon_files)) file(s), " *
+            "$(length(rings)) ring(s) added to the land mask."
+        )
+        rings
     end
+    params.land_source === :polygons && land_polys === nothing && error(
+        "land_source = :polygons requires land_polygon_files"
+    )
     survey_df = if !isnothing(params.surveydata_file)
     load_survey_data(params.surveydata_file; verbose = verbose)
 elseif hasproperty(data, :survey_df)
@@ -698,9 +965,15 @@ end
 
 
 
+        # `source` was unreachable from configuration, so a measured depth grid
+        # could not be used even if one existed on disk. It is passed through
+        # untouched otherwise: with nothing configured the loader fabricates a
+        # shelf, and `is_synthetic` downstream is what disables depth rules.
         bathy = load_open_bathymetry(;
-            lon_range      = (min_lon - 0.2, max_lon + 0.2),
-            lat_range      = (min_lat - 0.2, max_lat + 0.2),
+            source        = params.bathymetry_source === nothing ?
+                                :synthetic : params.bathymetry_source,
+            lon_range     = (min_lon - 0.2, max_lon + 0.2),
+            lat_range     = (min_lat - 0.2, max_lat + 0.2),
             resolution_deg = 0.02
         )
         hydro = extract_hydrodynamic_dataset(bathy;
@@ -855,16 +1128,55 @@ end
     if parsed_depth_range !== nothing
         min_d, max_d = parsed_depth_range
         verbose && println(
-            "\n[Phase 1c] Enforcing depth range: [$min_d, $max_d] m..."
+            "\n[Phase 1c] Depth range requested: [$min_d, $max_d] m"
         )
         depths_vec   = _extract_domain_depths(mesh, data, resharded_depths)
-        out_of_depth = BitVector([d < min_d || d > max_d for d in depths_vec])
+
+        # A synthetic bathymetry must not decide which units exist.
+        #
+        # `load_open_bathymetry` defaults to `source = :synthetic` and no caller
+        # ever overrides it, so the depth field driving `depth_range` is fabricated
+        # -- and its geometry is a generic shelf whose slope runs southwest-to-
+        # northeast in normalised window coordinates, which puts its "abyss" over
+        # the southwest. On the snow crab window that fabricates >350 m water across
+        # the southwestern half of the `sppoly` footprint, so applying the depth
+        # window to it deleted the footprint's southern and western lobes: the
+        # rendered domain fell to ~12% of the footprint, 0% below 45.5 N, while
+        # looking like a tessellation bug.
+        #
+        # A fabricated field cannot support a spatial restriction, so when it is in
+        # use the depth window does not prune. The domain is then footprint and land,
+        # which is the best-supported answer available. Reported, not silent.
+        synthetic_depths = hasproperty(bathy, :is_synthetic) && bathy.is_synthetic
+        if synthetic_depths
+            out_of_depth = falses(length(depths_vec))
+            @warn """
+                  Bathymetry is SYNTHETIC (load_open_bathymetry defaulted to \
+                  source=:synthetic), so depth is not used to restrict the spatial \
+                  domain or to sever connectivity: the domain is the configured \
+                  footprint minus land, and depth_barrier_mode has no effect. \
+                  Supply a measured depth grid to restrict by depth.
+                  """ maxlog = 1
+            verbose && println(
+                "  Depth window NOT applied: bathymetry is synthetic, not measured."
+            )
+        else
+            out_of_depth = BitVector([d < min_d || d > max_d for d in depths_vec])
+        end
 
         if verbose
             n_allowed = count(!, out_of_depth)
-            println(
-                "  Units in range : $n_allowed / $(length(depths_vec))"
-            )
+            if synthetic_depths
+                # Not "all units in range": no unit was tested. Printing a pass
+                # count here read as though the depth window had been applied.
+                println(
+                    "  Depth window not evaluated: no measured bathymetry."
+                )
+            else
+                println(
+                    "  Units in depth range : $n_allowed / $(length(depths_vec))"
+                )
+            end
         end
 
         # depth_barrier_mode controls how out-of-depth marine nodes are treated:
@@ -1040,53 +1352,80 @@ end
         # so that downstream network operations and PlotlyJS dashboards do not retain
         # an oversized, empty rectangular domain.
         keep_mesh_mask = .!out_of_depth .& .!land_mask
-        
-        sppoly_polys = nothing
-        try
-            if params.sppoly_file !== nothing && isfile(params.sppoly_file)
-                sppoly_polys = read_polygon_file(params.sppoly_file)
-            end
-        catch e
-        end
 
         cents_tmp = hasproperty(mesh, :centroids_lonlat) ?
             mesh.centroids_lonlat : mesh.centroids
 
-        final_mask = falses(n_spatial)
-        for i in eachindex(cents_tmp)
-            keep_mesh_mask[i] || continue
-            
-            lon_i = Float64(cents_tmp[i][1])
-            lat_i = Float64(cents_tmp[i][2])
-            
-            # 1. Intersects with user provided polygons
-            if sppoly_polys !== nothing && point_in_polygon(lon_i, lat_i, sppoly_polys)
-                final_mask[i] = true
-                continue
-            end
-            
-            # 2. North and west of the SGSL shallow/deep intersection
-            # (Roughly bounded by the Laurentian channel to the East and land to South/East)
-            if lon_i < -59.0 && lat_i < 50.0 && lat_i > 45.0
-                final_mask[i] = true
-                continue
-            end
-            
-            # Fallback if no polygon provided
-            if sppoly_polys === nothing
-                final_mask[i] = true
-            end
+        # Domain footprint. When a spatial-unit file is configured, its areal
+        # units *are* the study domain and nothing outside them is retained.
+        #
+        # The read used to be wrapped in `try ... catch e; end` with an empty body,
+        # so a file this reader could not interpret left `domain_geom === nothing`
+        # and every unit below was kept. The failure mode was invisible in the log
+        # and the rendered domain became the whole mesh extent. A configured file
+        # that cannot be read is an error, like every other configured input here.
+        domain_geom = read_domain_polygon(params.sppoly_file)
+        in_domain = geometries_in_domain(domain_geom, cents_tmp)
+
+        # Retain a unit when it is in the depth window, is marine, and lies inside
+        # the footprint. With no footprint configured there is no spatial
+        # restriction and the mesh extent is the domain.
+        #
+        # There is deliberately no geographic fallback box here. The domain is
+        # whatever the configured footprint says it is; inventing a lat/lon
+        # rectangle for one study area inside general code made the domain depend
+        # on a constant that no test could see and no other dataset could override.
+        final_mask = keep_mesh_mask .& in_domain
+
+        n_outside_domain = count(keep_mesh_mask .& .!in_domain)
+        if domain_geom === nothing
+            verbose && println(
+                "  No domain footprint configured; the mesh extent is the domain."
+            )
+        else
+            verbose && println(
+                "  Domain footprint: $(count(in_domain)) / $n_spatial units inside, " *
+                "$n_outside_domain in-depth marine units outside."
+            )
         end
 
-        # 3. Add tessellations with observation points landing on them
+        # Add the units that observation endpoints actually occupy, wherever they
+        # are. The domain is the union of the declared footprint and the data, not
+        # the footprint alone: an animal released in the Southern Gulf or the Bay of
+        # Fundy outside the mapped strata still has to be represented, and on this
+        # dataset 2,827 of 5,064 events have at least one endpoint outside the
+        # footprint. Dropping them would discard most of the mark-recapture data;
+        # relocating them would invent a release position, which the endpoint snap
+        # below was doing for more than half of all endpoints.
+        #
+        # The addition is bounded by the depth and land tests, so it cannot bring
+        # back shallow or terrestrial cells, and the count is reported so the grown
+        # domain is visible rather than implied.
+        n_rel_out = 0
+        n_rec_out = 0
+        added = falses(n_spatial)
         for r in eachrow(obs_df)
             if 1 <= r.release <= n_spatial && keep_mesh_mask[r.release]
+                if !in_domain[r.release]
+                    added[r.release] = true
+                    n_rel_out += 1
+                end
                 final_mask[r.release] = true
             end
             if 1 <= r.recapture <= n_spatial && keep_mesh_mask[r.recapture]
+                if !in_domain[r.recapture]
+                    added[r.recapture] = true
+                    n_rec_out += 1
+                end
                 final_mask[r.recapture] = true
             end
         end
+
+        (n_rel_out + n_rec_out) > 0 && verbose && println(
+            "  Extended domain by $(count(added)) units holding observation " *
+            "endpoints outside the footprint " *
+            "($n_rel_out release / $n_rec_out recapture endpoints)."
+        )
 
         keep_mesh_mask .= final_mask
 
@@ -1096,6 +1435,36 @@ end
                 "  Pruning $n_pruned out-of-depth/out-of-bounds units from domain " *
                 "($(count(keep_mesh_mask)) units retained)..."
             )
+
+            # A retained set that falls into pieces is a filter artefact, not a
+            # result. Reconnect before anything is indexed, so every retained unit
+            # is reachable from the main body of the domain.
+            keep_mesh_mask, n_link, n_unlinked =
+                reconnect_severed_components(keep_mesh_mask, W, cents_tmp)
+            if verbose && (n_link + n_unlinked) > 0
+                println(
+                    "  Reconnected the pruned domain: $n_link unit(s) added as " *
+                    "bridges, $n_unlinked unit(s) unreachable through marine " *
+                    "neighbours even with bridging."
+                )
+            end
+
+            # Repoint endpoints the prune is about to delete at the nearest retained
+            # unit, before the reindex below. The "observation points landing on
+            # them" pass above only protects an endpoint that already satisfies
+            # `keep_mesh_mask`, so an endpoint on a pruned unit used to reach
+            # `old_to_new` unchanged -- and `old_to_new` maps it to 0. See
+            # `_snap_pruned_endpoints!`.
+            n_snap_rel, n_snap_rec = _snap_pruned_endpoints!(
+                obs_df, keep_mesh_mask, cents_tmp
+            )
+            if verbose && (n_snap_rel + n_snap_rec) > 0
+                println(
+                    "  Snapped $n_snap_rel release / $n_snap_rec recapture " *
+                    "endpoints off pruned units to the nearest retained unit."
+                )
+            end
+
             old_to_new = zeros(Int, n_spatial)
             new_idx = 0
             for i in 1:n_spatial
@@ -1131,6 +1500,22 @@ end
             obs_df = copy(obs_df)
             obs_df.release = [old_to_new[r] for r in obs_df.release]
             obs_df.recapture = [old_to_new[r] for r in obs_df.recapture]
+
+            # Checked, not assumed. `old_to_new` is 0 for every pruned unit, so an
+            # endpoint that escaped the snap above would surface much later as
+            # `KeyError: key (0, k) not found` from the k-step transition cache in
+            # Phase 2, with nothing pointing back at this line.
+            new_n = count(keep_mesh_mask)
+            bad = [
+                (i, c, obs_df[i, c]) for c in (:release, :recapture)
+                for i in 1:nrow(obs_df) if !(1 <= obs_df[i, c] <= new_n)
+            ]
+            isempty(bad) || error(
+                "Mesh reindex left $(length(bad)) observation endpoints outside " *
+                "1:$new_n (first: row $(bad[1][1]) $(bad[1][2]) = $(bad[1][3])). " *
+                "Endpoint snapping before the prune should have made this " *
+                "impossible; it is a bug in this reindex, not in the input data."
+            )
 
             if !isnothing(survey_df) && hasproperty(survey_df, :s_idx)
                 survey_df = copy(survey_df)
@@ -1182,6 +1567,95 @@ end
         resharded_hydro    = resharded_hydro,
         resharded_depths   = resharded_depths,
         parsed_depth_range = parsed_depth_range,
+    )
+end
+
+"""
+    tessellation_preview(loaded, params) -> String
+
+Render the tessellated spatial domain, open it in a browser, and return the file
+path.
+
+Backs `--tessellation-only`. Deliberately independent of `params.render_html`:
+the point of the flag is to look at the mesh, so gating it on whether HTML output
+is enabled would let `--render-html=false --tessellation-only` quietly show
+nothing at all.
+
+PlotlyJS 0.18 has no browser-opening display method, so the figure is written as
+the same self-contained HTML every other dashboard uses and the platform launcher
+opens it. When no launcher is available (headless session, unknown platform) the
+file is still written and the path is returned, so the map is never lost.
+
+# Arguments
+- `loaded`: output of [`load_movement_data`](@ref).
+- `params`: configuration struct. Uses `output_dir`, `species_name`, `dark_mode`
+  and `verbose`.
+
+# Returns
+Path to the rendered map.
+"""
+function tessellation_preview(loaded, params)::String
+    mkpath(params.output_dir)
+    tess_path = joinpath(params.output_dir, "tessellation_polygons.html")
+    tess_map = plot_tessellation_map(
+        loaded.mesh;
+        title = "$(params.species_name) Tessellated Spatial Domain",
+        depth = loaded.resharded_depths,
+        hsi = loaded.hsi_vec,
+        dark_mode = params.dark_mode,
+        output_file = tess_path,
+    )
+    show_map(tess_map; output_file = tess_path)
+
+    opened = open_in_browser(tess_path)
+    if params.verbose
+        println("  Tessellation: $(loaded.mesh.n_units) units")
+        println("  Grid polygon map: $tess_path")
+        println(opened ? "  Opened in the default browser." :
+                        "  No browser launcher available; open the file above.")
+    end
+    return abspath(tess_path)
+end
+
+"""
+    _tessellation_only_result(loaded, tess_path, params) -> NamedTuple
+
+Build the truncated result returned by a `--tessellation-only` run.
+
+Same keys as a full [`run_movement_analysis`](@ref) return, with `nothing` for
+everything that requires a fitted kernel. A caller reading `P_kernel` or `paths`
+from this value is asking for something the run was told not to compute; a typed
+key set makes that explicit instead of surfacing as a missing field.
+
+# Arguments
+- `loaded`: output of [`load_movement_data`](@ref).
+- `tess_path`: path to the rendered map.
+- `params`: configuration struct. Unused; kept so the call site reads uniformly
+  with the other exits.
+"""
+function _tessellation_only_result(loaded, tess_path, params)::NamedTuple
+    return (
+        data               = loaded.data,
+        mesh               = loaded.mesh,
+        models             = nothing,
+        chains             = nothing,
+        P_kernel           = nothing,
+        paths              = nothing,
+        corridors          = nothing,
+        stochastic_paths   = nothing,
+        domain_bottlenecks = nothing,
+        circuit            = nothing,
+        validation_analyses = nothing,
+        agent_trajectories = nothing,
+        agent_space_use    = nothing,
+        movement_stats     = nothing,
+        phenology          = nothing,
+        trait_models       = nothing,
+        parameters         = nothing,
+        depth_range        = loaded.parsed_depth_range,
+        panel_skips       = copy(PANEL_SKIPS),
+        tessellation_only  = true,
+        tessellation_path  = tess_path,
     )
 end
 
@@ -1366,6 +1840,11 @@ function fit_movement_models(loaded, params)::NamedTuple
         recaptures = Int.(obs_df.recapture)
         ks         = Int.(round.(obs_df.k))
         tagids = obs_df.tagid
+        # `size(loaded.W, 1)` is the support of every `Categorical` the likelihood
+        # builds, so it is the exact precondition. A stale index here means the mesh
+        # prune reindexed an observation onto a deleted unit; named here rather than
+        # as a bare KeyError from the k-step cache inside the model.
+        validate_mark_recapture_indices(releases, recaptures, size(loaded.W, 1))
         m_tel = pure_telemetry_turing_model(
             releases, recaptures, ks,
             loaded.W, loaded.hsi_vec, loaded.land_mask
@@ -1397,6 +1876,7 @@ function fit_movement_models(loaded, params)::NamedTuple
         depths     = hasproperty(survey_df, :depth) ?
                      Float64.(survey_df.depth) : zeros(Float64, length(counts))
 
+        validate_mark_recapture_indices(releases, recaptures, size(loaded.W, 1))
         m_joint = joint_survey_telemetry_turing_model(
             counts, depths,
             releases, recaptures, ks,
@@ -3542,6 +4022,10 @@ are called in sequence:
 `NamedTuple` with fields: `data`, `models`, `chains`, `P_kernel`,
 `paths`, `corridors`, `stochastic_paths`, `domain_bottlenecks`,
 `circuit`, `parameters`, `depth_range`.
+
+With `params.tessellation_only` the run stops after the mesh: the tessellation map
+is written and opened, and the return has `nothing` for every fitted quantity plus
+`tessellation_only = true` and `tessellation_path`.
 """
 function run_movement_analysis(
     params = movement_parameters_default()
@@ -3617,9 +4101,31 @@ function run_movement_analysis(
             println("\n[Checkpoint] Resuming from existing checkpoint: $checkpoint_file")
         end
         data = JLD2.load(checkpoint_file)
+
+        # --tessellation-only is honoured here too; see the note on the load branch.
+        if params.tessellation_only
+            loaded_r = data["loaded"]
+            return _tessellation_only_result(
+                loaded_r, tessellation_preview(loaded_r, params), params,
+            )
+        end
+
         (data["loaded"], data["fitted"], data["kernels"])
     else
         loaded_  = load_movement_data(params)
+
+        # --tessellation-only: the mesh exists, so show it and stop. Placed here
+        # rather than after `kernels` so nothing downstream of fitting runs -- the
+        # checkpoint below, path reconstruction, and the diagnostics all need a
+        # fitted kernel, and Phase 3 errors outright when no chain was produced.
+        #
+        # Honoured on the resume branch too (above). Leaving it ignored whenever a
+        # checkpoint happened to exist would make the flag mean different things on
+        # different runs.
+        params.tessellation_only && return _tessellation_only_result(
+            loaded_, tessellation_preview(loaded_, params), params,
+        )
+
         fitted_  = fit_movement_models(loaded_, params)
         kernels_ = extract_transition_kernels(loaded_, fitted_, params)
         

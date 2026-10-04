@@ -4666,7 +4666,8 @@ marine passages remain fully connected while landmasses act as impenetrable barr
 - `crs`: Coordinate reference system (default local tangent projection).
 - `datum`: Reference ellipsoid datum (default `WGS84Latest`).
 - `sppoly_bounds`: Optional `(min_lon, min_lat, max_lon, max_lat)` bounding coordinates
-  used to delimit southern and south-western domain extents.
+  of the spatial-unit file. The mesh extent becomes the **union** of these and the
+  telemetry extent, so the declared domain is meshed in full on every edge.
 
 # Returns
 - `NamedTuple`:
@@ -4695,8 +4696,20 @@ function construct_full_movement_domain(
     lat_min, lat_max = extrema(lat_vec)
 
     if sppoly_bounds !== nothing
-        lon_min = max(lon_min, sppoly_bounds[1])
-        lat_min = max(lat_min, sppoly_bounds[2])
+        # Union, not clamp. The spatial-unit file declares the study domain, so any
+        # part of it reaching further out than the telemetry still has to be meshed.
+        # This used to take `max` on the west and south edges, which did the opposite:
+        # it pulled the extent *inside* the footprint and left the footprint's own
+        # western and southern slivers with no cells at all. On the snow crab window
+        # the footprint reaches lon -65.59 and lat 42.99 while the telemetry reaches
+        # -65.42 and 43.02, so the clamp silently discarded both.
+        #
+        # Expanding the mesh cannot over-cover the domain: the footprint filter
+        # trims it afterwards, whereas a too-small mesh can never be recovered.
+        lon_min = min(lon_min, sppoly_bounds[1])
+        lat_min = min(lat_min, sppoly_bounds[2])
+        lon_max = max(lon_max, sppoly_bounds[3])
+        lat_max = max(lat_max, sppoly_bounds[4])
     end
 
     center_lon = (lon_min + lon_max) / 2.0

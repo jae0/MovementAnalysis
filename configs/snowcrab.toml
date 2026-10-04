@@ -49,7 +49,13 @@ bbox_padding_deg = 0.25
 land_source = "landmask"
 land_mask_resolution = "l"   # c, l, i, h or f
 land_mask_grid_minutes = 5.0
-land_polygon_files = []
+
+# Added to the raster, not a replacement for it. Sable Island is a 42 km sandbar
+# barely 1.5 km wide, and every bundled GMT raster classifies it as water:
+# probed at 5, 2.5 and 1.25 arc-min it reads water in all three, so no resolution
+# of this mask can resolve it. Its outline comes from OpenStreetMap relation
+# 8178153 (way 300676289, 71 vertices, ODbL).
+land_polygon_files = ["configs/geo/sable_island.geojson"]
 
 # The domain already needs resharded to honour the 5 km cells above.
 reshard_hex = false

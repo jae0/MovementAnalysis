@@ -53,6 +53,7 @@ include("agent_movement.jl")
 export
     # Spatial Mesh & Partitioning Utilities
     build_hex_mesh_planar,
+    build_hex_mesh_clipped,
     prune_mesh,
     resolve_bbox,
     extract_sppoly_bounds,
@@ -63,6 +64,7 @@ export
     extract_hydrodynamic_dataset,
     compute_network_transfer_matrix,
     get_polygon_area,
+    polygons_intersect,
       summarize_sample_matrix,
       reshard_spatial_field,
 
@@ -89,6 +91,7 @@ export
     # Kernel Construction & Transition Probabilities
     movement_alpha_rho,
     kstep_transition_cache,
+    validate_mark_recapture_indices,
     build_sparse_transition_kernel,
     build_persistent_transition_kernel,
     persistent_unit_marginal,
@@ -215,6 +218,11 @@ export
     land_mask_from_global_mask,
     land_mask_from_polygon_files,
     read_polygon_file,
+    read_domain_polygon,
+    geometries_in_domain,
+    geometry_contains,
+    dissolve_geometries,
+    tessellation_preview,
     point_in_ring,
     region_map_from_polygons,
     load_region_polygons,
