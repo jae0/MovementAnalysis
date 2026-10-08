@@ -5,7 +5,7 @@ Standalone Spatial Animal Movement, Trajectory Reconstruction, and Ecological
 Connectivity Analysis Engine. Provides mark-recapture telemetry ingestion,
 stochastic transition kernel estimation, explicit Turing.jl probabilistic
 telemetry calibration, A* least-cost trajectory and corridor routing, electrical
-circuit theory pinchpoint analysis, and interactive PlotlyJS HTML dashboard generation.
+circuit theory pinchpoint analysis, and interactive Leaflet HTML dashboard generation.
 """
 module MovementAnalysis
 
@@ -33,6 +33,7 @@ using FFTW
 
 using JLD2
 using Turing
+using GeoData
 
 # Source modules in logical dependency order
 include("config.jl")
@@ -103,6 +104,8 @@ export
     sanitise_hsi,
     calculate_habitat_suitability,
     build_geodata_habitat_suitability,
+    build_dynamic_geodata_hsi_series,
+    dynamic_astar_least_cost_path,
     construct_stochastic_transition_kernel,
     construct_dynamic_transition_kernels,
     calculate_multistep_transition,
@@ -168,13 +171,31 @@ export
     get_circuit_paths,
     resistance_covariance_matrix,
 
-    # Interactive HTML / PlotlyJS Visualization
+    # Interactive HTML / Leaflet & Plots Visualization
+    LeafletMap,
     InteractiveMap,
     save_html,
     utm_to_lonlat,
     lonlat_to_utm,
+    leaflet_choropleth,
+    leaflet_spatial_graph,
+    leaflet_tessellation_map,
+    leaflet_hsi_map,
+    leaflet_diffusion_map,
+    leaflet_residence_time_map,
+    leaflet_advection_arrows,
+    leaflet_tracks_map,
+    leaflet_spacetime_map,
+    leaflet_movement_dashboard,
+    leaflet_dispersal_kernel,
+    leaflet_step_diagnostics,
+    leaflet_regional_connectivity,
+    leaflet_ad_ratio_distribution,
+    leaflet_hydrodynamic_dashboard,
+    leaflet_posterior_path_ensemble,
+    leaflet_interactive_corridor_dashboard,
+    leaflet_current_density_map,
     plot_choropleth,
-    plot_spatial_map,
     plot_spatial_graph,
     plot_tessellation_map,
     show_map,
@@ -182,9 +203,7 @@ export
     plot_diffusion_map,
     plot_residence_time_map,
     plot_advection_arrows,
-    plot_velocity_field,
     plot_tracks_map,
-    plot_render_paths,
     plot_spacetime_map,
     plot_movement_dashboard,
     plot_interactive_corridor_dashboard,

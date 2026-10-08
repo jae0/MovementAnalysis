@@ -81,7 +81,8 @@ instead of an arbitrary fixed length.
 - `n_agents::Int`: Number of independent synthetic agents.
 - `start_nodes::Vector{Int}`: Release unit for each agent; `length` must equal `n_agents`.
 - `n_steps`: Shared horizon, or a per-agent vector of horizons.
-- `transition_kernel::SparseMatrixCSC`: Row-stochastic pooled kernel.
+- `transition_kernel`: Row-stochastic pooled kernel (SparseMatrixCSC or Matrix), or
+  a Vector of time-varying transition kernels for dynamic seasonal projections.
 - `seed::Int`: Seed for the agent's own RNG, so a run is reproducible.
 - `centroids`: Node coordinates, required when `persistence > 0`.
 - `persistence`: Heading-persistence strength; `0.0` reproduces the memoryless chain.
@@ -102,7 +103,10 @@ function simulate_agent_trajectories(
     n_agents::Int,
     start_nodes::AbstractVector{<:Integer},
     n_steps,
-    transition_kernel::SparseMatrixCSC{Float64, Int};
+    transition_kernel::Union{
+        AbstractMatrix{<:Real},
+        AbstractVector{<:AbstractMatrix{<:Real}}
+    };
     seed::Int = 42,
     centroids = nothing,
     persistence::Real = 0.0,
@@ -125,7 +129,8 @@ function simulate_agent_trajectories(
     all(h -> h >= 0, horizons) ||
         throw(ArgumentError("Every horizon must be non-negative."))
 
-    S = size(transition_kernel, 1)
+    is_dyn = transition_kernel isa AbstractVector{<:AbstractMatrix}
+    S = is_dyn ? size(first(transition_kernel), 1) : size(transition_kernel, 1)
     all(node -> 1 <= node <= S, start_nodes) || throw(ArgumentError(
         "Every start node must be within 1:$S."
     ))
@@ -145,9 +150,12 @@ function simulate_agent_trajectories(
     space = use_persistence && coord_space === :unknown ?
             coordinate_space_of(centroids) : coord_space
 
-    # Row i of the kernel is the distribution over the next unit, so sampling from
-    # column i of the transpose is what walks a single agent forward.
-    kernel_t = sparse(transition_kernel')
+    # Pre-transpose kernels to sample transitions from column i
+    kernel_t_seq = if is_dyn
+        [sparse(K') for K in transition_kernel]
+    else
+        [sparse(transition_kernel')]
+    end
 
     total_records = n_agents + sum(horizons)
     agent_ids = Vector{Int}(undef, total_records)
@@ -164,7 +172,12 @@ function simulate_agent_trajectories(
         idx += 1
     end
 
-    for step in 1:maximum(horizons; init = 0)
+    max_h = maximum(horizons; init = 0)
+    for step in 1:max_h
+        kernel_t = is_dyn ?
+            kernel_t_seq[mod1(step, length(kernel_t_seq))] :
+            kernel_t_seq[1]
+
         for a in agents
             step > a.n_steps && continue
             ptr_range = nzrange(kernel_t, a.pos)
@@ -227,7 +240,7 @@ end
     )
 
 Sample independent synthetic agents from an empirical release set and project each
-one forward under the pooled kernel.
+one forward under the pooled kernel or a time-varying sequence of kernels.
 
 This is the entry point that decouples the number of agents from the number of
 observations. `n_agents` is a free choice: start units are drawn *with
@@ -243,7 +256,7 @@ scale as the data, which a fixed step count does not.
 - `release_nodes`: Pool of release units to sample starts from.
 - `durations`: Pool of observed horizons to sample per-agent horizons from.
 - `n_agents`: Number of independent agents to project.
-- `transition_kernel`: Row-stochastic pooled kernel.
+- `transition_kernel`: Row-stochastic pooled kernel, or Vector of dynamic kernels.
 - `seed`: Seed for sampling starts, horizons, and the trajectories.
 
 # Returns

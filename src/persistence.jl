@@ -671,27 +671,31 @@ end
 """
     build_geodata_habitat_suitability(
         centroids_lonlat::AbstractVector{<:Tuple{Real, Real}};
+        polygons::Union{Nothing, AbstractVector} = nothing,
         lon_range::Tuple{Real, Real},
         lat_range::Tuple{Real, Real},
         depths::Union{Nothing, AbstractVector{<:Real}} = nothing,
         bathymetry_source::Union{Symbol, AbstractString} = :etopo2022,
-        temperature_source::Union{Symbol, AbstractString} = :woa23,
+        temperature_source::Union{Symbol, AbstractString} = :glorys12v1,
         month::Int = 0,
         input_dir::AbstractString = "inputs",
         verbose::Bool = true
     )::Vector{Float64}
 
 Build a real habitat suitability vector for spatial mesh units by querying
-real physical depth and bottom temperature through `GeoData`.
+real physical depth and bottom temperature through `GeoData`. When `polygons`
+are provided, local spatial averages within each polygon boundary are computed
+for both depth and bottom temperature; otherwise centroid point estimates are used.
 
 # Arguments
 - `centroids_lonlat`: Vector of `(lon, lat)` pairs for each spatial unit centroid.
+- `polygons`: Optional vector of polygon vertex lists `[(lon, lat), ...]`. When
+  supplied, sample points (centroid and vertices) within each polygon are averaged.
 - `lon_range`: Longitudinal extent `(min_lon, max_lon)`.
 - `lat_range`: Latitudinal extent `(min_lat, max_lat)`.
-- `depths`: Optional pre-computed depths (m) per centroid. If not provided,
-  interpolated directly from `GeoData` bathymetry.
+- `depths`: Optional pre-computed depths (m) per unit.
 - `bathymetry_source`: Bathymetric provider (`:etopo2022`, `:etopo`, `:erddap`).
-- `temperature_source`: Temperature provider (`:woa23`, `:glorys12v1`).
+- `temperature_source`: Temperature provider (`:glorys12v1`, `:woa23`).
 - `month`: Climatological month (0 = annual climatology).
 - `input_dir`: Cache directory for downloaded datasets.
 - `verbose`: Display progress diagnostics.
@@ -701,11 +705,12 @@ Vector of habitat suitability indices in `[0, 1]` aligned with `centroids_lonlat
 """
 function build_geodata_habitat_suitability(
     centroids_lonlat::AbstractVector{<:Tuple{Real, Real}};
+    polygons::Union{Nothing, AbstractVector} = nothing,
     lon_range::Tuple{Real, Real},
     lat_range::Tuple{Real, Real},
     depths::Union{Nothing, AbstractVector{<:Real}} = nothing,
     bathymetry_source::Union{Symbol, AbstractString} = :etopo2022,
-    temperature_source::Union{Symbol, AbstractString} = :woa23,
+    temperature_source::Union{Symbol, AbstractString} = :glorys12v1,
     month::Int = 0,
     input_dir::AbstractString = "inputs",
     verbose::Bool = true
@@ -713,21 +718,16 @@ function build_geodata_habitat_suitability(
     n_units = length(centroids_lonlat)
     hsi = zeros(Float64, n_units)
 
-    # 1. Obtain bathymetric depth per centroid
-    unit_depths = if depths !== nothing && length(depths) == n_units
-        abs.(Float64.(depths))
-    else
-        verbose && println("Fetching GeoData bathymetry for HSI evaluation...")
-        bathy_ds = GeoData.fetch_erddap_bathymetry(
-            lon_range = lon_range,
-            lat_range = lat_range,
-            verbose = verbose
-        )
-        bathy_itp = GeoData.get_bathymetry_interpolator(bathy_ds)
-        [max(0.0, -bathy_itp(c[1], c[2])) for c in centroids_lonlat]
-    end
+    # 1. Obtain bathymetric interpolator
+    verbose && println("Fetching GeoData bathymetry for HSI evaluation...")
+    bathy_ds = GeoData.fetch_erddap_bathymetry(
+        lon_range = lon_range,
+        lat_range = lat_range,
+        verbose = verbose
+    )
+    bathy_itp = GeoData.get_bathymetry_interpolator(bathy_ds)
 
-    # 2. Obtain bottom temperature per centroid
+    # 2. Obtain bottom temperature interpolator
     temp_src = Symbol(temperature_source)
     verbose && println("Fetching GeoData boundary/hydrographic temperature ($(temp_src))...")
     hydro = GeoData.fetch_boundary_hydrography_geodata(
@@ -739,16 +739,190 @@ function build_geodata_habitat_suitability(
         verbose = verbose
     )
 
-    # 3. Compute HSI per unit centroid using calculate_habitat_suitability
+    has_polys = polygons !== nothing && length(polygons) == n_units
+
+    # 3. Compute HSI per unit by evaluating local spatial averages within the polygon
     for i in 1:n_units
-        lon_i, lat_i = centroids_lonlat[i]
-        z_i = unit_depths[i]
-        # Temperature evaluated at bottom depth z (negative-down coordinate)
-        t_bottom = hydro.T(lon_i, lat_i, -z_i, 0.0)
-        hsi[i] = calculate_habitat_suitability(t_bottom, z_i)
+        lon_c, lat_c = centroids_lonlat[i]
+
+        if has_polys && !isempty(polygons[i])
+            poly_pts = polygons[i]
+            # Form multi-point spatial sample of polygon: centroid plus unique vertices
+            pts = Tuple{Float64, Float64}[(Float64(lon_c), Float64(lat_c))]
+            for pt in poly_pts
+                p_lon, p_lat = Float64(pt[1]), Float64(pt[2])
+                if (p_lon != lon_c || p_lat != lat_c) &&
+                   !any(p -> p[1] == p_lon && p[2] == p_lat, pts)
+                    push!(pts, (p_lon, p_lat))
+                end
+            end
+
+            # Mean polygon depth
+            sample_depths = [max(0.0, -bathy_itp(p[1], p[2])) for p in pts]
+            mean_z = mean(sample_depths)
+
+            # Mean polygon bottom temperature evaluated at local depth
+            sample_temps = [hydro.T(pts[k][1], pts[k][2], -sample_depths[k], 0.0)
+                            for k in 1:length(pts)]
+            mean_t_bottom = mean(sample_temps)
+
+            hsi[i] = calculate_habitat_suitability(mean_t_bottom, mean_z)
+        else
+            z_i = if depths !== nothing && length(depths) == n_units
+                abs(Float64(depths[i]))
+            else
+                max(0.0, -bathy_itp(lon_c, lat_c))
+            end
+            t_bottom = hydro.T(lon_c, lat_c, -z_i, 0.0)
+            hsi[i] = calculate_habitat_suitability(t_bottom, z_i)
+        end
     end
 
     return sanitise_hsi(hsi)
+end
+
+"""
+    build_dynamic_geodata_hsi_series(
+        centroids_lonlat::AbstractVector{<:Tuple{Real, Real}};
+        polygons::Union{Nothing, AbstractVector} = nothing,
+        lon_range::Tuple{Real, Real},
+        lat_range::Tuple{Real, Real},
+        months::AbstractVector{Int} = collect(1:12),
+        depths::Union{Nothing, AbstractVector{<:Real}} = nothing,
+        bathymetry_source::Union{Symbol, AbstractString} = :etopo2022,
+        temperature_source::Union{Symbol, AbstractString} = :glorys12v1,
+        input_dir::AbstractString = "inputs",
+        verbose::Bool = true
+    )::Matrix{Float64}
+
+Build a dynamic, seasonally resolved habitat suitability time series matrix
+(`S × T`, where `S` is the number of spatial units and `T` is the number of time
+intervals / months).
+
+For each time step (month):
+1. Bottom temperatures are queried from `temperature_source` (:glorys12v1, :woa23).
+2. For each spatial unit, bathymetric depth and bottom temperature are computed
+   as local spatial averages within the polygon boundary.
+3. Thermal suitability ``S_T(T_t)`` and depth suitability ``S_z(z)`` are combined
+   via `calculate_habitat_suitability` to yield time-varying ``\\text{HSI}_t``.
+
+# Velocity & Time Horizon Considerations
+When animals move across spatial units separated by distance ``\\Delta x``,
+maximum crawling/swimming velocity ``v_{\\max}`` dictates the horizon:
+```math
+\\Delta t_{\\text{step}} \\ge \\frac{\\Delta x}{v_{\\max}}
+```
+Dynamic transition kernels ``P_t`` constructed from columns of this matrix
+ensure that directional taxis and stay probabilities condition on the habitat
+suitability prevailing at step ``t``:
+```math
+P_{ij}(t) \\propto \\exp\\left(\\gamma (\\text{HSI}_j(t) - \\text{HSI}_i(t))\\right)
+```
+
+# Arguments
+- `centroids_lonlat`: Centroid `(lon, lat)` pairs for each spatial unit.
+- `polygons`: Optional polygon vertices `[(lon, lat), ...]` for spatial averaging.
+- `lon_range`: Longitude bounds `(min_lon, max_lon)`.
+- `lat_range`: Latitude bounds `(min_lat, max_lat)`.
+- `months`: Sequence of calendar months (`1:12` for seasonal cycle).
+- `depths`: Optional pre-computed depths (m).
+- `temperature_source`: `:glorys12v1` or `:woa23`.
+- `input_dir`: Storage directory for raw data.
+- `verbose`: Diagnostic printing.
+
+# Returns
+`Matrix{Float64}` of size `(n_units, length(months))` where column `t` is the
+spatially averaged HSI field for that month.
+"""
+function build_dynamic_geodata_hsi_series(
+    centroids_lonlat::AbstractVector{<:Tuple{Real, Real}};
+    polygons::Union{Nothing, AbstractVector} = nothing,
+    lon_range::Tuple{Real, Real},
+    lat_range::Tuple{Real, Real},
+    months::AbstractVector{Int} = collect(1:12),
+    depths::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    bathymetry_source::Union{Symbol, AbstractString} = :etopo2022,
+    temperature_source::Union{Symbol, AbstractString} = :glorys12v1,
+    input_dir::AbstractString = "inputs",
+    verbose::Bool = true
+)::Matrix{Float64}
+    n_units = length(centroids_lonlat)
+    n_times = length(months)
+    hsi_series = zeros(Float64, n_units, n_times)
+
+    # 1. Bathymetric interpolator (static over time)
+    verbose && println("Fetching GeoData bathymetry for dynamic HSI series...")
+    bathy_ds = GeoData.fetch_erddap_bathymetry(
+        lon_range = lon_range,
+        lat_range = lat_range,
+        verbose = verbose
+    )
+    bathy_itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+
+    has_polys = polygons !== nothing && length(polygons) == n_units
+
+    # Precompute sample points and depths per polygon to avoid redundant lookups
+    sample_points = Vector{Vector{Tuple{Float64, Float64}}}(undef, n_units)
+    sample_depths = Vector{Vector{Float64}}(undef, n_units)
+    unit_mean_z   = zeros(Float64, n_units)
+
+    for i in 1:n_units
+        lon_c, lat_c = centroids_lonlat[i]
+        if has_polys && !isempty(polygons[i])
+            poly_pts = polygons[i]
+            pts = Tuple{Float64, Float64}[(Float64(lon_c), Float64(lat_c))]
+            for pt in poly_pts
+                p_lon, p_lat = Float64(pt[1]), Float64(pt[2])
+                if (p_lon != lon_c || p_lat != lat_c) &&
+                   !any(p -> p[1] == p_lon && p[2] == p_lat, pts)
+                    push!(pts, (p_lon, p_lat))
+                end
+            end
+            sample_points[i] = pts
+            z_pts = [max(0.0, -bathy_itp(p[1], p[2])) for p in pts]
+            sample_depths[i] = z_pts
+            unit_mean_z[i] = mean(z_pts)
+        else
+            sample_points[i] = Tuple{Float64, Float64}[(Float64(lon_c), Float64(lat_c))]
+            z_c = if depths !== nothing && length(depths) == n_units
+                abs(Float64(depths[i]))
+            else
+                max(0.0, -bathy_itp(lon_c, lat_c))
+            end
+            sample_depths[i] = [z_c]
+            unit_mean_z[i] = z_c
+        end
+    end
+
+    # 2. Iterate across seasonal cycle / time intervals
+    temp_src = Symbol(temperature_source)
+    for (t_idx, m) in enumerate(months)
+        verbose && println("Evaluating GeoData bottom temperature for month $(m)...")
+        hydro_m = GeoData.fetch_boundary_hydrography_geodata(
+            temp_src;
+            lon_range = lon_range,
+            lat_range = lat_range,
+            input_dir = input_dir,
+            month = m,
+            verbose = false
+        )
+
+        for i in 1:n_units
+            pts = sample_points[i]
+            z_pts = sample_depths[i]
+            mean_z = unit_mean_z[i]
+
+            # Mean bottom temperature within polygon for month m
+            t_samples = [hydro_m.T(pts[k][1], pts[k][2], -z_pts[k], 0.0)
+                         for k in 1:length(pts)]
+            mean_t = mean(t_samples)
+
+            hsi_series[i, t_idx] = calculate_habitat_suitability(mean_t, mean_z)
+        end
+        hsi_series[:, t_idx] .= sanitise_hsi(hsi_series[:, t_idx])
+    end
+
+    return hsi_series
 end
 
 

@@ -2834,6 +2834,212 @@ function astar_predict_path(
 end
 
 """
+    dynamic_astar_least_cost_path(
+        centroids::AbstractVector,
+        W::AbstractMatrix{<:Real},
+        release::Int,
+        recapture::Int,
+        k::Int;
+        hsi_series::Union{AbstractMatrix{<:Real}, AbstractVector{<:AbstractVector{<:Real}}},
+        land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+        land_polygons = nothing,
+        centroids_lonlat = nothing
+    )::Vector{Int}
+
+Computes the optimal time-dependent least-cost path across a sequence of
+dynamically evolving habitat suitability fields ``\\text{HSI}_t`` for
+``t \\in \\{1, \\dots, k\\}`` using time-expanded ``A^*`` search.
+
+# Mathematical Formulation
+Let node ``u`` at time step ``\\tau`` transition to neighbor ``v`` at time ``\\tau + 1``.
+The step traversal cost conditions on the target habitat suitability and resistance
+evaluated at that exact moment in time:
+```math
+\\Phi_\\tau(v) = 1.0 + 3.0 \\times \\big(1.0 - \\text{HSI}_v(\\tau)\\big)^2
+```
+```math
+c\\big((u, \\tau), (v, \\tau + 1)\\big) = d(u, v) \\times \\frac{\\Phi_\\tau(u) + \\Phi_\\tau(v)}{2}
+```
+Self-transitions (staying in unit ``u``) incur habitat residence cost:
+```math
+c\\big((u, \\tau), (u, \\tau + 1)\\big) = d_{\\text{res}} \\times \\Phi_\\tau(u)
+```
+where ``d_{\\text{res}} = 0.5 \\min_{j \\in \\text{nbr}(u)} d(u, j)``.
+
+# Arguments
+- `centroids`: Spatial centroids coordinate vector (length ``S``).
+- `W`: Spatial adjacency matrix (``S \\times S``).
+- `release`: Starting spatial unit index (1-indexed).
+- `recapture`: Destination spatial unit index at step ``k`` (1-indexed).
+- `k`: Number of discrete time steps elapsed.
+- `hsi_series`: Time-varying HSI field (`S × k` matrix or vector of `k` vectors).
+- `land_mask`: Impermeable terrestrial units.
+- `land_polygons`: Optional polygon barrier constraints.
+- `centroids_lonlat`: Optional longitude/latitude coordinates.
+
+# Returns
+`Vector{Int}`: Optimal sequence of ``k + 1`` spatial unit indices from `release` to `recapture`.
+"""
+function dynamic_astar_least_cost_path(
+    centroids::AbstractVector,
+    W::AbstractMatrix{<:Real},
+    release::Int,
+    recapture::Int,
+    k::Int;
+    hsi_series::Union{AbstractMatrix{<:Real}, AbstractVector{<:AbstractVector{<:Real}}},
+    land_mask::Union{Nothing, AbstractVector{Bool}} = nothing,
+    land_polygons = nothing,
+    centroids_lonlat = nothing
+)::Vector{Int}
+    S = size(W, 1)
+    if !(1 <= release <= S) || !(1 <= recapture <= S)
+        throw(ArgumentError("Release ($release) or recapture ($recapture) out of range 1:$S"))
+    end
+    if k <= 0
+        return Int[release]
+    end
+    if release == recapture && k == 1
+        return Int[release, recapture]
+    end
+
+    # Extract slice at step tau
+    _hsi_step = tau -> begin
+        t_clamped = min(max(1, tau), hsi_series isa AbstractMatrix ?
+                        size(hsi_series, 2) : length(hsi_series))
+        hsi_series isa AbstractMatrix ?
+            @view(hsi_series[:, t_clamped]) : hsi_series[t_clamped]
+    end
+
+    # Precalculate per-step resistance surfaces
+    phi_all = [
+        [
+            begin
+                h_val = Float64(h)
+                (h_val < 0.0 || h_val > 1.0) && throw(DomainError(
+                    h_val,
+                    "Dynamic HSI must reside in [0, 1]; invalid value encountered."
+                ))
+                1.0 + 3.0 * (1.0 - h_val)^2
+            end
+            for h in _hsi_step(t)
+        ]
+        for t in 1:k
+    ]
+    min_phi_overall = minimum(minimum.(phi_all))
+
+    W_active = copy(sparse(Float64.(W)))
+    if land_mask !== nothing
+        for l in findall(land_mask)
+            W_active[l, :] .= 0.0
+            W_active[:, l] .= 0.0
+        end
+        dropzeros!(W_active)
+    end
+    if land_polygons !== nothing
+        sever_coords = centroids_lonlat !== nothing ? centroids_lonlat : centroids
+        sever_land_crossing_edges!(W_active, sever_coords; land_polygons = land_polygons)
+    end
+
+    # Graph connectivity
+    rows = rowvals(W_active)
+    nbr_list = [Int[] for _ in 1:S]
+    dist_list = [Float64[] for _ in 1:S]
+    for col in 1:S
+        for ptr in nzrange(W_active, col)
+            r = rows[ptr]
+            if r != col
+                push!(nbr_list[col], r)
+                push!(dist_list[col], _spatial_node_distance(centroids[col], centroids[r]))
+            end
+        end
+    end
+
+    # Heuristic: remaining distance to destination at step tau
+    h_fn = (u::Int, tau::Int) -> begin
+        rem_steps = k - tau
+        d_rem = _spatial_node_distance(centroids[u], centroids[recapture])
+        return d_rem * min_phi_overall
+    end
+
+    # Priority queue state for A*: (cost_f, cost_g, u, tau)
+    # State key is (u, tau)
+    dist_g = fill(Inf, S, k + 1)
+    parent_node = zeros(Int, S, k + 1)
+    dist_g[release, 1] = 0.0
+
+    # Min-heap using Base.Order
+    pq = Tuple{Float64, Float64, Int, Int}[(h_fn(release, 0), 0.0, release, 0)]
+
+    while !isempty(pq)
+        # Pop lowest cost
+        sort!(pq, by = x -> x[1])
+        f_curr, g_curr, u_curr, tau_curr = popfirst!(pq)
+
+        if tau_curr == k
+            if u_curr == recapture
+                # Reconstruct path
+                path = Vector{Int}(undef, k + 1)
+                curr_u = u_curr
+                for step in (k + 1):-1:1
+                    path[step] = curr_u
+                    curr_u = parent_node[curr_u, step]
+                end
+                path[1] = release
+                return path
+            end
+            continue
+        end
+
+        next_tau = tau_curr + 1
+        phi_t = phi_all[next_tau]
+
+        # 1. Option A: Move to adjacent marine neighbor
+        for (idx, v) in enumerate(nbr_list[u_curr])
+            d_uv = dist_list[u_curr][idx]
+            step_cost = d_uv * (phi_t[u_curr] + phi_t[v]) / 2.0
+            new_g = g_curr + step_cost
+            if new_g < dist_g[v, next_tau + 1]
+                dist_g[v, next_tau + 1] = new_g
+                parent_node[v, next_tau + 1] = u_curr
+                new_f = new_g + h_fn(v, next_tau)
+                push!(pq, (new_f, new_g, v, next_tau))
+            end
+        end
+
+        # 2. Option B: Stay in current unit (residence)
+        min_d = isempty(dist_list[u_curr]) ? 1.0 : minimum(dist_list[u_curr])
+        stay_cost = 0.5 * min_d * phi_t[u_curr]
+        stay_g = g_curr + stay_cost
+        if stay_g < dist_g[u_curr, next_tau + 1]
+            dist_g[u_curr, next_tau + 1] = stay_g
+            parent_node[u_curr, next_tau + 1] = u_curr
+            stay_f = stay_g + h_fn(u_curr, next_tau)
+            push!(pq, (stay_f, stay_g, u_curr, next_tau))
+        end
+    end
+
+    # Fallback if strict exact-k terminal not reached: return closest terminal
+    best_u = argmin(dist_g[:, k + 1])
+    if isfinite(dist_g[best_u, k + 1])
+        path = Vector{Int}(undef, k + 1)
+        curr_u = best_u
+        for step in (k + 1):-1:1
+            path[step] = curr_u
+            curr_u = parent_node[curr_u, step]
+        end
+        path[1] = release
+        path[end] = recapture
+        return path
+    end
+
+    # Spatial static A* fallback
+    return astar_least_cost_path(
+        centroids, W, release, recapture;
+        hsi = _hsi_step(1), land_mask = land_mask
+    )
+end
+
+"""
     astar_least_cost_path(
         centroids::AbstractVector,
         W::AbstractMatrix{<:Real},
@@ -8440,7 +8646,8 @@ where B_tau = prod_{t=tau+1}^K P^{(t)} represents target reachability.
 - `release`: Release node index (1 <= release <= S).
 - `recapture`: Recapture node index (1 <= recapture <= S).
 - `centroids`: Optional spatial node coordinates for reachability fallback.
-- `method`: Simulation mode (`:probabilistic` or `:deterministic`).
+- `method`: Simulation/optimization mode (`:viterbi`, `:deterministic`, or `:probabilistic`).
+  `:viterbi` computes the global most probable trajectory via exact dynamic programming.
 - `land_mask`: Optional land mask.
 
 # Returns
@@ -8451,7 +8658,7 @@ function predict_dynamic_path(
     release::Int,
     recapture::Int;
     centroids = nothing,
-    method::Symbol = :probabilistic,
+    method::Symbol = :viterbi,
     land_mask = nothing
 )::Vector{Int}
     K = length(P_kernels)
@@ -8464,7 +8671,62 @@ function predict_dynamic_path(
         ))
 
     if release == recapture || K == 0
-        return Int[release]
+        return fill(release, K + 1)
+    end
+
+    if method == :viterbi
+        # Exact non-stationary Viterbi dynamic programming across time-varying P_kernels
+        delta = fill(-1e12, S, K + 1)
+        psi = zeros(Int, S, K + 1)
+        delta[release, 1] = 0.0
+
+        for tau in 1:K
+            P_tau = P_kernels[tau] isa SparseMatrixCSC ?
+                P_kernels[tau] : SparseMatrixCSC(P_kernels[tau])
+            Pt_tau = SparseMatrixCSC(P_tau')
+
+            t_next = tau + 1
+            @inbounds for j in 1:S
+                if land_mask !== nothing && land_mask[j]
+                    continue
+                end
+
+                best_val = -Inf
+                best_prev = 1
+                col_start = Pt_tau.colptr[j]
+                col_end   = Pt_tau.colptr[j + 1] - 1
+
+                for ptr in col_start:col_end
+                    i = Pt_tau.rowval[ptr]
+                    if land_mask !== nothing && land_mask[i]
+                        continue
+                    end
+                    p_ij = Pt_tau.nzval[ptr]
+                    if p_ij > 1e-15
+                        score = delta[i, tau] + log(Float64(p_ij))
+                        if score > best_val
+                            best_val = score
+                            best_prev = i
+                        end
+                    end
+                end
+
+                if best_val > -Inf
+                    delta[j, t_next] = best_val
+                    psi[j, t_next]   = best_prev
+                end
+            end
+        end
+
+        if delta[recapture, K + 1] > -1e11
+            path = zeros(Int, K + 1)
+            path[K + 1] = recapture
+            for t_step in (K + 1):-1:2
+                path[t_step - 1] = psi[path[t_step], t_step]
+            end
+            return path
+        end
+        # Fallback to bridge-conditioned selection if recapture unreachable at exact K
     end
 
     B_mats = Vector{Matrix{Float64}}(undef, K)

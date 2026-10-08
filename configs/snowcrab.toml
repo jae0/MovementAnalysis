@@ -68,18 +68,31 @@ hsi_ood_floor = 0.01
 # -----------------------------------------------------------------------------
 # Path reconstruction
 # -----------------------------------------------------------------------------
+# Path reconstruction & Dynamic HSI Routing
+# -----------------------------------------------------------------------------
 max_paths = 25                       # trajectories to reconstruct
 path_methods = ["astar"]             # astar | viterbi, in any combination
 smooth_paths = true                  # marine line-of-sight smoothing
 
 # -----------------------------------------------------------------------------
-# Advanced routing
+# Dynamic Environmental Features & Advanced Routing
 # -----------------------------------------------------------------------------
 adaptive_mesh = false
 coarse_radius_km = 25.0
 fine_radius_km = 8.0
-dynamic_kernels = false
+dynamic_kernels = true               # enable time-varying seasonal HSI kernels
 hmm_smoothing = false
+
+# -----------------------------------------------------------------------------
+# Habitat Suitability & GeoData Environmental Sources
+# -----------------------------------------------------------------------------
+use_geodata_habitat = true           # query real physical habitat via GeoData
+temperature_source = "glorys12v1"    # Copernicus Marine GLORYS12V1 (1/12 deg)
+temperature_month = 0                # 0 for dynamic seasonal sequence / 1-12 for fixed
+bathymetry_source = "etopo2022"      # bathymetry elevation/depth source
+spatial_averaging = "polygon"        # polygon area average across vertices & centroid
+hsi_dynamic_method = "glorys_monthly"# time-varying bottom temperature series
+circuit_timescale = "annual_average" # steady-state DC current uses 12-month annual mean
 
 # -----------------------------------------------------------------------------
 # Posterior inference

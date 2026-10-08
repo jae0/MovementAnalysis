@@ -96,8 +96,14 @@ function build_circuit_laplacian(
                 # Conductance from habitat suitability:
                 #     c_ij = W_ij * exp(alpha * (h_i + h_j) / 2)
                 # with alpha = 1.0 recovering the default habitat weighting.
-                h_i = clamp(Float64(hsi[i]), 0.0, 1.0)
-                h_j = clamp(Float64(hsi[j]), 0.0, 1.0)
+                h_i = Float64(hsi[i])
+                h_j = Float64(hsi[j])
+                (h_i < 0.0 || h_i > 1.0) && throw(DomainError(
+                    h_i, "Circuit HSI for unit $i must reside in [0, 1]."
+                ))
+                (h_j < 0.0 || h_j > 1.0) && throw(DomainError(
+                    h_j, "Circuit HSI for unit $j must reside in [0, 1]."
+                ))
                 c_ij = w_ij * exp(0.5 * Float64(hsi_exponent) * (h_i + h_j))
             end
 

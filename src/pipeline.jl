@@ -1023,6 +1023,7 @@ end
             verbose && println("  Evaluating real habitat suitability via GeoData...")
             build_geodata_habitat_suitability(
                 fine_mesh.centroids_lonlat;
+                polygons = hasproperty(fine_mesh, :polygons_lonlat) ? fine_mesh.polygons_lonlat : nothing,
                 lon_range = (min_lon, max_lon),
                 lat_range = (min_lat, max_lat),
                 depths = resharded_depths,
@@ -1361,7 +1362,7 @@ end
         end
 
         # Prune out-of-depth and unreachable/boundary-exceeded units from the final mesh
-        # so that downstream network operations and PlotlyJS dashboards do not retain
+        # so that downstream network operations and interactive dashboards do not retain
         # an oversized, empty rectangular domain.
         keep_mesh_mask = .!out_of_depth .& .!land_mask
 
@@ -2278,10 +2279,34 @@ if params.dynamic_kernels
 
     P_dyn_seq_cache = nothing
     if max_k_dyn > 0
-        hsi_dyn_all = [
-            clamp.(hsi_vec .+ 0.05 * sin(t * π / 2), 0.01, 1.0)
-            for t in 1:max_k_dyn
-        ]
+        hsi_dyn_all = if params.use_geodata_habitat && cents_lonlat !== nothing
+            verbose && println(
+                "  Computing $(max_k_dyn)-step dynamic seasonal HSI field from $(params.temperature_source)..."
+            )
+            min_lon = minimum(c[1] for c in cents_lonlat)
+            max_lon = maximum(c[1] for c in cents_lonlat)
+            min_lat = minimum(c[2] for c in cents_lonlat)
+            max_lat = maximum(c[2] for c in cents_lonlat)
+            mesh_polys = hasproperty(loaded.mesh, :polygons_lonlat) ?
+                         loaded.mesh.polygons_lonlat : nothing
+            months_seq = [mod1(params.temperature_month == 0 ? t : params.temperature_month + t - 1, 12)
+                          for t in 1:max_k_dyn]
+            hsi_mat = build_dynamic_geodata_hsi_series(
+                cents_lonlat;
+                polygons           = mesh_polys,
+                lon_range          = (min_lon, max_lon),
+                lat_range          = (min_lat, max_lat),
+                months             = months_seq,
+                temperature_source = params.temperature_source,
+                verbose            = false
+            )
+            [hsi_mat[:, t] for t in 1:max_k_dyn]
+        else
+            [
+                clamp.(hsi_vec .+ 0.05 * sin(t * π / 2), 0.01, 1.0)
+                for t in 1:max_k_dyn
+            ]
+        end
         P_dyn_seq_cache = construct_dynamic_transition_kernels(
             W, hsi_dyn_all; land_mask = land_mask
         )
@@ -2351,7 +2376,26 @@ if params.dynamic_kernels
                     end
                 end
 
-                seg = if hasproperty(loaded.mesh, :is_fine)
+                k_seg = max(1, row.k)
+                seg = if params.dynamic_kernels && P_dyn_seq_cache !== nothing && length(P_dyn_seq_cache) >= k_seg
+                    # Dynamic time-varying HSI routing: evaluate cost with time-varying fields
+                    chosen_method = first(params.path_methods)
+                    if chosen_method == :astar && cents_mesh !== nothing
+                        dynamic_astar_least_cost_path(
+                            cents_mesh, W, row.release, row.recapture, k_seg;
+                            hsi_series = hsi_dyn_all[1:k_seg],
+                            land_mask  = land_mask
+                        )
+                    else
+                        dyn_meth = chosen_method == :viterbi ? :viterbi : :deterministic
+                        predict_dynamic_path(
+                            P_dyn_seq_cache[1:k_seg], row.release, row.recapture;
+                            centroids = cents_mesh,
+                            method    = dyn_meth,
+                            land_mask = land_mask
+                        )
+                    end
+                elseif hasproperty(loaded.mesh, :is_fine)
                     astar_multiresolution_path(
                         loaded.mesh, row.release, row.recapture;
                         hsi = hsi_row, land_mask = land_mask
@@ -2662,9 +2706,42 @@ function compute_advanced_diagnostics(
             "\n[Phase 5a] Computing Circuit Theory Current Density..."
         )
         try
+            # Circuit theory models steady-state DC current flux (infinite-horizon
+            # random walk potential), which cannot evaluate high-frequency non-stationary
+            # time steps directly. When dynamic seasonal HSI is configured or available,
+            # we evaluate conductance using the annual time-averaged HSI field:
+            #     \bar{H}_i = (1 / 12) \sum_{m=1}^{12} H_i(m)
+            hsi_circuit = if params.dynamic_kernels && params.use_geodata_habitat &&
+                             hasproperty(loaded.mesh, :centroids_lonlat) &&
+                             loaded.mesh.centroids_lonlat !== nothing
+                verbose && println("  Averaging dynamic seasonal HSI across 12-month annual cycle for circuit theory...")
+                cents_ll = loaded.mesh.centroids_lonlat
+                min_lon = minimum(c[1] for c in cents_ll)
+                max_lon = maximum(c[1] for c in cents_ll)
+                min_lat = minimum(c[2] for c in cents_ll)
+                max_lat = maximum(c[2] for c in cents_ll)
+                mesh_polys = hasproperty(loaded.mesh, :polygons_lonlat) ?
+                             loaded.mesh.polygons_lonlat : nothing
+                hsi_annual_mat = build_dynamic_geodata_hsi_series(
+                    cents_ll;
+                    polygons           = mesh_polys,
+                    lon_range          = (min_lon, max_lon),
+                    lat_range          = (min_lat, max_lat),
+                    months             = 1:12,
+                    temperature_source = params.temperature_source,
+                    verbose            = false
+                )
+                vec(mean(hsi_annual_mat; dims = 2))
+            elseif hasproperty(loaded, :monthly_hsi) && !isempty(loaded.monthly_hsi) &&
+                   size(loaded.monthly_hsi, 2) >= 12
+                vec(mean(loaded.monthly_hsi[:, 1:12]; dims = 2))
+            else
+                hsi_vec
+            end
+
             cur_dens, _, _, _ = current_density_map(
                 W, sources_v, sinks_v;
-                hsi       = hsi_vec,
+                hsi       = hsi_circuit,
                 land_mask = land_mask
             )
             p_mask, p_score, p_thresh = identify_ecological_pinchpoints(
@@ -2682,7 +2759,7 @@ function compute_advanced_diagnostics(
 
             stoch_circuit = posterior_circuit_inference(
                 W, sources_v, sinks_v;
-                hsi_mean     = hsi_vec,
+                hsi_mean     = hsi_circuit,
                 hsi_se       = hsi_se_v,
                 n_draws      = params.n_stochastic_draws * 2,
                 land_mask    = land_mask,
@@ -2731,7 +2808,7 @@ end
 """
     export_dashboards(loaded, kernels, path_results, diagnostics, params)
 
-Phase 6 of the pipeline. Exports interactive PlotlyJS HTML dashboards to
+Phase 6 of the pipeline. Exports interactive Leaflet HTML dashboards to
 `params.output_dir`. Individual dashboards are silently skipped on
 rendering errors so the pipeline is never aborted. Exports:
 
@@ -2743,14 +2820,14 @@ rendering errors so the pipeline is never aborted. Exports:
 """
 function export_dashboards(
     loaded, kernels, path_results, diagnostics, params,
-validation = nothing,
+    validation = nothing,
     agent_trajectories = nothing,
     agent_space_use = nothing
-  )::Union{NamedTuple, Nothing}
+)::Union{NamedTuple, Nothing}
     params.render_html || return nothing
     verbose = params.verbose
 
-    verbose && println("\n[Phase 6] Generating PlotlyJS dashboards...")
+    verbose && println("\n[Phase 6] Generating interactive Leaflet dashboards...")
     out_dir = params.output_dir
     mkpath(out_dir)
 
@@ -3040,7 +3117,8 @@ validation = nothing,
         save_html(map_obj, html_file)
         verbose && println("  Paths dashboard: $html_file")
     catch e
-        _record_panel_skip("PlotlyJS paths", e);         verbose && println("  (PlotlyJS paths note: $(_error_note(e)))")
+        _record_panel_skip("Leaflet paths", e)
+        verbose && println("  (Leaflet paths note: $(_error_note(e)))")
     end
 
     # -- Movement ecology statistics & phenology ----------------------
@@ -4182,10 +4260,43 @@ function run_movement_analysis(
             _resolve_centroids(loaded.mesh, size(kernels.P_kernel, 1))
         agent_centroids = agent_planar === nothing ? agent_lonlat : agent_planar
 
+        # Dynamic vs static kernel selection for agent forward simulation
+        P_agent_kernel = if params.dynamic_kernels && params.use_geodata_habitat &&
+                            agent_lonlat !== nothing
+            max_horizon = maximum(durations; init = params.agent_horizon)
+            months_seq = [mod1(params.temperature_month == 0 ? t : params.temperature_month + t - 1, 12)
+                          for t in 1:max_horizon]
+            min_lon = minimum(c[1] for c in agent_lonlat)
+            max_lon = maximum(c[1] for c in agent_lonlat)
+            min_lat = minimum(c[2] for c in agent_lonlat)
+            max_lat = maximum(c[2] for c in agent_lonlat)
+            mesh_polys = hasproperty(loaded.mesh, :polygons_lonlat) ?
+                         loaded.mesh.polygons_lonlat : nothing
+            hsi_agent_dyn = build_dynamic_geodata_hsi_series(
+                agent_lonlat;
+                polygons           = mesh_polys,
+                lon_range          = (min_lon, max_lon),
+                lat_range          = (min_lat, max_lat),
+                months             = months_seq,
+                temperature_source = params.temperature_source,
+                verbose            = false
+            )
+            hsi_list = [hsi_agent_dyn[:, t] for t in 1:max_horizon]
+            construct_dynamic_transition_kernels(
+                loaded.W, hsi_list;
+                gamma     = kernels.gamma_hat,
+                residence = kernels.rho_hat,
+                advection = kernels.alpha_hat,
+                land_mask = loaded.land_mask
+            )
+        else
+            sparse(kernels.P_kernel)
+        end
+
         agent_trajectories = forward_project_agents(
             release_nodes, durations;
             n_agents = n_sim_agents,
-            transition_kernel = sparse(kernels.P_kernel),
+            transition_kernel = P_agent_kernel,
             centroids = agent_centroids,
             persistence = params.persistence,
             seed = params.seed,
