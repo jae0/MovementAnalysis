@@ -119,6 +119,11 @@ Base.@kwdef struct MovementAnalysisConfig
     # A path that fails to parse falls back to synthetic with a warning, so check
     # the log for "Falling back to synthetic shelf model" before trusting a run.
     bathymetry_source::Union{Nothing, String} = nothing
+    # Ingest real physical habitat data (bottom temperature, depth) via GeoData
+    use_geodata_habitat::Bool = false
+    temperature_source::String = "woa23"
+    temperature_month::Int = 0
+    lakehouse_catalog::Union{Nothing, String} = nothing
 
     # --- Agent forward projection --------------------------------------------
     # Heading persistence for the agent projection, kappa in
@@ -539,6 +544,20 @@ function create_argparse_settings()::ArgParseSettings
                    "have no effect on the domain or on connectivity."
             arg_type = String
             metavar = "PATH"
+        "--use-geodata-habitat"
+            dest_name = "use_geodata_habitat"
+            help = "Ingest real physical habitat data (temperature, depth) via GeoData."
+            arg_type = Bool
+        "--temperature-source"
+            dest_name = "temperature_source"
+            help = "Temperature reanalysis/climatology source (woa23, glorys12v1)."
+            arg_type = String
+            metavar = "SOURCE"
+        "--temperature-month"
+            dest_name = "temperature_month"
+            help = "Month for temperature climatology (0 for annual mean)."
+            arg_type = Int
+            metavar = "MONTH"
         "--hsi-ood-floor"
             dest_name = "hsi_ood_floor"
             help = "Habitat suitability value below which a unit is out-of-domain."

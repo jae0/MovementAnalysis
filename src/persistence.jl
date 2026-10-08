@@ -586,3 +586,169 @@ function persistence_gain_report(
         improves_on_first_order = best.gain_vs_first_order > 1e-9,
     )
 end
+
+"""
+    calculate_habitat_suitability(
+        temperature::Real,
+        depth::Real;
+        temp_half::Real = 5.0,
+        temp_steepness::Real = 1.0,
+        depth_opt::Real = 150.0,
+        depth_sigma::Real = 50.0,
+        depth_min::Real = 20.0,
+        depth_max::Real = 400.0,
+        temp_zero_threshold::Real = 10.0
+    )::Float64
+
+Calculate habitat suitability index (HSI) in `[0, 1]` as the product of thermal
+and bathymetric suitability factors:
+```math
+\\text{HSI}(T, z) = S_T(T) \\times S_z(z)
+```
+
+# Thermal Component ``S_T(T)``
+A decreasing logistic curve `1 - logistic(k (T - T_50))`:
+- Probability ≈ 1.0 for temperatures `T < 2.0` °C
+- Median probability 0.5 at `T = 5.0` °C (`temp_half`)
+- Smoothly tapers to 0.0 by `10.0` °C (`temp_zero_threshold`)
+
+# Bathymetric Component ``S_z(z)``
+A Gaussian response mode centered at 150 m depth:
+```math
+S_z(z) = \\exp\\left(-\\frac{(z - z_{\\text{opt}})^2}{2 \\sigma_z^2}\\right)
+```
+- Attains maximum probability (1.0) at `z = 150` m (`depth_opt`)
+- Strictly tapers to 0.0 for depths shallower than 20 m (`depth_min`)
+  or deeper than 400 m (`depth_max`) via smooth cosine-taper windowing.
+"""
+function calculate_habitat_suitability(
+    temperature::Real,
+    depth::Real;
+    temp_half::Real = 5.0,
+    temp_steepness::Real = 1.0,
+    depth_opt::Real = 150.0,
+    depth_sigma::Real = 50.0,
+    depth_min::Real = 20.0,
+    depth_max::Real = 400.0,
+    temp_zero_threshold::Real = 10.0
+)::Float64
+    T = Float64(temperature)
+    z = abs(Float64(depth))
+
+    # Thermal suitability S_T
+    s_t = if T >= temp_zero_threshold
+        0.0
+    else
+        # 1 - logistic = 1 / (1 + exp(k * (T - T_half)))
+        raw_prob = 1.0 / (1.0 + exp(temp_steepness * (T - temp_half)))
+        # Smooth window cutoff to zero at temp_zero_threshold
+        if T > temp_half
+            w_t = 0.5 * (1.0 + cos(π * (T - temp_half) / (temp_zero_threshold - temp_half)))
+            raw_prob * w_t
+        else
+            raw_prob
+        end
+    end
+
+    # Bathymetric depth suitability S_z
+    s_z = if z <= depth_min || z >= depth_max
+        0.0
+    else
+        g_raw = exp(-0.5 * ((z - depth_opt) / depth_sigma)^2)
+        # Smooth edge windowing tapering strictly to 0 at depth_min and depth_max
+        w_z = if z < depth_opt
+            0.5 * (1.0 - cos(π * (z - depth_min) / (depth_opt - depth_min)))
+        else
+            0.5 * (1.0 + cos(π * (z - depth_opt) / (depth_max - depth_opt)))
+        end
+        g_raw * w_z
+    end
+
+    # Bounded in [0.0, 1.0]
+    return clamp(s_t * s_z, 0.0, 1.0)
+end
+
+"""
+    build_geodata_habitat_suitability(
+        centroids_lonlat::AbstractVector{<:Tuple{Real, Real}};
+        lon_range::Tuple{Real, Real},
+        lat_range::Tuple{Real, Real},
+        depths::Union{Nothing, AbstractVector{<:Real}} = nothing,
+        bathymetry_source::Union{Symbol, AbstractString} = :etopo2022,
+        temperature_source::Union{Symbol, AbstractString} = :woa23,
+        month::Int = 0,
+        input_dir::AbstractString = "inputs",
+        verbose::Bool = true
+    )::Vector{Float64}
+
+Build a real habitat suitability vector for spatial mesh units by querying
+real physical depth and bottom temperature through `GeoData`.
+
+# Arguments
+- `centroids_lonlat`: Vector of `(lon, lat)` pairs for each spatial unit centroid.
+- `lon_range`: Longitudinal extent `(min_lon, max_lon)`.
+- `lat_range`: Latitudinal extent `(min_lat, max_lat)`.
+- `depths`: Optional pre-computed depths (m) per centroid. If not provided,
+  interpolated directly from `GeoData` bathymetry.
+- `bathymetry_source`: Bathymetric provider (`:etopo2022`, `:etopo`, `:erddap`).
+- `temperature_source`: Temperature provider (`:woa23`, `:glorys12v1`).
+- `month`: Climatological month (0 = annual climatology).
+- `input_dir`: Cache directory for downloaded datasets.
+- `verbose`: Display progress diagnostics.
+
+# Returns
+Vector of habitat suitability indices in `[0, 1]` aligned with `centroids_lonlat`.
+"""
+function build_geodata_habitat_suitability(
+    centroids_lonlat::AbstractVector{<:Tuple{Real, Real}};
+    lon_range::Tuple{Real, Real},
+    lat_range::Tuple{Real, Real},
+    depths::Union{Nothing, AbstractVector{<:Real}} = nothing,
+    bathymetry_source::Union{Symbol, AbstractString} = :etopo2022,
+    temperature_source::Union{Symbol, AbstractString} = :woa23,
+    month::Int = 0,
+    input_dir::AbstractString = "inputs",
+    verbose::Bool = true
+)::Vector{Float64}
+    n_units = length(centroids_lonlat)
+    hsi = zeros(Float64, n_units)
+
+    # 1. Obtain bathymetric depth per centroid
+    unit_depths = if depths !== nothing && length(depths) == n_units
+        abs.(Float64.(depths))
+    else
+        verbose && println("Fetching GeoData bathymetry for HSI evaluation...")
+        bathy_ds = GeoData.fetch_erddap_bathymetry(
+            lon_range = lon_range,
+            lat_range = lat_range,
+            verbose = verbose
+        )
+        bathy_itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+        [max(0.0, -bathy_itp(c[1], c[2])) for c in centroids_lonlat]
+    end
+
+    # 2. Obtain bottom temperature per centroid
+    temp_src = Symbol(temperature_source)
+    verbose && println("Fetching GeoData boundary/hydrographic temperature ($(temp_src))...")
+    hydro = GeoData.fetch_boundary_hydrography_geodata(
+        temp_src;
+        lon_range = lon_range,
+        lat_range = lat_range,
+        input_dir = input_dir,
+        month = month,
+        verbose = verbose
+    )
+
+    # 3. Compute HSI per unit centroid using calculate_habitat_suitability
+    for i in 1:n_units
+        lon_i, lat_i = centroids_lonlat[i]
+        z_i = unit_depths[i]
+        # Temperature evaluated at bottom depth z (negative-down coordinate)
+        t_bottom = hydro.T(lon_i, lat_i, -z_i, 0.0)
+        hsi[i] = calculate_habitat_suitability(t_bottom, z_i)
+    end
+
+    return sanitise_hsi(hsi)
+end
+
+

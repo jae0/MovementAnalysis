@@ -1019,7 +1019,19 @@ end
         P_orig_to_fine = compute_network_transfer_matrix(
             data.mesh, fine_mesh; method = :area_weighted
         )
-        hsi_fine = if hasproperty(data, :hsi_vec) && !isnothing(data.hsi_vec) &&
+        hsi_fine = if params.use_geodata_habitat
+            verbose && println("  Evaluating real habitat suitability via GeoData...")
+            build_geodata_habitat_suitability(
+                fine_mesh.centroids_lonlat;
+                lon_range = (min_lon, max_lon),
+                lat_range = (min_lat, max_lat),
+                depths = resharded_depths,
+                bathymetry_source = params.bathymetry_source === nothing ? :etopo2022 : params.bathymetry_source,
+                temperature_source = params.temperature_source,
+                month = params.temperature_month,
+                verbose = verbose
+            )
+        elseif hasproperty(data, :hsi_vec) && !isnothing(data.hsi_vec) &&
                       length(data.hsi_vec) == data.mesh.n_units
             reshard_spatial_field(P_orig_to_fine, data.hsi_vec)
         elseif resharded_hydro !== nothing && hasproperty(resharded_hydro, :hsi)

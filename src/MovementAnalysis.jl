@@ -101,6 +101,8 @@ export
     local_hsi_advantage,
     residency_from_advantage,
     sanitise_hsi,
+    calculate_habitat_suitability,
+    build_geodata_habitat_suitability,
     construct_stochastic_transition_kernel,
     construct_dynamic_transition_kernels,
     calculate_multistep_transition,

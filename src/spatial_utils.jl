@@ -1038,9 +1038,34 @@ function load_open_bathymetry(;
 
     elev = zeros(Float64, nx, ny)
     loaded_from_file = false
-
-    # Check for file-based ingestion
-    if source isa AbstractString && isfile(source)
+    # Check for GeoData or file-based ingestion
+    if source in (:etopo, :etopo2022, :geodata, "etopo", "etopo2022", "geodata")
+        try
+            bathy_ds = GeoData.fetch_erddap_bathymetry(
+                lon_range = (min_lon, max_lon),
+                lat_range = (min_lat, max_lat),
+                verbose = false
+            )
+            itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+            for j in 1:ny, i in 1:nx
+                elev[i, j] = itp(lons[i], lats[j])
+            end
+            loaded_from_file = true
+        catch err
+            @warn "Failed to fetch GeoData bathymetry: $(err). Falling back to file/synthetic."
+        end
+    elseif source isa AbstractString && (endswith(lowercase(source), ".zarr") || endswith(lowercase(source), ".nc")) && ispath(source)
+        try
+            bathy_ds = GeoData.geoload(source)
+            itp = GeoData.get_bathymetry_interpolator(bathy_ds)
+            for j in 1:ny, i in 1:nx
+                elev[i, j] = itp(lons[i], lats[j])
+            end
+            loaded_from_file = true
+        catch err
+            @warn "Failed to parse GeoData file '$(source)': $(err). Falling back to synthetic shelf model."
+        end
+    elseif source isa AbstractString && isfile(source)
         ext = lowercase(splitext(source)[2])
         try
             if ext == ".csv"
