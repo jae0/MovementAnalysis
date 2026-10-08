@@ -2287,7 +2287,8 @@ if params.dynamic_kernels
             max_lon = maximum(c[1] for c in cents_lonlat)
             min_lat = minimum(c[2] for c in cents_lonlat)
             max_lat = maximum(c[2] for c in cents_lonlat)
-            mesh_polys = hasproperty(loaded.mesh, :polygons_lonlat) ?
+            mesh_polys = (params.spatial_averaging != "centroid" &&
+                          hasproperty(loaded.mesh, :polygons_lonlat)) ?
                          loaded.mesh.polygons_lonlat : nothing
             months_seq = [mod1(params.temperature_month == 0 ? t : params.temperature_month + t - 1, 12)
                           for t in 1:max_k_dyn]
@@ -2720,7 +2721,8 @@ function compute_advanced_diagnostics(
                 max_lon = maximum(c[1] for c in cents_ll)
                 min_lat = minimum(c[2] for c in cents_ll)
                 max_lat = maximum(c[2] for c in cents_ll)
-                mesh_polys = hasproperty(loaded.mesh, :polygons_lonlat) ?
+                mesh_polys = (params.spatial_averaging != "centroid" &&
+                              hasproperty(loaded.mesh, :polygons_lonlat)) ?
                              loaded.mesh.polygons_lonlat : nothing
                 hsi_annual_mat = build_dynamic_geodata_hsi_series(
                     cents_ll;
@@ -4270,7 +4272,8 @@ function run_movement_analysis(
             max_lon = maximum(c[1] for c in agent_lonlat)
             min_lat = minimum(c[2] for c in agent_lonlat)
             max_lat = maximum(c[2] for c in agent_lonlat)
-            mesh_polys = hasproperty(loaded.mesh, :polygons_lonlat) ?
+            mesh_polys = (params.spatial_averaging != "centroid" &&
+                          hasproperty(loaded.mesh, :polygons_lonlat)) ?
                          loaded.mesh.polygons_lonlat : nothing
             hsi_agent_dyn = build_dynamic_geodata_hsi_series(
                 agent_lonlat;

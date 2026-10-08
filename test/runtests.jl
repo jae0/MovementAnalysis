@@ -95,6 +95,13 @@ end
         @test load_config(cli_args = ["--tessellation-only"]).tessellation_only === true
         @test load_config().tessellation_only === false
 
+        # `--all` switch runs all inference modes, path methods, and diagnostics.
+        c_all = load_config(cli_args = ["--all"])
+        @test c_all.all === true
+        @test :agent in c_all.model_modes
+        @test :viterbi in c_all.path_methods
+        @test :bayesian_ensemble in c_all.diagnostics
+
         # `source` on `load_open_bathymetry` was unreachable from configuration, so
         # a measured depth grid could not be supplied at all. Without one the
         # loader fabricates a shelf and the depth rules are inert.

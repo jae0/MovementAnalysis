@@ -94,6 +94,16 @@ dynamic_kernels = false         # time-varying environmental covariates
 hmm_smoothing = false           # global multi-segment HMM Viterbi smoothing
 
 # -----------------------------------------------------------------------------
+# Habitat Suitability & GeoData Environmental Sources
+# -----------------------------------------------------------------------------
+use_geodata_habitat = false          # query physical habitat via GeoData
+temperature_source = "woa23"         # temperature source (woa23, glorys12v1)
+temperature_month = 0                # month for temperature (0 = annual mean)
+spatial_averaging = "polygon"        # polygon area average across vertices & centroid
+hsi_dynamic_method = "glorys_monthly"# time-varying bottom temperature series
+circuit_timescale = "annual_average" # time-averaging scale for circuit theory
+
+# -----------------------------------------------------------------------------
 # Posterior inference
 # -----------------------------------------------------------------------------
 n_samples = 200                 # posterior draws

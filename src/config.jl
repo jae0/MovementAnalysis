@@ -123,6 +123,9 @@ Base.@kwdef struct MovementAnalysisConfig
     use_geodata_habitat::Bool = false
     temperature_source::String = "woa23"
     temperature_month::Int = 0
+    spatial_averaging::String = "polygon"
+    hsi_dynamic_method::String = "glorys_monthly"
+    circuit_timescale::String = "annual_average"
     lakehouse_catalog::Union{Nothing, String} = nothing
 
     # --- Agent forward projection --------------------------------------------
@@ -194,6 +197,8 @@ Base.@kwdef struct MovementAnalysisConfig
     # for MCMC.  Independent of `render_html`: a preview must still appear when
     # HTML output is turned off.
     tessellation_only::Bool = false
+    # When true, run all available inference models, path methods, and diagnostics.
+    all::Bool = false
 end
 
 # =============================================================================
@@ -309,10 +314,26 @@ function apply_overrides(
         "configuration contains unknown key(s): " *
         join(sort!(string.(collect(unknown))), ", ")
     ))
+    effective_overlay = copy(overlay)
+    if get(effective_overlay, :all, false) === true
+        if !haskey(effective_overlay, :model_modes)
+            effective_overlay[:model_modes] = Symbol[
+                :telemetry, :telemetry_and_survey, :agent
+            ]
+        end
+        if !haskey(effective_overlay, :path_methods)
+            effective_overlay[:path_methods] = Symbol[:astar, :viterbi]
+        end
+        if !haskey(effective_overlay, :diagnostics)
+            effective_overlay[:diagnostics] = Symbol[
+                :circuit, :stochastic, :bottlenecks, :validation, :bayesian_ensemble
+            ]
+        end
+    end
     values = Any[getfield(base, f) for f in fields]
     for (i, f) in enumerate(fields)
-        haskey(overlay, f) || continue
-        v = overlay[f]
+        haskey(effective_overlay, f) || continue
+        v = effective_overlay[f]
         (v === nothing || ismissing(v)) && continue
         values[i] = _coerce_field(f, v)
     end
@@ -558,6 +579,21 @@ function create_argparse_settings()::ArgParseSettings
             help = "Month for temperature climatology (0 for annual mean)."
             arg_type = Int
             metavar = "MONTH"
+        "--spatial-averaging"
+            dest_name = "spatial_averaging"
+            help = "Spatial averaging mode across cell vertices & centroid (polygon, centroid)."
+            arg_type = String
+            metavar = "MODE"
+        "--hsi-dynamic-method"
+            dest_name = "hsi_dynamic_method"
+            help = "Dynamic seasonal HSI method (glorys_monthly, synthetic)."
+            arg_type = String
+            metavar = "METHOD"
+        "--circuit-timescale"
+            dest_name = "circuit_timescale"
+            help = "Time-averaging scale for circuit theory (annual_average, monthly)."
+            arg_type = String
+            metavar = "SCALE"
         "--hsi-ood-floor"
             dest_name = "hsi_ood_floor"
             help = "Habitat suitability value below which a unit is out-of-domain."
@@ -720,6 +756,10 @@ function create_argparse_settings()::ArgParseSettings
                    "skipped, so this inspects the spatial domain without paying " *
                    "for MCMC. Writes tessellation_polygons.html and opens it. " *
                    "A switch, so it takes no value."
+            action = :store_true
+        "--all"
+            dest_name = "all"
+            help = "Run all inference models, path reconstruction methods, and diagnostics."
             action = :store_true
         "--quiet"
             dest_name = "verbose"
