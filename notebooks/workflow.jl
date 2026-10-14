@@ -11,7 +11,7 @@ using Pkg
 # ╔═╡ 9d4e1b72-8c05-4a63-b7e1-6f0d3a8c5e21
 # ╠═╡
 md"""
-# MovementAnalysis — the workflow, its assumptions, and its references
+# GeoMotion — the workflow, its assumptions, and its references
 
 This notebook walks the whole analysis pipeline once, one panel at a time, on the Snow Crab
 configuration in `configs/snowcrab.toml`.
@@ -66,7 +66,7 @@ input data.
 
 # ╔═╡ 5c1d8e64-2a79-4b5f-9e07-3d6a1c8b4f29
 # ╠═╡
-cd(joinpath(dirname(@__DIR__), "MovementAnalysis"))
+cd(joinpath(dirname(@__DIR__), "GeoMotion"))
 
 # ╔═╡ 7a3f0c15-9b42-4e8d-a6f1-2b8c5d0e7a93
 # ╠═╡
@@ -74,14 +74,136 @@ Pkg.activate(@__DIR__)
 
 # ╔═╡ 8e2b6d47-3f19-4c7b-8d5a-1f4c9b2e0a36
 # ╠═╡
-using MovementAnalysis
+using GeoMotion
 
-# ╔═╡ 1d9c4a28-7e63-4b0f-9c52-8a3d6f1b5e04
+# ╔═╡ 7f3c9e52-4b18-4d6a-8e05-2c9b1d6a3f47
+# ╠═╡
+md"""
+## Step 0 — assimilate the inputs into the GeoData store
+
+The analysis does not read the input files it was given. It reads a **GeoData store** beside
+the other halves' stores, at `projects/lakehouse/GeoMotion/`, and that store is built
+once from the external inputs:
+
+| external input | store artefact | format |
+|---|---|---|
+| `data/tagging.jld2` | `tagging.arrow` | Arrow table, 33 903 events x 24 columns |
+| `data/hsi.jld2` | `hsi.zarr` | `GeoDataset`, `sims` on (unit x month x draw) |
+| `data/sppoly.jld2` | `sppoly.arrow` | Arrow table, 707 units x 15 columns |
+| — | `manifest.toml` | what was converted, from which file, at what time |
+
+### Why a separate step
+
+Two reasons, and the second is the one that matters.
+
+**Speed.** `hsi.jld2` is 728 MB and converting it is the slowest thing in the whole notebook
+— about 11 seconds, but it is 770 MB written to the store for a run that may only need one
+month of it. Doing it once, outside the analysis, is what keeps the panels below cheap to
+re-run.
+
+**An honest boundary.** The input files are someone else's deliverable. Reading them inside
+the analysis means the analysis's results depend on a JLD2 file whose objects have no
+declared dimensions — `sims` is a 707 x 27 x 5000 array with no axes, and a reader has to
+know from outside what the three axes *are*. Writing them once, with their dimensions
+declared, makes the store self-describing: `geoload` returns `:unit`
+(`DIM_SPATIAL`), `:month` (`DIM_TEMPORAL`) and `:draw` (`DIM_PARAMETRIC`) with their
+coordinate arrays attached, so nobody has to remember that axis 1 is a spatial unit.
+
+### It is optional
+
+Assimilation is idempotent, and it knows when to stop: an artefact whose store copy is at
+least as new as its source is **skipped**, not rebuilt. So the cell below prints a decision
+before doing anything, and running it twice in a row does no work the second time. `force =
+true` rebuilds regardless.
+
+That matters because a re-run that silently re-created a 770 MB array every time would be
+tolerated once and then worked around — which is exactly how a cache gets abandoned.
+"""
+
+# ╔═╡ 2c6b8f14-7e39-4a5f-9d08-3f1b7c0a6e52
+# ╠═╡
+md"""
+Before converting anything, ask what the store already holds. This is a read-only call: it
+compares each source against its store artefact and reports what would happen. The notebook's
+next cell acts on this, so the decision is visible rather than buried.
+"""
+
+# ╔═╡ 8d4a1f63-0c72-4e8b-9f6a-5b3e7d1c0a94
+# ╠═╡
+store_status = GeoMotion.movement_store_status()
+
+# ╔═╡ 4e9c2b75-1f68-4d3a-8b0e-6a2d5f9c3e71
+# ╠═╡
+md"""
+### The decision
+
+`needs_work` is the one field to read. `false` means every artefact is already up to date and
+the next cell will report three skips; `true` names what is missing or stale.
+
+The three statuses behind it:
+
+- `source_present` — the input file exists. A missing source is an error, not a skip: a
+  partial store is worse than none because the analysis would run on whatever happened to be
+  there.
+- `store_present` — the artefact exists.
+- `up_to_date` — the store copy is at least as new as its source. Two consecutive runs inside
+  the same clock tick both look current, which is why the manifest also records the source's
+  size.
+
+The freshness test is size-and-mtime rather than a checksum, and that is a deliberate limit:
+adding a digest would have meant adding a dependency to a workspace whose pinned `Zarr` stack
+cannot be re-resolved, so the conversion runs on what is installed.
+"""
+
+# ╔═╡ 6b3f8a29-5d14-4c7e-9a3f-0e8b2c5d7a91
+# ╠═╡
+assimilated = GeoMotion.assimilate_movement_inputs(verbose = true)
+
+# ╔═╡ 1a7d4c38-9e26-4b5f-8d7a-3c0b6e9f2a54
+# ╠═╡
+md"""
+### The store, read back through GeoData
+
+The reader is one `geoload` and two `Arrow.Table` calls — the arrays through GeoData's
+dataset, the tables through GeoData's own backends. Nothing here opens a Zarr directory, and
+that is the point: the concepts the analysis needs (`unit`, `month`, `draw`, and a table of
+events) are the concepts the store declares.
+"""
+
+# ╔═╡ 9e5b2d47-3c81-4a6f-9b0d-7f3c8a1e6d94
+# ╠═╡
+assimilated_inputs = GeoMotion.read_assimilated_movement_inputs()
+
+# ╔═╡ 3c8f1a56-7b49-4d2e-8a7f-1b5c0d9e4a72
+# ╠═╡
+md"""
+### The lifecycle of one run
+
+With the store in place, the panels below ingest from it rather than from the files, and write
+their own results back:
+
+| artefact | direction | where |
+|---|---|---|
+| `tagging`, `hsi`, `sppoly` | in | `lakehouse/GeoMotion/` |
+| lattices, kernels, paths, circuits | out | `lakehouse/GeoMotion/runs/<id>/` |
+
+The run directory is what the resume route and `--figures-only` read, so a long analysis can
+be interrupted after the expensive panels and re-rendered without re-fitting, and two runs of
+the same data are two directories rather than two overwrites of one.
+
+**What is *not* migrated.** The panel pipeline still reaches for the JLD2 inputs directly in a
+number of places, and the store reader above is the front of a migration rather than the whole
+of it: `load_movement_dataset` is the next function to switch over. Until it does, the rule is
+that assimilation is the documented way in and the JLD2 paths remain a supported fallback —
+never a second source of the same file, which is how two readers of one input disagree.
+"""
+
+# ╔═╡ 5f8c3e91-2a74-4b6d-8c0a-9d1f7b4e3a26
 # ╠═╡
 md"""
 ## The six panels
 
-`MovementAnalysis` runs as a sequence of panels, each a function in `src/pipeline.jl`, each
+`GeoMotion` runs as a sequence of panels, each a function in `src/pipeline.jl`, each
 taking what the previous one produced. Running them one at a time here rather than calling
 `run_movement_analysis` end to end is what makes the intermediate state inspectable.
 
@@ -100,7 +222,7 @@ through the one canonical path: package defaults, then this file, then any comma
 
 # ╔═╡ 4f8a2b61-0c37-4d5e-8b9a-6c2f7d1e0b53
 # ╠═╡
-config = MovementAnalysis.load_config(config_path = "configs/snowcrab.toml")
+config = GeoMotion.load_config(config_path = "configs/snowcrab.toml")
 
 # ╔═╡ 6b0e3d92-5a18-4c6f-8d04-7e1b9c4a2f68
 # ╠═╡
@@ -174,7 +296,7 @@ probability of movement.
 
 # ╔═╡ 3e7c1f95-8b04-4d2a-9f6c-5a0d3b8e1c74
 # ╠═╡
-loaded = MovementAnalysis.load_movement_dataset(
+loaded = GeoMotion.load_movement_dataset(
     radius_km       = 15.0,
     time_interval   = :daily,
     verbose         = true,
@@ -227,7 +349,7 @@ params = config
 
 # ╔═╡ 4b6a0d27-9e81-4c5a-8b7f-3f2e8a1d5c04
 # ╠═╡
-fitted = MovementAnalysis.fit_movement_models(loaded, params)
+fitted = GeoMotion.fit_movement_models(loaded, params)
 
 # ╔═╡ 6e3b8a15-2c47-4d9f-8a5b-1c0f7d4e2a83
 # ╠═╡
@@ -249,7 +371,7 @@ predicts the transitions that were not used to fit it.
 
 # ╔═╡ 9a4c0b83-6d15-4e7b-8f3a-2b1d8e5c0a47
 # ╠═╡
-kernels = MovementAnalysis.extract_transition_kernels(loaded, fitted, params)
+kernels = GeoMotion.extract_transition_kernels(loaded, fitted, params)
 
 # ╔═╡ 1f8d3b64-0a29-4c6f-9e8b-5a2c7d0b4e13
 # ╠═╡
@@ -273,7 +395,7 @@ cheapest route and a distribution of routes:
 
 # ╔═╡ 5c2f9a47-8b61-4d3e-9a0c-7e4b1d8f5a26
 # ╠═╡
-path_res = MovementAnalysis.reconstruct_paths_and_diagnostics(loaded, kernels, params)
+path_res = GeoMotion.reconstruct_paths_and_diagnostics(loaded, kernels, params)
 
 # ╔═╡ 3a8e1d95-7c04-4b6a-8f2d-9c5a0e3b1d68
 # ╠═╡
@@ -294,7 +416,7 @@ only how much of the flow is obliged to. And it depends on where nodes are groun
 
 # ╔═╡ 8b4c7f12-5e93-4a6d-8c0f-2d9e5b3a1c74
 # ╠═╡
-diagnostics = MovementAnalysis.compute_advanced_diagnostics(loaded, path_res, params)
+diagnostics = GeoMotion.compute_advanced_diagnostics(loaded, path_res, params)
 
 # ╔═╡ 2f6a9d38-1b47-4c8a-9e1d-7b3c0f5a2e85
 # ╠═╡
@@ -314,7 +436,7 @@ results checkpoint without re-fitting — which is the `--figures-only` route in
 
 # ╔═╡ 6c0b3e81-4a25-4d9f-8b6c-1e8f2a7d0b53
 # ╠═╡
-validation = MovementAnalysis.execute_validation_analyses(loaded, fitted, kernels, params)
+validation = GeoMotion.execute_validation_analyses(loaded, fitted, kernels, params)
 
 # ╔═╡ 9e5d1a47-2c38-4b0a-8f7d-5a3e9c6b1d02
 # ╠═╡
@@ -353,7 +475,7 @@ code.
 
 ## References
 
-1. **MovementAnalysis** — Choi, J. (2025). *Bayesian Spatio-Temporal Models for Marine Ecology*.
+1. **GeoMotion** — Choi, J. (2025). *Bayesian Spatio-Temporal Models for Marine Ecology*.
 2. **Circuit theory for connectivity** — McRae, B. H. et al. (2008). Using circuit theory to
    model connectivity in ecology. *Ecology*, 89(10), 2712–2724.
 3. **Brier score** — Brier, G. W. (1950). Verification of forecasts expressed in terms of
@@ -397,30 +519,4 @@ _Published by Pluto — see [the Pluto documentation](https://featured.plutojl.o
 for how notebooks are structured and shared._
 """
 
-# ╔═╡ Cell order:
-# ╠═╡ 3f2c8a41-6b57-4d1e-9a83-2c5b7e1d0f44 => 1
-# ╠═╡ 9d4e1b72-8c05-4a63-b7e1-6f0d3a8c5e21 => 2
-# ╠═╡ 2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d35 => 3
-# ╠═╡ 5c1d8e64-2a79-4b5f-9e07-3d6a1c8b4f29 => 4
-# ╠═╡ 7a3f0c15-9b42-4e8d-a6f1-2b8c5d0e7a93 => 5
-# ╠═╡ 8e2b6d47-3f19-4c7b-8d5a-1f4c9b2e0a36 => 6
-# ╠═╡ 1d9c4a28-7e63-4b0f-9c52-8a3d6f1b5e04 => 7
-# ╠═╡ 4f8a2b61-0c37-4d5e-8b9a-6c2f7d1e0b53 => 8
-# ╠═╡ 6b0e3d92-5a18-4c6f-8d04-7e1b9c4a2f68 => 9
-# ╠═╡ 9c5b8e13-2d74-4a6f-8e05-1b3c7f0d9a62 => 10
-# ╠═╡ 3e7c1f95-8b04-4d2a-9f6c-5a0d3b8e1c74 => 11
-# ╠═╡ 8f2d6c40-1b93-4e7a-8305-6d9a4f1c0e27 => 12
-# ╠═╡ 2a9e5b73-4c08-4f6d-9b2a-7e1c5d0a3f86 => 13
-# ╠═╡ 7d1c4e98-3b52-4a8f-8c6d-0f4b9e2a1c53 => 14
-# ╠═╡ 4b6a0d27-9e81-4c5a-8b7f-3f2e8a1d5c04 => 15
-# ╠═╡ 6e3b8a15-2c47-4d9f-8a5b-1c0f7d4e2a83 => 16
-# ╠═╡ 9a4c0b83-6d15-4e7b-8f3a-2b1d8e5c0a47 => 17
-# ╠═╡ 1f8d3b64-0a29-4c6f-9e8b-5a2c7d0b4e13 => 18
-# ╠═╡ 5c2f9a47-8b61-4d3e-9a0c-7e4b1d8f5a26 => 19
-# ╠═╡ 3a8e1d95-7c04-4b6a-8f2d-9c5a0e3b1d68 => 20
-# ╠═╡ 8b4c7f12-5e93-4a6d-8c0f-2d9e5b3a1c74 => 21
-# ╠═╡ 2f6a9d38-1b47-4c8a-9e1d-7b3c0f5a2e85 => 22
-# ╠═╡ 6c0b3e81-4a25-4d9f-8b6c-1e8f2a7d0b53 => 23
-# ╠═╡ 9e5d1a47-2c38-4b0a-8f7d-5a3e9c6b1d02 => 24
-# ╠═╡ 4a7c2e95-0b18-4e6d-9f3a-8c1b5d0e3a72 => 25
-# ╠═╡ 3f5a8c27-1e94-4b7d-8a0c-6d3b2e9f1a58 => 26
+# ╔═╡ Cell order:`n# ╠═╡ 3f2c8a41-6b57-4d1e-9a83-2c5b7e1d0f44 => 1`n# ╠═╡ 9d4e1b72-8c05-4a63-b7e1-6f0d3a8c5e21 => 2`n# ╠═╡ 2b7f5d93-1e48-4c0a-8f6d-9a1c4e7b0d35 => 3`n# ╠═╡ 5c1d8e64-2a79-4b5f-9e07-3d6a1c8b4f29 => 4`n# ╠═╡ 7a3f0c15-9b42-4e8d-a6f1-2b8c5d0e7a93 => 5`n# ╠═╡ 8e2b6d47-3f19-4c7b-8d5a-1f4c9b2e0a36 => 6`n# ╠═╡ 7f3c9e52-4b18-4d6a-8e05-2c9b1d6a3f47 => 7`n# ╠═╡ 2c6b8f14-7e39-4a5f-9d08-3f1b7c0a6e52 => 8`n# ╠═╡ 8d4a1f63-0c72-4e8b-9f6a-5b3e7d1c0a94 => 9`n# ╠═╡ 4e9c2b75-1f68-4d3a-8b0e-6a2d5f9c3e71 => 10`n# ╠═╡ 6b3f8a29-5d14-4c7e-9a3f-0e8b2c5d7a91 => 11`n# ╠═╡ 1a7d4c38-9e26-4b5f-8d7a-3c0b6e9f2a54 => 12`n# ╠═╡ 9e5b2d47-3c81-4a6f-9b0d-7f3c8a1e6d94 => 13`n# ╠═╡ 3c8f1a56-7b49-4d2e-8a7f-1b5c0d9e4a72 => 14`n# ╠═╡ 5f8c3e91-2a74-4b6d-8c0a-9d1f7b4e3a26 => 15`n# ╠═╡ 4f8a2b61-0c37-4d5e-8b9a-6c2f7d1e0b53 => 16`n# ╠═╡ 6b0e3d92-5a18-4c6f-8d04-7e1b9c4a2f68 => 17`n# ╠═╡ 9c5b8e13-2d74-4a6f-8e05-1b3c7f0d9a62 => 18`n# ╠═╡ 3e7c1f95-8b04-4d2a-9f6c-5a0d3b8e1c74 => 19`n# ╠═╡ 8f2d6c40-1b93-4e7a-8305-6d9a4f1c0e27 => 20`n# ╠═╡ 2a9e5b73-4c08-4f6d-9b2a-7e1c5d0a3f86 => 21`n# ╠═╡ 7d1c4e98-3b52-4a8f-8c6d-0f4b9e2a1c53 => 22`n# ╠═╡ 4b6a0d27-9e81-4c5a-8b7f-3f2e8a1d5c04 => 23`n# ╠═╡ 6e3b8a15-2c47-4d9f-8a5b-1c0f7d4e2a83 => 24`n# ╠═╡ 9a4c0b83-6d15-4e7b-8f3a-2b1d8e5c0a47 => 25`n# ╠═╡ 1f8d3b64-0a29-4c6f-9e8b-5a2c7d0b4e13 => 26`n# ╠═╡ 5c2f9a47-8b61-4d3e-9a0c-7e4b1d8f5a26 => 27`n# ╠═╡ 3a8e1d95-7c04-4b6a-8f2d-9c5a0e3b1d68 => 28`n# ╠═╡ 8b4c7f12-5e93-4a6d-8c0f-2d9e5b3a1c74 => 29`n# ╠═╡ 2f6a9d38-1b47-4c8a-9e1d-7b3c0f5a2e85 => 30`n# ╠═╡ 6c0b3e81-4a25-4d9f-8b6c-1e8f2a7d0b53 => 31`n# ╠═╡ 9e5d1a47-2c38-4b0a-8f7d-5a3e9c6b1d02 => 32`n# ╠═╡ 4a7c2e95-0b18-4e6d-9f3a-8c1b5d0e3a72 => 33`n# ╠═╡ 3f5a8c27-1e94-4b7d-8a0c-6d3b2e9f1a58 => 34`n

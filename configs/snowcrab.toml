@@ -7,7 +7,7 @@
 #
 # The dataset is identified entirely by the input files below; there is no
 # dataset-name switch. Every parameter here overrides the corresponding default
-# in `MovementAnalysisConfig`, and any flag passed on the command line overrides
+# in `GeoMotionConfig`, and any flag passed on the command line overrides
 # this file. Anything omitted keeps its default.
 
 # -----------------------------------------------------------------------------

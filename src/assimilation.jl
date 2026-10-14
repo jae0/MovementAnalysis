@@ -11,7 +11,7 @@
 #  The separation this file makes:
 #
 #      data/*.jld2   the externally supplied inputs, read-only, never written to
-#      lakehouse/MovementAnalysis/   the assimilated store, GeoData-native, built once
+#      lakehouse/GeoMotion/   the assimilated store, GeoData-native, built once
 #
 #  The store is a directory with three artefacts plus a manifest:
 #
@@ -44,7 +44,7 @@ using TOML
 """
     movement_store_root() -> String
 
-Where the assimilated movement store lives: `projects/lakehouse/MovementAnalysis`, beside
+Where the assimilated movement store lives: `projects/lakehouse/GeoMotion`, beside
 the other halves' stores, so the lakehouse layout is one directory per package.
 
 The default is a path relative to this file Ã¢â‚¬â€ `src/` is two levels below the workspace root,
@@ -55,7 +55,7 @@ with the lakehouse somewhere else.
 function movement_store_root()::String
     override = get(ENV, "MOVEMENT_STORE_ROOT", "")
     isempty(override) || return abspath(override)
-    return normpath(joinpath(@__DIR__, "..", "..", "lakehouse", "MovementAnalysis"))
+    return normpath(joinpath(@__DIR__, "..", "..", "lakehouse", "GeoMotion"))
 end
 
 """
@@ -158,7 +158,10 @@ function assimilate_movement_inputs(;
         if s.name == "hsi"
             _assimilate_hsi(s.source, target; verbose = verbose)
         else
-            _assimilate_table(s.source, target; verbose = verbose)
+            # The key of the table this input is documented to hold. A file with several
+            # DataFrames in it cannot be selected by count, and a wrong one is silently the
+            # wrong analysis.
+            _assimilate_table(s.source, target, s.key; verbose = verbose)
         end
         push!(written, s.name)
         verbose && println("  [assimilate] $(s.name): done in " *
@@ -210,47 +213,98 @@ function _movement_input_specs(;
     tagging_file::Union{Nothing, AbstractString} = nothing,
     hsi_file::Union{Nothing, AbstractString} = nothing,
     sppoly_file::Union{Nothing, AbstractString} = nothing
-)::Vector{@NamedTuple{name::String, source::String, target::String, kind::Symbol}}
+)::Vector{@NamedTuple{name::String, source::String, target::String, kind::Symbol,
+                      key::Union{Nothing, String}}}
     pick(explicit, fallback) = isnothing(explicit) ? joinpath(input_dir, fallback) :
         explicit
     return [
         (name = "tagging", source = pick(tagging_file, "tagging.jld2"),
-         target = "tagging.arrow", kind = :table),
+         target = "tagging.arrow", kind = :table, key = "tagging"),
         (name = "hsi", source = pick(hsi_file, "hsi.jld2"),
-         target = "hsi.zarr", kind = :array),
+         target = "hsi.zarr", kind = :array, key = nothing),
         (name = "sppoly", source = pick(sppoly_file, "sppoly.jld2"),
-         target = "sppoly.arrow", kind = :table),
+         target = "sppoly.arrow", kind = :table, key = "sppoly"),
     ]
 end
 
 """
-    _assimilate_table(source, target)
+    _assimilate_table(source, target, key)
 
-A `DataFrame` in JLD2, moved to Arrow. Read with the workspace that wrote it, because
-JLD2 stores the *type* and a `PooledArray`/`InlineString` column read without those types
-loaded reconstructs as an unusable object.
+A `DataFrame` in JLD2, moved to Arrow.
+
+The object is selected **by JLD2 key**, not by position. `sppoly.jld2` holds nine objects — a
+`DataFrame`, a polygon table, an adjacency matrix, a graph, two centroid arrays and two WKT
+string arrays — and `first(values(f))` happened to return the DataFrame. That is not a
+contract: a JLD2 file's key order is a hash order, so the same expression picks a different
+object in the next release and the conversion would silently move the wrong bytes.
+
+The key is the one the file is documented to hold. A missing key is an error listing what the
+file *does* hold, because a name that drifted means either the input changed or the reader
+did, and those need different fixes.
 """
-function _assimilate_table(source::AbstractString, target::AbstractString;
+function _assimilate_table(source::AbstractString, target::AbstractString,
+                           key::AbstractString;
                            verbose::Bool = false)
-    # `reconstructing_datatypes` at read time is what makes a column come back as its
-    # declared type rather than as a stub. The workspace must hold the column types before
-    # the file is opened: a `PooledArray`/`InlineString` column read without them
-    # reconstructs as an unusable object, and the conversion fails with a MethodError
-    # about `convert` rather than about a missing type.
     df = JLD2.jldopen(source, "r") do f
-        ks = collect(keys(f))
-        isempty(ks) && error("$(source) holds no keys.")
-        v = f[first(ks)]
-        v isa AbstractDict ? first(values(v)) : v
+        # The column types must be in the workspace before the file is opened: a
+        # `PooledArray`/`InlineString` column read without them reconstructs as an unusable
+        # object, and the failure is a MethodError about `convert` rather than about a
+        # missing type.
+        haskey(f, key) || error(
+            "$(source) holds no '$(key)' key. It holds $(sort(collect(keys(f)))). Either " *
+            "the input changed or its key did, and those need different fixes.")
+        v = f[key]
+        v isa DataFrame || error(
+            "$(source) holds '$(key)' as $(typeof(v).name.name), not a DataFrame. " *
+            "Assimilation converts the documented layout.")
+        v
     end
-    df isa DataFrame || error(
-        "$(source) does not hold a DataFrame (it holds $(typeof(df))). Assimilation " *
-        "converts the documented layout; anything else is a changed input.")
     isdir(dirname(target)) || mkpath(dirname(target))
+    # The existing artefact is removed before the new one is written, because `Arrow.write`
+    # refuses an existing file ("Invalid argument" on Windows) and the whole point of
+    # `force`, or of a source that changed, is to replace it.
+    #
+    # The removal can itself fail with permission denied: `Arrow.Table` memory-maps the file
+    # it opens, and on Windows a mapped file cannot be unlinked while the mapping is alive.
+    # A reader that has finished with the table has copies, so the mapping is garbage --
+    # it simply has not been collected. One collection and one retry is therefore enough,
+    # and the reason for it is stated rather than the retry looking like superstition.
+    _unlink_for_rewrite(target)
     Arrow.write(target, df)
     verbose && println("    $(nrow(df)) rows x $(ncol(df)) columns -> " *
                        "$(basename(target))")
     return target
+end
+
+"""
+    _unlink_for_rewrite(path)
+
+Remove `path` so a new artefact can be written over it, tolerating the Windows memory-mapping
+lock by collecting once.
+
+`Arrow.Table` maps the file it reads, and on Windows a mapped file cannot be unlinked until
+the mapping is collected. A caller that has finished with the table holds copies of its data,
+so the mapping is garbage by then -- it has merely not been collected. A single collection and
+one retry is enough, and the reason is recorded here because a bare retry looks like
+superstition.
+"""
+function _unlink_for_rewrite(path::AbstractString)
+    isfile(path) || return nothing
+    for attempt in 1:2
+        try
+            rm(path; force = true)
+            return nothing
+        catch err
+            if attempt == 2
+                msg = first(split(sprint(showerror, err), "\n"))
+                error("Cannot replace $(path): $(msg). On Windows this usually means " *
+                      "another process holds the file open.")
+            end
+        end
+        GC.gc()
+        sleep(0.2)
+    end
+    return nothing
 end
 
 """
@@ -321,9 +375,14 @@ getkey(d, k) = haskey(d, k) ? d[k] : nothing
 The assimilated store, read back through GeoData: the `GeoDataset` for the array and
 `Arrow.Table` for the tables.
 
-This is the reader side of the same contract. It returns named tables rather than the
-package's internal structures, because converting a table to an internal structure is the
-analysis's job and not the store's.
+The HSI dataset is self-describing — the store records the dimensions it was written with, so
+`geoload` returns `:unit` (DIM_SPATIAL), `:month` (DIM_TEMPORAL) and `:draw`
+(DIM_PARAMETRIC) with their coordinate arrays attached, rather than handing back three
+unnamed axes and letting the reader guess which is the spatial one.
+
+`auids` is returned separately because the store names its coordinate array after the
+dimension it labels (`:unit`), which is what makes the axis identifiable at all; the name in
+the source file is not the name that makes the store readable.
 """
 function read_assimilated_movement_inputs(;
     store_dir::AbstractString = movement_store_root()
@@ -338,9 +397,29 @@ function read_assimilated_movement_inputs(;
         (isdir(path) || isfile(path)) || error(
             "The store at $(store_dir) has no $(name). Run `assimilate_movement_inputs()`.")
     end
+    hsi = GeoData.geoload(hsi_path; backend = :zarr)
+    auids = haskey(hsi.coords, :unit) ? collect(Int, hsi.coords[:unit].data) : Int[]
     return (
-        hsi = GeoData.geoload(hsi_path; backend = :zarr),
-        tagging = DataFrame(Arrow.Table(tagging_path)),
-        sppoly = DataFrame(Arrow.Table(sppoly_path))
+        hsi = hsi,
+        auids = auids,
+        years = something(get(hsi.attrs, "years", nothing), Int[]),
+        tagging = _read_arrow(tagging_path),
+        sppoly = _read_arrow(sppoly_path)
     )
+end
+
+"""
+    _read_arrow(path) -> DataFrame
+
+An Arrow table, read through a buffer rather than a mapping of the file.
+
+`Arrow.Table(path)` memory-maps the file, and on Windows a mapped file cannot be unlinked
+while any table built from it is alive -- so a run that read the store could not rewrite it,
+and could not delete its scratch either. Reading the bytes and decoding from memory costs a
+copy of a 21 MB table and removes the whole class of problem: after this call the file is
+closed and nothing refers to it.
+"""
+function _read_arrow(path::AbstractString)
+    isfile(path) || error("The Arrow table at $(path) is missing.")
+    return DataFrame(Arrow.Table(IOBuffer(read(path))))
 end

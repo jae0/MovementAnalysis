@@ -1,27 +1,29 @@
 # ==============================================================================
-# MovementAnalysis Test Suite
+# GeoMotion Test Suite
 # ==============================================================================
 
 using Test
-using MovementAnalysis
+using GeoMotion
 using LinearAlgebra
 using SparseArrays
 using Random
 using DataFrames
 using Statistics
 using Turing
-using DynamicPPL
-using ForwardDiff
-using ArgParse
 using TOML
 using JLD2
+using ForwardDiff
+using DynamicPPL
+using ArgParse
+using Graphs
 using JSON
+using UUIDs
 using LibGEOS
 
 # Scratch for tests that must write a real file. It lives inside the package
 # rather than the OS temp directory: mktempdir requires its parent to exist, and
 # the suite must not write outside the workspace.
-const TEST_TMP = joinpath(pkgdir(MovementAnalysis), "test_tmp")
+const TEST_TMP = joinpath(pkgdir(GeoMotion), "test_tmp")
 mkpath(TEST_TMP)
 
 # Stand-ins for the sampler's chain, which wraps each key as `Parameter(name)` or
@@ -57,20 +59,20 @@ function population_level_parameter_names(chain)
            !any("Parameter($p)" in names for p in REMOVED_PARAMS)
 end
 
-@testset "MovementAnalysis Core Engine" begin
+@testset "GeoMotion Core Engine" begin
 
     @testset "Parameters and Configurations" begin
         # A dataset is identified by its input files, not by a preset function, and
         # the layering is defaults < TOML < CLI < overrides.
         p_def = movement_parameters_default()
-        @test p_def isa MovementAnalysisConfig
+        @test p_def isa GeoMotionConfig
         @test p_def.tagging_file === nothing
         @test p_def.path_methods == [:astar]
         @test p_def.model_modes isa Vector{Symbol}
         @test p_def.diagnostics isa Vector{Symbol}
         @test p_def.land_source === :landmask        # a Symbol, not a String
 
-        c = MovementAnalysisConfig(; tagging_file = "x.jld2", n_samples = 7)
+        c = GeoMotionConfig(; tagging_file = "x.jld2", n_samples = 7)
         @test c.tagging_file == "x.jld2"
         @test c.n_samples == 7
         @test c.path_methods == [:astar]             # untouched by the override
@@ -147,23 +149,23 @@ end
             # the round trip to come back as `nothing` rather than an empty path.
             out = joinpath(dir, "round.toml")
             save_config(from_file, out)
-            back = MovementAnalysisConfig(out)
+            back = GeoMotionConfig(out)
             # Checked as one assertion over every field: the property is uniform,
             # so per-field tests would add 48 assertions and no extra information.
             # `show_help` is a CLI artifact, not analysis state.
-            bad = [f for f in fieldnames(MovementAnalysisConfig)
+            bad = [f for f in fieldnames(GeoMotionConfig)
                    if f !== :show_help &&
                       !isequal(getfield(from_file, f), getfield(back, f))]
             @test isempty(bad)
         end
 
         # Survey-dependent approaches are dropped without a survey file, not errored.
-        @test effective_model_modes(c) == setdiff(c.model_modes, MovementAnalysis.survey_dependent_modes())
-        @test isempty(intersect(effective_model_modes(c), MovementAnalysis.survey_dependent_modes()))
+        @test effective_model_modes(c) == setdiff(c.model_modes, GeoMotion.survey_dependent_modes())
+        @test isempty(intersect(effective_model_modes(c), GeoMotion.survey_dependent_modes()))
 
         # An unknown key is a load error, not a silently ignored typo.
-        @test_throws ArgumentError MovementAnalysis.apply_overrides(
-            MovementAnalysisConfig(), Dict{Symbol,Any}(:not_a_field => 1))
+        @test_throws ArgumentError GeoMotion.apply_overrides(
+            GeoMotionConfig(), Dict{Symbol,Any}(:not_a_field => 1))
 
         # An unknown *value* in a list setting is the same class of typo, and was
         # previously silent: `wants_diagnostic` is a membership test, so
@@ -190,7 +192,7 @@ end
         # be discarded without trace.
         s = create_argparse_settings()
         @test s isa ArgParse.ArgParseSettings
-        known = Set(fieldnames(MovementAnalysisConfig))
+        known = Set(fieldnames(GeoMotionConfig))
         unbound = [f.dest_name for f in s.args_table.fields
                    if f.dest_name != "config" && !(Symbol(f.dest_name) in known)]
         @test isempty(unbound)
@@ -319,14 +321,14 @@ end
         end
 
         # Rings survive the round trip with every vertex, not every other one.
-        rings = MovementAnalysis.geometry_rings(LibGEOS.readgeom(
+        rings = GeoMotion.geometry_rings(LibGEOS.readgeom(
             "POLYGON ((0 0, 3 0, 3 2, 0 2, 0 0))"))
         @test length(rings) == 1
         @test rings[1] ==
               [(-0.0, 0.0), (3.0, 0.0), (3.0, 2.0), (0.0, 2.0), (0.0, 0.0)]
 
         # A multi-part geometry yields one ring per part.
-        @test length(MovementAnalysis.geometry_rings(LibGEOS.readgeom(
+        @test length(GeoMotion.geometry_rings(LibGEOS.readgeom(
             "MULTIPOLYGON (((0 0, 1 0, 1 1, 0 1, 0 0)), ((5 5, 6 5, 6 6, 5 6, 5 5)))"))) == 2
 
         @test_throws ArgumentError dissolve_geometries(LibGEOS.AbstractGeometry[])
@@ -392,15 +394,15 @@ end
             keep[idx(i, 4)] = true          # lobe, 6 cells
         end
         @test count(keep) == 18
-        @test sort(length.(MovementAnalysis._connected_components(keep, nbr))) ==
+        @test sort(length.(GeoMotion._connected_components(keep, nbr))) ==
               [6, 12]
 
         out, n_link, n_unlinked =
-            MovementAnalysis.reconnect_severed_components(keep, W, cents)
+            GeoMotion.reconnect_severed_components(keep, W, cents)
         @test n_link == 1
         @test n_unlinked == 0
         @test count(out) == 19
-        @test length(MovementAnalysis._connected_components(out, nbr)) == 1
+        @test length(GeoMotion._connected_components(out, nbr)) == 1
         # The one added cell is in the pruned row between the two bodies, and
         # nothing else changed.
         added = [i for i in 1:n if out[i] && !keep[i]]
@@ -414,29 +416,29 @@ end
         for j in (1, 2, 5), i in 1:nx
             far[idx(i, j)] = true
         end
-        @test sort(length.(MovementAnalysis._connected_components(far, nbr))) ==
+        @test sort(length.(GeoMotion._connected_components(far, nbr))) ==
               [6, 12]
 
         out2, n_link_ok, n_unlinked_ok =
-            MovementAnalysis.reconnect_severed_components(far, W, cents;
+            GeoMotion.reconnect_severed_components(far, W, cents;
                                                          max_bridge_cells = 64)
         @test n_link_ok == 2
         @test n_unlinked_ok == 0
-        @test length(MovementAnalysis._connected_components(out2, nbr)) == 1
+        @test length(GeoMotion._connected_components(out2, nbr)) == 1
 
         _, n_link_no, n_unlinked_no =
-            MovementAnalysis.reconnect_severed_components(far, W, cents;
+            GeoMotion.reconnect_severed_components(far, W, cents;
                                                          max_bridge_cells = 1)
         @test n_link_no == 0
         @test n_unlinked_no == 6          # the row-5 lobe, reported once
 
         # An already-connected mask is returned untouched.
         out4, n_link4, n_unlinked4 =
-            MovementAnalysis.reconnect_severed_components(trues(n), W, cents)
+            GeoMotion.reconnect_severed_components(trues(n), W, cents)
         @test n_link4 == 0 && n_unlinked4 == 0
         @test out4 == trues(n)
 
-        @test MovementAnalysis.reconnect_severed_components(falses(n), W, cents) ==
+        @test GeoMotion.reconnect_severed_components(falses(n), W, cents) ==
               (falses(n), 0, 0)
     end
 
@@ -474,7 +476,7 @@ end
 
         # The truncated result keeps the full key set, so a caller reading it gets
         # `nothing` rather than a missing field, and says it was a preview.
-        res = MovementAnalysis._tessellation_only_result(
+        res = GeoMotion._tessellation_only_result(
             loaded, "somewhere.html",
             load_config(cli_args = ["--render-html=false"]),
         )
@@ -496,11 +498,11 @@ end
         # is `lsmask_5min_l.bin`; the mismatched request 404s and the error page it
         # leaves behind then fails to gunzip. `_basemap_grid_token` is what keeps the
         # filename and the requested grid in agreement.
-        @test MovementAnalysis._basemap_grid_token(5.0) == "5"
-        @test MovementAnalysis._basemap_grid_token(10.0) == "10"
-        @test MovementAnalysis._basemap_grid_token(1.25) == "1.25"
-        @test MovementAnalysis._basemap_grid_token(2.5) == "2.5"
-        @test_throws ArgumentError MovementAnalysis._basemap_grid_token(0.0)
+        @test GeoMotion._basemap_grid_token(5.0) == "5"
+        @test GeoMotion._basemap_grid_token(10.0) == "10"
+        @test GeoMotion._basemap_grid_token(1.25) == "1.25"
+        @test GeoMotion._basemap_grid_token(2.5) == "2.5"
+        @test_throws ArgumentError GeoMotion._basemap_grid_token(0.0)
 
         # An offshore point and an inland point at the same latitude must differ.
         # Nova Scotia sits near 45.5 N, 63 W.
@@ -586,8 +588,8 @@ end
         burned = sample(MersenneTwister(42), m_tel, MH(), 20;
                         num_warmup = 100, progress = false)
 
-        v_nowarm, _, _ = MovementAnalysis.posterior_kernel_draws(no_warmup)
-        v_burn, _, _ = MovementAnalysis.posterior_kernel_draws(burned)
+        v_nowarm, _, _ = GeoMotion.posterior_kernel_draws(no_warmup)
+        v_burn, _, _ = GeoMotion.posterior_kernel_draws(burned)
         @test !(v_nowarm == v_burn)
 
         # Burn-in must not change how many draws are returned.
@@ -612,21 +614,21 @@ end
         ks = [1, 1, 2, 3, 4, 5]
         m = pure_telemetry_turing_model(releases, recaptures, ks, W, hsi, land)
 
-        params = MovementAnalysisConfig(; n_samples = 60, n_warmup = 60)
-        spl = MovementAnalysis.movement_sampler([0.2, 0.2, 1.0], params)
+        params = GeoMotionConfig(; n_samples = 60, n_warmup = 60)
+        spl = GeoMotion.movement_sampler([0.2, 0.2, 1.0], params)
 
         chn = sample(MersenneTwister(42), m, spl, 60;
                      num_warmup = 60, progress = false)
         @test size(chn, 1) == 60
-        v, d, g = MovementAnalysis.posterior_kernel_draws(chn)
+        v, d, g = GeoMotion.posterior_kernel_draws(chn)
         @test length(unique(round.(v; digits = 9))) > 1     # not frozen
         @test all(isfinite, v) && all(isfinite, d) && all(isfinite, g)
         @test std(v) > 0                                     # real spread
         @test all(>=(0.0), v) && all(>=(0.0), d)
 
         # A non-positive scale is a configuration error, not a silent freeze.
-        @test_throws ArgumentError MovementAnalysis.movement_sampler(
-            [0.2, 0.2, 1.0], MovementAnalysisConfig(; mh_proposal_scale = 0.0))
+        @test_throws ArgumentError GeoMotion.movement_sampler(
+            [0.2, 0.2, 1.0], GeoMotionConfig(; mh_proposal_scale = 0.0))
     end
 
     @testset "Posterior extraction is AD-safe" begin
@@ -667,7 +669,7 @@ end
         # with. Pin the formula so the two can never drift again.
         for v in (0.05, 0.2, 0.5, 0.9)
             for d in (0.01, 0.1, 0.4, 1.0)
-                a, r = MovementAnalysis.movement_alpha_rho(v, d)
+                a, r = GeoMotion.movement_alpha_rho(v, d)
                 tot = v + d + 1e-6
                 @test a ≈ clamp(v / tot, 0.0, 1.0)
                 @test r ≈ clamp(1.0 / (1.0 + tot), 0.01, 0.95)
@@ -677,16 +679,16 @@ end
         # The array method must agree elementwise with the scalar one.
         vs = [0.1, 0.3, 0.7, 0.95]
         ds = [0.2, 0.05, 0.4, 0.01]
-        av, rv = MovementAnalysis.movement_alpha_rho(vs, ds)
-        @test [MovementAnalysis.movement_alpha_rho(vs[i], ds[i]) for i in eachindex(vs)] ==
+        av, rv = GeoMotion.movement_alpha_rho(vs, ds)
+        @test [GeoMotion.movement_alpha_rho(vs[i], ds[i]) for i in eachindex(vs)] ==
               collect(zip(av, rv))
 
         # The bug being pinned: 1/(1+tot) and 1/tot differ, and only the former is
         # the model's definition. At v+d = 0.1 they are 0.909 and 10.0. The 1e-6
         # guard inside the helper is why an exact equality would not hold.
-        @test MovementAnalysis.movement_alpha_rho(0.06, 0.04)[2] ≈
+        @test GeoMotion.movement_alpha_rho(0.06, 0.04)[2] ≈
               clamp(1.0 / 1.1, 0.01, 0.95) atol = 1e-6
-        @test !(MovementAnalysis.movement_alpha_rho(0.06, 0.04)[2] ≈
+        @test !(GeoMotion.movement_alpha_rho(0.06, 0.04)[2] ≈
                 clamp(1.0 / 0.1, 0.01, 0.95))
     end
 
@@ -703,7 +705,7 @@ end
             ParName("mu_gamma")     => fill(1.0, n_draws),
         ), n_draws)
 
-        v, d, g = MovementAnalysis.posterior_kernel_draws(c)
+        v, d, g = GeoMotion.posterior_kernel_draws(c)
         @test v isa Vector{Float64} && length(v) == n_draws
         @test d isa Vector{Float64} && length(d) == n_draws
         @test g isa Vector{Float64} && length(g) == n_draws
@@ -725,14 +727,14 @@ end
             ParName("accepted")    => fill(true, n_draws),
             ParName("logjoint")    => collect(1.0:n_draws),
         ), n_draws)
-        v4, _, _ = MovementAnalysis.posterior_kernel_draws(c4)
+        v4, _, _ = GeoMotion.posterior_kernel_draws(c4)
         @test v4 == fill(0.3, n_draws)
 
         # A chain missing a `mu_*` cannot yield a kernel, so it must say so rather
         # than silently substituting a plausible-looking default.
-        @test_throws ErrorException MovementAnalysis.posterior_kernel_draws(
+        @test_throws ErrorException GeoMotion.posterior_kernel_draws(
             FakeChain(Dict(ParName("lp") => collect(1.0:n_draws)), n_draws))
-        @test_throws ErrorException MovementAnalysis.posterior_kernel_draws(
+        @test_throws ErrorException GeoMotion.posterior_kernel_draws(
             FakeChain(Dict(
                 ParName("mu_velocity") => fill(0.3, n_draws),
                 ParName("mu_diffusion") => fill(0.1, n_draws),
@@ -753,7 +755,7 @@ end
             ParName("z_diffusion")     => z,
             ParName("z_gamma")         => z,
         ), n_draws)
-        vh, dh, gh = MovementAnalysis.posterior_kernel_draws(ch)
+        vh, dh, gh = GeoMotion.posterior_kernel_draws(ch)
         zm = permutedims(reduce(hcat, z))   # n_draws x n_individuals
         @test vh ≈ [mean(clamp.(0.3 .+ 0.1 .* zm[i, :], 0.0, 0.95)) for i in 1:n_draws]
         @test dh ≈ [mean(max.(0.05 .+ 0.02 .* zm[i, :], 0.0)) for i in 1:n_draws]
@@ -785,7 +787,7 @@ end
             for _ in 1:max(0, k)
                 v = P_T * v
             end
-            naive[(r, k)] = MovementAnalysis._rel_probs(v)
+            naive[(r, k)] = GeoMotion._rel_probs(v)
         end
 
         grouped = kstep_transition_cache(P_T, releases, ks)
@@ -837,7 +839,7 @@ end
         )
         before = copy(obs)
 
-        n_rel, n_rec = MovementAnalysis._snap_pruned_endpoints!(obs, keep, cents)
+        n_rel, n_rec = GeoMotion._snap_pruned_endpoints!(obs, keep, cents)
         @test (n_rel, n_rec) == (2, 1)
 
         # Each stale endpoint moves to the nearest *retained* unit. Unit 2 sits at
@@ -867,31 +869,31 @@ end
 
         # A no-op on already-clean endpoints: reports nothing, mutates nothing.
         clean = DataFrame(tagid = ["d"], release = [1], k = [3], recapture = [4])
-        @test MovementAnalysis._snap_pruned_endpoints!(clean, keep, cents) == (0, 0)
+        @test GeoMotion._snap_pruned_endpoints!(clean, keep, cents) == (0, 0)
         @test clean.release == [1] && clean.recapture == [4]
 
         # Without centroids there is nothing to snap to. The caller's post-reindex
         # range check is what has to catch the result, so this stays silent rather
         # than pretending the endpoints were fine.
         stale = DataFrame(tagid = ["e"], release = [2], k = [1], recapture = [6])
-        @test MovementAnalysis._snap_pruned_endpoints!(stale, keep, nothing) == (0, 0)
+        @test GeoMotion._snap_pruned_endpoints!(stale, keep, nothing) == (0, 0)
         @test stale.release == [2]
 
-        @test MovementAnalysis._snap_pruned_endpoints!(obs, keep, cents) == (0, 0)
-        @test MovementAnalysis._snap_pruned_endpoints!(clean, keep, nothing) == (0, 0)
+        @test GeoMotion._snap_pruned_endpoints!(obs, keep, cents) == (0, 0)
+        @test GeoMotion._snap_pruned_endpoints!(clean, keep, nothing) == (0, 0)
 
         # An out-of-range endpoint is a caller error, not something to clamp: the
         # reachability filter in Phase 1c drops those rows before the prune runs.
         oob = DataFrame(tagid = ["f"], release = [0], k = [1], recapture = [4])
-        @test_throws ErrorException MovementAnalysis._snap_pruned_endpoints!(
+        @test_throws ErrorException GeoMotion._snap_pruned_endpoints!(
             oob, keep, cents)
 
         # Nothing retained is unrecoverable, and must not silently pass.
-        @test_throws ErrorException MovementAnalysis._snap_pruned_endpoints!(
+        @test_throws ErrorException GeoMotion._snap_pruned_endpoints!(
             copy(obs), falses(length(keep)), cents)
 
         # A centroid/unit mismatch would index off the end of the centroid vector.
-        @test_throws ErrorException MovementAnalysis._snap_pruned_endpoints!(
+        @test_throws ErrorException GeoMotion._snap_pruned_endpoints!(
             copy(obs), keep, cents[1:3])
     end
 
@@ -1055,7 +1057,7 @@ end
         @test !isempty(setdiff(colours(plasma.html), colours(light.html)))
 
         # The default palette is the same one the struct declares.
-        @test MovementAnalysisConfig().cmap === :viridis
+        @test GeoMotionConfig().cmap === :viridis
     end
 
     @testset "Makie HTML Map Structure" begin
@@ -1178,15 +1180,15 @@ end
         # halves came from different branches the keyword did not exist and the
         # failure was a MethodError on the calibration path only.
         planar = [(10.0, 20.0), (12.0, 20.0), (14.0, 20.0)]
-        @test MovementAnalysis._spatial_node_distance(
+        @test GeoMotion._spatial_node_distance(
             planar[1], planar[2]; coord_space = :planar_km
         ) ≈ 2.0 atol = 1e-10
-        @test MovementAnalysis._infer_coord_space(planar) == false
+        @test GeoMotion._infer_coord_space(planar) == false
 
         geo = [(-63.0, 44.0), (-62.0, 44.0)]
-        d = MovementAnalysis._spatial_node_distance(geo[1], geo[2]; coord_space = :geographic)
+        d = GeoMotion._spatial_node_distance(geo[1], geo[2]; coord_space = :geographic)
         @test 70.0 < d < 90.0            # ~1 degree of longitude at 44 N, in km
-        @test MovementAnalysis._infer_coord_space(geo) == true
+        @test GeoMotion._infer_coord_space(geo) == true
 
         # Known-answer resistance on a path graph: two unit resistances in series.
         Wp = sparse([0.0 1.0 0.0; 1.0 0.0 1.0; 0.0 1.0 0.0])
@@ -1267,7 +1269,7 @@ end
 
     @testset "No HSI overlay by default and transparent choropleth zeros" begin
         # Config default
-        @test MovementAnalysisConfig().overlay_hsi === false
+        @test GeoMotionConfig().overlay_hsi === false
 
         # Spatial mesh setup for testing
         cents = [(-63.5, 44.5), (-63.0, 44.8), (-62.5, 45.0)]
@@ -1350,7 +1352,7 @@ end
     end
 
       using Test
-using MovementAnalysis
+using GeoMotion
 using SparseArrays
 using Random
 using DataFrames
@@ -1482,9 +1484,8 @@ using Statistics: mean
     @test all(0.0 .<= su.visit_probability .<= 1.0)
 end
       using Test
-using MovementAnalysis
+using GeoMotion
 using SparseArrays
-using ForwardDiff
 using Statistics: mean
 
 @testset "Habitat-Coupled Residency" begin
@@ -1637,7 +1638,7 @@ using Statistics: mean
           (rep.best_mean_loglik - rep.first_order_mean_loglik > 1e-9)
 end
       using Test
-using MovementAnalysis
+using GeoMotion
 using SparseArrays
 using DataFrames
 
@@ -1648,7 +1649,7 @@ using DataFrames
 @testset "Agent Outputs Reach Visualisation and Tables" begin
     m = build_hex_mesh_planar([-64.0, -62.0], [44.0, 46.0]; radius_km = 30.0)
     S = m.n_units
-    hsi = MovementAnalysis.sanitise_hsi(collect(range(0.2, 0.9; length = S)))
+    hsi = GeoMotion.sanitise_hsi(collect(range(0.2, 0.9; length = S)))
     P = sparse(build_sparse_transition_kernel(m.W, hsi, 1.5, 0.2, 0.5, nothing))
 
     traj = forward_project_agents(
@@ -1672,7 +1673,7 @@ using DataFrames
     su_map = plot_choropleth(
         m.polygons_lonlat, su.visit_probability;
         title = "Projected Space Use", vmin = 0.0, vmax = 1.0)
-    @test su_map isa MovementAnalysis.InteractiveMap
+    @test su_map isa GeoMotion.InteractiveMap
     html = su_map.html
     @test occursin("Projected Space Use", html)
     @test occursin("L.geoJSON", html) || occursin("FeatureCollection", html)
@@ -1681,7 +1682,7 @@ using DataFrames
     pts = [[(Float64(m.centroids_lonlat[u][1]), Float64(m.centroids_lonlat[u][2]))
             for u in traj.mesh_unit]]
     trk = plot_tracks_map(pts, m; max_paths = 1)
-    @test trk isa MovementAnalysis.InteractiveMap
+    @test trk isa GeoMotion.InteractiveMap
     @test occursin("L.geoJSON", trk.html)
 
     # --- the agent layer on the interactive paths dashboard -----------------
@@ -1700,11 +1701,11 @@ using DataFrames
 
     # --- corridor explorer still builds without agent input -----------------
     corr = plot_interactive_corridor_dashboard(P, m; max_paths_render = 2)
-    @test corr isa MovementAnalysis.InteractiveMap
+    @test corr isa GeoMotion.InteractiveMap
     @test occursin("FeatureCollection", corr.html)
 end
       using Test
-using MovementAnalysis
+using GeoMotion
 using SparseArrays
 using LinearAlgebra
 
@@ -1734,7 +1735,7 @@ using LinearAlgebra
     # The ring is bipartite with parts {1,3} and {2,4}, so 1 -> 3 is reachable
     # only at even k and 1 -> 2 only at odd k. Anything else must be refused.
     for k in 2:2:6
-        p = MovementAnalysis._exact_k_max_prob_path(P, 1, 3, k)
+        p = GeoMotion._exact_k_max_prob_path(P, 1, 3, k)
         @test !isempty(p)
         @test length(p) == k + 1          # k transitions, k+1 units
         @test first(p) == 1 && last(p) == 3
@@ -1744,24 +1745,24 @@ using LinearAlgebra
         end
     end
     for k in 1:2:5
-        p = MovementAnalysis._exact_k_max_prob_path(P, 1, 2, k)
+        p = GeoMotion._exact_k_max_prob_path(P, 1, 2, k)
         @test !isempty(p)
         @test length(p) == k + 1
         @test first(p) == 1 && last(p) == 2
     end
     # The wrong parity is refused rather than padded.
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 1))
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 3))
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 2, 2))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 3, 1))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 3, 3))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 2, 2))
 
     # --- node 1 has no self-loop, so a stationary walk needs an even k ---------
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 1, 1))
-    @test !isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 1, 2))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 1, 1))
+    @test !isempty(GeoMotion._exact_k_max_prob_path(P, 1, 1, 2))
 
     # --- k = 0 is a single-unit path, or nothing ---------------------------
-    @test MovementAnalysis._exact_k_max_prob_path(P, 1, 1, 0) == [1]
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 2, 0))
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 2, -1))
+    @test GeoMotion._exact_k_max_prob_path(P, 1, 1, 0) == [1]
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 2, 0))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 2, -1))
 
     # --- a residence self-loop is honoured where the kernel permits it -----
     P_res = sparse([
@@ -1770,25 +1771,25 @@ using LinearAlgebra
         0.0 0.5 0.0 0.5;
         0.0 0.0 0.5 0.5;
     ])
-    @test MovementAnalysis._exact_k_max_prob_path(P_res, 1, 1, 3) == [1, 1, 1, 1]
+    @test GeoMotion._exact_k_max_prob_path(P_res, 1, 1, 3) == [1, 1, 1, 1]
 
     # --- p_min gates a transition out of existence -------------------------
     # The only edge from 1 to 2 sits below the cutoff, so 1 -> 2 in one step must
     # be refused outright, then admitted once the cutoff is lowered.
     P_gate = sparse([0.0 1e-15; 0.5 0.5])
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P_gate, 1, 2, 1; p_min = 1e-12))
-    @test MovementAnalysis._exact_k_max_prob_path(P_gate, 1, 2, 1; p_min = 1e-18) == [1, 2]
+    @test isempty(GeoMotion._exact_k_max_prob_path(P_gate, 1, 2, 1; p_min = 1e-12))
+    @test GeoMotion._exact_k_max_prob_path(P_gate, 1, 2, 1; p_min = 1e-18) == [1, 2]
 
     # --- land is never entered or left -------------------------------------
     land = falses(S)
     land[4] = true
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 4, 1; land_mask = land))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 4, 1; land_mask = land))
     # With 4 land, 1 -> 3 at k = 2 must route through 2, never through 4.
-    lp = MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 2; land_mask = land)
+    lp = GeoMotion._exact_k_max_prob_path(P, 1, 3, 2; land_mask = land)
     @test lp == [1, 2, 3]
 
     # --- an unreachable goal returns nothing, never a padded path ----------
-    @test isempty(MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 1; p_min = 0.99))
+    @test isempty(GeoMotion._exact_k_max_prob_path(P, 1, 3, 1; p_min = 0.99))
 
     # --- the returned route is the maximum-probability one -----------------
     # Brute force every walk of length 2 from 1 to 3 and confirm the router
@@ -1798,7 +1799,7 @@ using LinearAlgebra
         w = P[1, mid] * P[mid, 3]
         best = max(best, w)
     end
-    got = MovementAnalysis._exact_k_max_prob_path(P, 1, 3, 2)
+    got = GeoMotion._exact_k_max_prob_path(P, 1, 3, 2)
     @test P[got[1], got[2]] * P[got[2], got[3]] ≈ best
 
     # --- astar_predict_path no longer pads when release == recapture --------
@@ -1815,7 +1816,7 @@ using LinearAlgebra
     T = build_sparse_transition_kernel(W, hsi, 1.0, 0.2, 0.5, nothing)
     for (a, b) in ((1, 3), (2, 4))
         for k in 1:4
-            r = MovementAnalysis._exact_k_max_prob_path(T, a, b, k)
+            r = GeoMotion._exact_k_max_prob_path(T, a, b, k)
             isempty(r) && continue
             @test length(r) == k + 1
             @test first(r) == a && last(r) == b
@@ -1833,12 +1834,12 @@ end
         # `try`, so the panel simply never rendered and nothing failed. This pins
         # the single-argument contract that the call site now depends on.
         for series in (Float64[], [1.0, 2.0, 3.0])
-            @test MovementAnalysis._sample_column(series) isa Vector{Float64}
-            @test length(MovementAnalysis._sample_column(series)) == length(series)
+            @test GeoMotion._sample_column(series) isa Vector{Float64}
+            @test length(GeoMotion._sample_column(series)) == length(series)
         end
         # A pooled draw series has no group axis, so passing an index must fail
         # rather than silently picking a column that no longer exists.
-        @test_throws MethodError MovementAnalysis._sample_column([1.0, 2.0], 1)
+        @test_throws MethodError GeoMotion._sample_column([1.0, 2.0], 1)
     end
 
     @testset "Failed panels are recorded, not silently dropped" begin
@@ -1846,13 +1847,13 @@ end
         # end a run that has already sampled for minutes. That policy hid three
         # real defects, because the catch only printed a note and gated the print
         # on `verbose`. Failures are now recorded unconditionally.
-        sk = MovementAnalysis.PANEL_SKIPS
+        sk = GeoMotion.PANEL_SKIPS
         empty!(sk)
         @test isempty(sk)
-        @test MovementAnalysis.report_panel_skips() == 0
+        @test GeoMotion.report_panel_skips() == 0
 
-        MovementAnalysis._record_panel_skip("Widget", ErrorException("boom"))
-        MovementAnalysis._record_panel_skip("Gadget", ArgumentError("bad"))
+        GeoMotion._record_panel_skip("Widget", ErrorException("boom"))
+        GeoMotion._record_panel_skip("Gadget", ArgumentError("bad"))
         @test length(sk) == 2
         @test occursin("Widget", sk[1]) && occursin("boom", sk[1])
         @test occursin("Gadget", sk[2]) && occursin("bad", sk[2])
@@ -1860,12 +1861,101 @@ end
         # A huge type signature must be capped, not dumped: the note is one line.
         big = ErrorException("x"^5000)
         empty!(sk)
-        MovementAnalysis._record_panel_skip("Huge", big)
+        GeoMotion._record_panel_skip("Huge", big)
         @test length(sk) == 1
         @test length(sk[1]) < 300
 
-        @test MovementAnalysis.report_panel_skips() == 1
+        @test GeoMotion.report_panel_skips() == 1
         empty!(sk)
+    end
+
+    @testset "Assimilation: the inputs become a store, and only once" begin
+        # The store is written to the test scratch, never to the real lakehouse: a test must
+        # not leave a 770 MB artefact in the shared store next to the other halves' data.
+        local tmp = joinpath(TEST_TMP, "assimilation_$(UUIDs.uuid4())")
+        local input_dir = joinpath(tmp, "data")
+        local store_dir = joinpath(tmp, "store")
+        mkpath(input_dir)
+
+        # A source that holds what assimilation is documented to read: the tagging table, the
+        # suitability series, and a units file with several objects in it, of which only one
+        # is the table. The last is the case that matters -- the file's key order is a hash
+        # order, so picking an object by position is a bug that only shows up later.
+        local tagging = DataFrame(aid = [1, 2, 3], lon = [-1.0, 0.0, 1.0],
+                                  lat = [44.0, 45.0, 46.0])
+        local hsi = (sims = 0.1:0.1:(0.1 * 6 * 2 * 3) |> x -> reshape(x, 6, 2, 3),
+                     years = [1999, 2000], auids = collect(1:6))
+        local sppoly = DataFrame(AUID = collect(1:4), centroid_lon = 1.0:4.0)
+        JLD2.save(joinpath(input_dir, "tagging.jld2"), "tagging", tagging)
+        JLD2.save(joinpath(input_dir, "hsi.jld2"), "sims", hsi.sims,
+                  "years", hsi.years, "auids", hsi.auids)
+        # `W` is a graph, deliberately read first in the raw file's key order: a positional
+        # read would take it and believe it had converted the table.
+        JLD2.save(joinpath(input_dir, "sppoly.jld2"), "graph", Graphs.SimpleGraph(4),
+                  "sppoly", sppoly)
+
+        local before = GeoMotion.movement_store_status(store_dir = store_dir,
+                                                             input_dir = input_dir)
+        @test before.needs_work
+        @test before.absent == ["tagging", "hsi", "sppoly"]
+
+        # The conversion.
+        local r = GeoMotion.assimilate_movement_inputs(input_dir = input_dir,
+                                                             store_dir = store_dir,
+                                                             verbose = false)
+        @test r.written == ["tagging", "hsi", "sppoly"]
+        @test isfile(r.manifest)
+
+        # The store's dimensions are the ones the dataset declared, restored by `geoload`.
+        local back = GeoMotion.read_assimilated_movement_inputs(store_dir = store_dir)
+        @test haskey(back.hsi.dims, :unit) && haskey(back.hsi.dims, :month) &&
+              haskey(back.hsi.dims, :draw)
+        @test back.hsi.dims[:unit].size == 6
+        @test back.hsi.dims[:month].size == 2
+        @test back.auids == hsi.auids
+        @test back.years == hsi.years
+        @test size(back.hsi.variables["sims"].data) == size(hsi.sims)
+        @test back.hsi.variables["sims"].data == hsi.sims
+        # The tables come back as tables, with their values intact.
+        @test size(back.tagging, 1) == 3
+        @test back.tagging.aid == tagging.aid
+        @test ncol(back.sppoly) == 2
+        @test back.sppoly.AUID == sppoly.AUID
+
+        # The second call does nothing, which is the property the whole design rests on.
+        local r2 = GeoMotion.assimilate_movement_inputs(input_dir = input_dir,
+                                                              store_dir = store_dir,
+                                                              verbose = false)
+        @test r2.written == String[]
+        @test Set(r2.skipped) == Set(["tagging", "hsi", "sppoly"])
+
+        # A source that changed is reported stale rather than reused, and rebuilding goes to
+        # a fresh store directory. It cannot rebuild over the first one *in this process*:
+        # `Arrow.Table` maps the file it opens, and on Windows a mapped file cannot be
+        # unlinked while a table built from it is alive. That is a platform behaviour and not
+        # a defect of the store, so the assertion is about the decision (stale, then rebuilt)
+        # rather than about overwriting a live mapping.
+        sleep(1.1)                     # mtime granularity, so the write is observable
+        local grown = vcat(sppoly, DataFrame(AUID = [5], centroid_lon = [5.0]))
+        JLD2.save(joinpath(input_dir, "sppoly.jld2"), "graph", Graphs.SimpleGraph(5),
+                  "sppoly", grown)
+        local stale = GeoMotion.movement_store_status(store_dir = store_dir,
+                                                            input_dir = input_dir)
+        @test "sppoly" in stale.stale
+        local store_dir2 = joinpath(tmp, "store2")
+        local r3 = GeoMotion.assimilate_movement_inputs(input_dir = input_dir,
+                                                             store_dir = store_dir2,
+                                                             verbose = false)
+        @test r3.written == ["tagging", "hsi", "sppoly"]
+        local back3 = GeoMotion.read_assimilated_movement_inputs(store_dir = store_dir2)
+        @test nrow(back3.sppoly) == 5
+
+        # A missing source is an error naming it, because a partial store is worse than none.
+        rm(joinpath(input_dir, "tagging.jld2"))
+        @test_throws Exception GeoMotion.assimilate_movement_inputs(
+            input_dir = input_dir, store_dir = store_dir, verbose = false)
+
+        rm(tmp; recursive = true, force = true)
     end
 
 end

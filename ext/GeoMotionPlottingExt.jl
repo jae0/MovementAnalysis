@@ -1,7 +1,7 @@
 """
-    MovementAnalysisPlottingExt
+    GeoMotionPlottingExt
 
-Optional plotting backend for MovementAnalysis.
+Optional plotting backend for GeoMotion.
 
 Raster/`Plots`-style diagnostics call `plot` and `savefig`, which the base
 package deliberately does not depend on: `Plots` pulls in GR and is much heavier
@@ -13,16 +13,16 @@ Without `Plots` the base methods remain defined and raise a clear
 `ArgumentError` naming the missing dependency, rather than failing later with an
 obscure `UndefVarError: plot not defined`.
 """
-module MovementAnalysisPlottingExt
+module GeoMotionPlottingExt
 
-using MovementAnalysis
+using GeoMotion
 using Plots
 using Statistics: mean
 
 # Concrete arity is more specific than the base `args...` fallback, so these
 # definitions add methods rather than overwriting the base ones.
 
-function MovementAnalysis.plot_posterior_predictive_check(ppc, output_dir)
+function GeoMotion.plot_posterior_predictive_check(ppc, output_dir)
     mkpath(output_dir)
     plot_file = joinpath(output_dir, "posterior_predictive_diagnostics.png")
 
@@ -41,7 +41,7 @@ function MovementAnalysis.plot_posterior_predictive_check(ppc, output_dir)
     return plot_file
 end
 
-function MovementAnalysis._ad_ratio_histogram_via_plots(
+function GeoMotion._ad_ratio_histogram_via_plots(
     advection_field::AbstractVector{<:Real},
     diffusion_field::AbstractVector{<:Real}
 )

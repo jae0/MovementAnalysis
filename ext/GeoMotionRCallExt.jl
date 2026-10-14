@@ -1,7 +1,7 @@
 """
-    MovementAnalysisRCallExt
+    GeoMotionRCallExt
 
-Optional R backend for MovementAnalysis.
+Optional R backend for GeoMotion.
 
 R was previously a hard dependency, which meant the package could not precompile
 or load on any machine without an R installation — even for analyses that read
@@ -13,16 +13,16 @@ the base package raises a clear, actionable error when an `.rds`, `.rda`, or
 The R packages `qs` and `arrow` must be installed in R for `r_to_ipc`; they are
 not Julia dependencies and cannot be checked from here.
 """
-module MovementAnalysisRCallExt
+module GeoMotionRCallExt
 
-using MovementAnalysis
+using GeoMotion
 using RCall
 using Arrow
 using DataFrames
 
 # -- tabular R data -----------------------------------------------------------
 
-function MovementAnalysis._r_ipc_convert(filepath::AbstractString, temp_ipc::AbstractString)
+function GeoMotion._r_ipc_convert(filepath::AbstractString, temp_ipc::AbstractString)
     R"""
     local({
         filepath <- $(filepath)
@@ -69,7 +69,7 @@ end
 
 # -- R data for polygon rings -------------------------------------------------
 
-function MovementAnalysis._r_load_object(path::AbstractString)
+function GeoMotion._r_load_object(path::AbstractString)
     val = RCall.reval(R"load($path)")
     # Unwrap the single object an .rds/.RData file normally holds.
     if val isa RCall.RObject && length(RCall.rcopy(val)) == 1

@@ -305,20 +305,20 @@ Generates standalone HTML/SVG dashboards. After Phase 6 completes, writes
 
 ```powershell
 # Full run
-julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml
+julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml
 
 # Skip MCMC â€” load movement_checkpoint.jld2, run Phases 4â€“6
-julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --resume=true
+julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --resume=true
 
 # Regenerate all HTML dashboards only (requires prior successful run)
-julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --figures-only=true
+julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --figures-only=true
 
 # Tweak styling and regenerate
-julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml `
+julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
     --figures-only=true --dark-mode=true --cmap=plasma
 
 # Write results checkpoint without rendering HTML
-julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml `
+julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml `
     --resume=true --render-html=false
 ```
 
@@ -356,7 +356,7 @@ julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml `
 To bootstrap the full results checkpoint from an existing MCMC run:
 
 ```powershell
-julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --resume=true
+julia --project=. GeoMotionRun.jl --config=configs/snowcrab.toml --resume=true
 ```
 
 ---
@@ -366,7 +366,7 @@ julia --project=. MovementAnalysisRun.jl --config=configs/snowcrab.toml --resume
 ### Example 1: Basic Analysis
 
 ```julia
-using MovementAnalysis
+using GeoMotion
 results = run_movement_analysis()
 println("Paths reconstructed: ", length(results.paths))
 ```
@@ -374,7 +374,7 @@ println("Paths reconstructed: ", length(results.paths))
 ### Example 2: Snow Crab with Validation
 
 ```julia
-using MovementAnalysis
+using GeoMotion
 
 params = merge(movement_parameters_snowcrab(), (;
     depth_range  = (25.0, 400.0),
@@ -392,7 +392,7 @@ println("Brier score: ", pa.posterior_predictive.summary.brier_mean)
 ### Example 3: Regenerate Figures Only
 
 ```julia
-using MovementAnalysis
+using GeoMotion
 
 params = merge(movement_parameters_snowcrab(), (;
     figures_only = true,
@@ -437,7 +437,7 @@ output/
 
 ## 9. Scientific References
 
-1. **MovementAnalysis**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for
+1. **GeoMotion**: Choi, J. (2025). *Bayesian Spatio-Temporal Models for
    Marine Ecology*.
 2. **Circuit Theory**: McRae, B. H. et al. (2008). Using circuit theory to model
    connectivity in ecology. *Ecology*, 89(10), 2712â€“2724.

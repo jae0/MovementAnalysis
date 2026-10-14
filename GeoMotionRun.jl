@@ -4,12 +4,12 @@ import Pkg
 
 Pkg.activate(@__DIR__)
 
-using MovementAnalysis
+using GeoMotion
 
 if abspath(PROGRAM_FILE) == @__FILE__
     # `julia_main` returns a process exit code (0 on success, 1 on failure).
     # Propagating it matters for batch runs: a pipeline that dies partway through
     # otherwise looks like a clean run to any caller checking only `$?`, and the
     # partial outputs it left behind get mistaken for a result.
-    exit(MovementAnalysis.julia_main())
+    exit(GeoMotion.julia_main())
 end

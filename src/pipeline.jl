@@ -15,13 +15,13 @@ using DataFrames
 Raise a clear, actionable error when an R-backed code path is reached without
 `RCall` installed.
 
-R is an optional dependency. `MovementAnalysisRCallExt` is loaded automatically
+R is an optional dependency. `GeoMotionRCallExt` is loaded automatically
 when `RCall` and a working R are both present; this stub only fires when they are
 not, and it names the specific input that needed them rather than surfacing an
 `UndefVarError` from deep inside a loader.
 """
 function _require_r_backend(what::AbstractString)
-    Base.get_extension(@__MODULE__, :MovementAnalysisRCallExt) === nothing && throw(
+    Base.get_extension(@__MODULE__, :GeoMotionRCallExt) === nothing && throw(
         ArgumentError(
             "$what requires the optional `RCall` backend, which is not loaded. " *
             "Install it with `import Pkg; Pkg.add(\"RCall\")` and ensure an R " *
@@ -38,7 +38,7 @@ end
 
 Convert a tabular R file to an Arrow IPC file, in R.
 
-Implemented by `MovementAnalysisRCallExt`. This stub exists so the package loads
+Implemented by `GeoMotionRCallExt`. This stub exists so the package loads
 without `RCall`.
 """
 function _r_ipc_convert(filepath::AbstractString, temp_ipc::AbstractString)
@@ -51,7 +51,7 @@ end
 
 Load an R object (`.rds` / `.RData`) for region-polygon extraction.
 
-Implemented by `MovementAnalysisRCallExt`. This stub exists so the package loads
+Implemented by `GeoMotionRCallExt`. This stub exists so the package loads
 without `RCall`.
 """
 function _r_load_object(path::AbstractString)
@@ -97,7 +97,7 @@ function r_to_ipc(filepath::AbstractString)
     temp_ipc = tempname() * ".arrow"
     
     try
-        # The R conversion lives in MovementAnalysisRCallExt so that the package
+        # The R conversion lives in GeoMotionRCallExt so that the package
         # loads without an R installation.
         _r_ipc_convert(filepath, temp_ipc)
 
@@ -261,7 +261,7 @@ end
 # =============================================================================
 
 """
-    movement_parameters_default() -> MovementAnalysisConfig
+    movement_parameters_default() -> GeoMotionConfig
 
 The single canonical entry point for all analysis parameters.
 
@@ -272,7 +272,7 @@ declared in `src/config.jl`. A dataset is selected by its input files, not by a
 separate code path: pass `tagging_file` (and the HSI and spatial-unit files that
 accompany it) to analyse real data, and leave them unset for synthetic data.
 """
-movement_parameters_default() = MovementAnalysisConfig()
+movement_parameters_default() = GeoMotionConfig()
 
 # =============================================================================
 # Private Helpers
@@ -802,7 +802,7 @@ function load_movement_data(params)::NamedTuple
     verbose = params.verbose
 
     verbose && println("=" ^ 72)
-    verbose && println("  MovementAnalysis Pipeline")
+    verbose && println("  GeoMotion Pipeline")
     verbose && println("=" ^ 72)
 
     # -- 1a. Load or generate the dataset -----------------------------------
@@ -1594,10 +1594,9 @@ the point of the flag is to look at the mesh, so gating it on whether HTML outpu
 is enabled would let `--render-html=false --tessellation-only` quietly show
 nothing at all.
 
-PlotlyJS 0.18 has no browser-opening display method, so the figure is written as
-the same self-contained HTML every other dashboard uses and the platform launcher
-opens it. When no launcher is available (headless session, unknown platform) the
-file is still written and the path is returned, so the map is never lost.
+The figure is written as the same self-contained HTML every other dashboard uses and the
+platform launcher opens it. When no launcher is available (headless session, unknown
+platform) the file is still written and the path is returned, so the map is never lost.
 
 # Arguments
 - `loaded`: output of [`load_movement_data`](@ref).
@@ -2804,7 +2803,7 @@ end
 # export_movement_summary_csv) and standalone SVG/HTML dashboard exporters
 # (export_movement_posterior_dashboard, export_movement_flow_dashboard,
 # export_movement_summary_dashboard) have been consolidated into src/movement.jl
-# and are exported by the core MovementAnalysis module.
+# and are exported by the core GeoMotion module.
 
 
 """
@@ -4088,7 +4087,7 @@ end
 """
     run_movement_analysis(params = movement_parameters_default()) -> NamedTuple
 
-Executes the complete MovementAnalysis movement analysis pipeline. All six phases
+Executes the complete GeoMotion movement analysis pipeline. All six phases
 are called in sequence:
 
 1. `load_movement_data`                 -- data ingestion & depth barriers
@@ -4096,7 +4095,7 @@ are called in sequence:
 3. `extract_transition_kernels`         -- posterior kernel construction
 4. `reconstruct_paths_and_diagnostics` -- paths, corridors, bottlenecks
 5. `compute_advanced_diagnostics`      -- circuit theory
-6. `export_dashboards`                 -- interactive PlotlyJS HTML maps
+     6. `export_dashboards`                 -- interactive Leaflet HTML maps
 
 # Arguments
 - `params`: Configuration NamedTuple. Start from a parameter preset and

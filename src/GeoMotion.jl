@@ -1,5 +1,5 @@
 """
-    MovementAnalysis
+    GeoMotion
 
 Standalone Spatial Animal Movement, Trajectory Reconstruction, and Ecological
 Connectivity Analysis Engine. Provides mark-recapture telemetry ingestion,
@@ -7,7 +7,7 @@ stochastic transition kernel estimation, explicit Turing.jl probabilistic
 telemetry calibration, A* least-cost trajectory and corridor routing, electrical
 circuit theory pinchpoint analysis, and interactive Leaflet HTML dashboard generation.
 """
-module MovementAnalysis
+module GeoMotion
 
 using LinearAlgebra
 using SparseArrays
@@ -210,7 +210,7 @@ export
     export_movement_summary_dashboard,
 
     # Configuration
-    MovementAnalysisConfig,
+    GeoMotionConfig,
     load_config,
     save_config,
     create_argparse_settings,
@@ -261,4 +261,4 @@ function __init__()
     Random.seed!(42)
 end
 
-end # module MovementAnalysis
+end # module GeoMotion

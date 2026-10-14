@@ -1,13 +1,13 @@
-# Canonical parameter definition and configuration loading for MovementAnalysis.
+# Canonical parameter definition and configuration loading for GeoMotion.
 #
 # Every entry point in this package -- library call, CLI invocation, or TOML file
-# -- resolves to the single `MovementAnalysisConfig` struct defined below. There
+# -- resolves to the single `GeoMotionConfig` struct defined below. There
 # are no dataset presets, no flag aliases, and no per-call-site defaults: a
 # dataset is selected by its configuration file, not by a special code path.
 #
 # Layering, lowest to highest precedence:
 #
-#   1. Field defaults declared in `MovementAnalysisConfig`
+#   1. Field defaults declared in `GeoMotionConfig`
 #   2. TOML config file   (e.g. `configs/my_dataset.toml`)
 #   3. Command-line flags (declared once in `create_argparse_settings`)
 #   4. Programmatic overrides passed to `load_config(overrides = ...)`
@@ -35,7 +35,7 @@ const DIAGNOSTIC_CHOICES = Set([:circuit, :stochastic, :bottlenecks,
 const PATH_METHOD_CHOICES = Set([:astar, :viterbi])
 
 """
-    MovementAnalysisConfig
+    GeoMotionConfig
 
 Canonical container for every analysis parameter.
 
@@ -56,7 +56,7 @@ parameter directly as `params.field_name` without existence checks or fallbacks.
 `land_source`, `land_mask_resolution` and `depth_barrier_mode` are `Symbol`s so a
 typo is a load error rather than a silently unmatched string comparison.
 """
-Base.@kwdef struct MovementAnalysisConfig
+Base.@kwdef struct GeoMotionConfig
     # --- Approaches to fit ---------------------------------------------------
       model_modes::Vector{Symbol} = Symbol[
           :telemetry, :telemetry_and_survey, :agent
@@ -223,7 +223,7 @@ is accepted as "not configured".
 """
 function _coerce_field(name::Symbol, value)
     value === nothing && return nothing
-    return _coerce_value(_strip_nothing(fieldtype(MovementAnalysisConfig, name)), value)
+    return _coerce_value(_strip_nothing(fieldtype(GeoMotionConfig, name)), value)
 end
 
 # `Union{Nothing,T}` is coerced as `T`, so nullable and required fields share one
@@ -271,7 +271,7 @@ _coerce_value(::Type{Dict{Int,Int}}, value::AbstractVector) =
 # An empty string for a nullable field means "not configured", so a hand-edited
 # file can blank out a path without having to delete the line.
 function _coerce_field(name::Symbol, value::AbstractString)
-    T = fieldtype(MovementAnalysisConfig, name)
+    T = fieldtype(GeoMotionConfig, name)
     if isempty(strip(value)) && Base.nonmissingtype(T) === Union{Nothing}
         return nothing
     end
@@ -298,17 +298,17 @@ end
 # =============================================================================
 
 """
-    apply_overrides(base::MovementAnalysisConfig, overlay::Dict{Symbol,Any})
+    apply_overrides(base::GeoMotionConfig, overlay::Dict{Symbol,Any})
 
 Return a copy of `base` with every present key of `overlay` replaced by its
 coerced value. A key whose value is `nothing` or `missing` is skipped, so an
 absent setting leaves the lower layer untouched rather than erasing it.
 """
 function apply_overrides(
-    base::MovementAnalysisConfig,
+    base::GeoMotionConfig,
     overlay::Dict{Symbol,Any}
-)::MovementAnalysisConfig
-    fields = fieldnames(MovementAnalysisConfig)
+)::GeoMotionConfig
+    fields = fieldnames(GeoMotionConfig)
     unknown = setdiff(keys(overlay), fields)
     isempty(unknown) || throw(ArgumentError(
         "configuration contains unknown key(s): " *
@@ -337,7 +337,7 @@ function apply_overrides(
         (v === nothing || ismissing(v)) && continue
         values[i] = _coerce_field(f, v)
     end
-    _validate_enum_settings(MovementAnalysisConfig(;
+    _validate_enum_settings(GeoMotionConfig(;
         NamedTuple{fields}(Tuple(values))...))
 end
 
@@ -352,7 +352,7 @@ no error, no warning, just a missing analysis. The same held for `model_modes` a
 `path_methods`. A load-time check turns each of those into an immediate error that
 names the valid values.
 """
-function _validate_enum_settings(config::MovementAnalysisConfig)
+function _validate_enum_settings(config::GeoMotionConfig)
     for (field, valid) in (
         (:diagnostics, DIAGNOSTIC_CHOICES),
         (:model_modes, MODEL_MODE_CHOICES),
@@ -370,24 +370,24 @@ function _validate_enum_settings(config::MovementAnalysisConfig)
 end
 
 """
-    MovementAnalysisConfig(path::AbstractString) -> MovementAnalysisConfig
+    GeoMotionConfig(path::AbstractString) -> GeoMotionConfig
 
 Load a configuration from a TOML file. The resulting object is a fully populated
 config, so it is used directly as a base layer rather than merged field-by-field.
 """
-function MovementAnalysisConfig(path::AbstractString)::MovementAnalysisConfig
+function GeoMotionConfig(path::AbstractString)::GeoMotionConfig
     parsed = TOML.parsefile(path)
     overlay = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in parsed)
-    return apply_overrides(MovementAnalysisConfig(), overlay)
+    return apply_overrides(GeoMotionConfig(), overlay)
 end
 
 """
-    _get(params::MovementAnalysisConfig, field::Symbol, default)
+    _get(params::GeoMotionConfig, field::Symbol, default)
 
 Read a field that a caller may not have configured. Kept for the call sites that
 predate the struct becoming exhaustive.
 """
-_get(params::MovementAnalysisConfig, field::Symbol, default) =
+_get(params::GeoMotionConfig, field::Symbol, default) =
     isdefined(params, field) ? getfield(params, field) : default
 
 """
@@ -437,13 +437,13 @@ one long name and no aliases, so a flag is never accepted under two spellings.
 The dataset is not selected by a flag at all: it is identified by the input
 files named in the TOML configuration.
 
-Every flag is bound to a real `MovementAnalysisConfig` field except `--config`,
+Every flag is bound to a real `GeoMotionConfig` field except `--config`,
 which names the config file itself; a check at the end of this function enforces
 that, so a flag can never parse successfully and then be silently discarded.
 """
 function create_argparse_settings()::ArgParseSettings
     s = ArgParseSettings(
-        description = "MovementAnalysis: mark-recapture movement and connectivity analysis",
+        description = "GeoMotion: mark-recapture movement and connectivity analysis",
         usage = "run_movement.jl [OPTIONS]",
         version = "1.0.0",
         add_version = true,
@@ -770,13 +770,13 @@ function create_argparse_settings()::ArgParseSettings
     # Every flag must set a real field, otherwise it parses successfully and is
     # then discarded without trace. `--config` is the one flag that addresses
     # something other than a field: it names the config file to load.
-    known = Set(fieldnames(MovementAnalysisConfig))
+    known = Set(fieldnames(GeoMotionConfig))
     for fld in s.args_table.fields
         dest = Symbol(fld.dest_name)
         dest === :config && continue
         dest in known || error(
             "CLI flag --$(join(fld.long_opt_name, ", --")) is bound to " *
-            ":$dest, which is not a MovementAnalysisConfig field"
+            ":$dest, which is not a GeoMotionConfig field"
         )
     end
 
@@ -792,7 +792,7 @@ end
         config_path::Union{Nothing,String} = nothing,
         cli_args::Union{Nothing,Vector{String}} = nothing,
         overrides::Union{Nothing,Dict{Symbol,Any}} = nothing
-    ) -> MovementAnalysisConfig
+    ) -> GeoMotionConfig
 
 Resolve the effective configuration from the layered sources described at the top
 of this file. Only flags actually present on the command line override the TOML
@@ -802,10 +802,10 @@ function load_config(;
     config_path::Union{Nothing,String} = nothing,
     cli_args::Union{Nothing,Vector{String}} = nothing,
     overrides::Union{Nothing,Dict{Symbol,Any}} = nothing
-)::MovementAnalysisConfig
+)::GeoMotionConfig
     config = config_path === nothing ?
-        MovementAnalysisConfig() :
-        MovementAnalysisConfig(config_path)
+        GeoMotionConfig() :
+        GeoMotionConfig(config_path)
 
     if cli_args !== nothing
         config = apply_overrides(config, _explicit_cli_overrides(cli_args))
@@ -831,7 +831,7 @@ function _explicit_cli_overrides(args::Vector{String})::Dict{Symbol,Any}
     isempty(args) && return Dict{Symbol,Any}()
     settings = create_argparse_settings()
     parsed = parse_args(args, settings; as_symbols = true)
-    defaults = MovementAnalysisConfig()
+    defaults = GeoMotionConfig()
     out = Dict{Symbol,Any}()
     for (k, v) in pairs(parsed)
         k === :config && continue
@@ -860,7 +860,7 @@ survey_dependent_modes() = Set([:telemetry_and_survey, :ssa_and_survey])
 
 Whether a readable paired survey file is configured.
 """
-has_survey_data(config::MovementAnalysisConfig) =
+has_survey_data(config::GeoMotionConfig) =
     !isnothing(config.surveydata_file) && isfile(config.surveydata_file)
 
 """
@@ -868,7 +868,7 @@ has_survey_data(config::MovementAnalysisConfig) =
 
 Whether a named analysis is in the requested `diagnostics` list.
 """
-wants_diagnostic(config::MovementAnalysisConfig, name::Symbol) =
+wants_diagnostic(config::GeoMotionConfig, name::Symbol) =
     name in config.diagnostics
 
 """
@@ -881,7 +881,7 @@ survey-dependent approach is dropped when no readable survey file is configured,
 so asking for one is not an error -- it is simply not run, and `skipped_modes`
 reports which were dropped and why.
 """
-function effective_model_modes(config::MovementAnalysisConfig)
+function effective_model_modes(config::GeoMotionConfig)
     has_survey_data(config) || return setdiff(config.model_modes, survey_dependent_modes())
     return copy(config.model_modes)
 end
@@ -891,7 +891,7 @@ end
 
 Requested approaches that will not run because their required input is absent.
 """
-function skipped_modes(config::MovementAnalysisConfig)
+function skipped_modes(config::GeoMotionConfig)
     has_survey_data(config) && return Symbol[]
     return intersect(config.model_modes, survey_dependent_modes())
 end
@@ -901,20 +901,20 @@ end
 # =============================================================================
 
 """
-    save_config(config::MovementAnalysisConfig, path::AbstractString)
+    save_config(config::GeoMotionConfig, path::AbstractString)
 
 Write the effective configuration to a TOML file. Useful for recording the exact
 settings behind a particular run, so it round-trips through
-`MovementAnalysisConfig(path)`.
+`GeoMotionConfig(path)`.
 
 A field set to `nothing` is omitted rather than written as an empty string: TOML
 has no null, and an empty string is a real value for a path field, so writing one
 would turn "not configured" into "configured as the current directory". An absent
 key loads back as `nothing`, which keeps the round trip exact.
 """
-function save_config(config::MovementAnalysisConfig, path::AbstractString)
+function save_config(config::GeoMotionConfig, path::AbstractString)
     parsed = Dict{String,Any}()
-    for f in fieldnames(MovementAnalysisConfig)
+    for f in fieldnames(GeoMotionConfig)
         # `show_help` is a command-line artifact, not analysis state. It lives on
         # the struct only so `load_config` can surface it; recording it in a saved
         # config would claim a flag is part of the analysis.

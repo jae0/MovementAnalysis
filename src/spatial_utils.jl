@@ -2,7 +2,7 @@
     spatial_utils.jl
 
 Self-contained spatial partitioning, hexagonal mesh generation, bathymetric
-extraction, hydrodynamic modeling, and field resharding for MovementAnalysis.
+extraction, hydrodynamic modeling, and field resharding for GeoMotion.
 """
 
 using LinearAlgebra
