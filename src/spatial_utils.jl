@@ -1041,7 +1041,7 @@ function load_open_bathymetry(;
     # Check for GeoData or file-based ingestion
     if source in (:etopo, :etopo2022, :geodata, "etopo", "etopo2022", "geodata")
         try
-            bathy_ds = GeoData.fetch_erddap_bathymetry(
+            bathy_ds = GeoDataSources.fetch_erddap_bathymetry(
                 lon_range = (min_lon, max_lon),
                 lat_range = (min_lat, max_lat),
                 verbose = false

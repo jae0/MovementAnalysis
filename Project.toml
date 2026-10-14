@@ -14,6 +14,7 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
 GeoData = "9b6fcbb8-86d6-11e9-1ce7-23a6bb139a78"
+GeoDataSources = "5d0d5f0e-2b6c-4a7e-9f3d-1c8b7a6e5d4f"
 GeoDatasets = "ddc7317b-88db-5cb5-a849-8449e5df04f9"
 GeoInterface = "cf35fbd7-0cd7-5166-be24-54bfbe79505f"
 GeoJSON = "61d90e0f-e114-555e-ac52-39dfb47a3ef9"
@@ -58,3 +59,4 @@ test = ["Test", "DynamicPPL", "ForwardDiff"]
 
 [sources]
 GeoData = {path = "..\\GeoData"}
+GeoDataSources = {path = "..\\GeoDataSources"}

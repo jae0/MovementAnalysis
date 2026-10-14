@@ -720,7 +720,7 @@ function build_geodata_habitat_suitability(
 
     # 1. Obtain bathymetric interpolator
     verbose && println("Fetching GeoData bathymetry for HSI evaluation...")
-    bathy_ds = GeoData.fetch_erddap_bathymetry(
+    bathy_ds = GeoDataSources.fetch_erddap_bathymetry(
         lon_range = lon_range,
         lat_range = lat_range,
         verbose = verbose
@@ -730,7 +730,7 @@ function build_geodata_habitat_suitability(
     # 2. Obtain bottom temperature interpolator
     temp_src = Symbol(temperature_source)
     verbose && println("Fetching GeoData boundary/hydrographic temperature ($(temp_src))...")
-    hydro = GeoData.fetch_boundary_hydrography_geodata(
+    hydro = GeoDataSources.fetch_boundary_hydrography_geodata(
         temp_src;
         lon_range = lon_range,
         lat_range = lat_range,
@@ -852,7 +852,7 @@ function build_dynamic_geodata_hsi_series(
 
     # 1. Bathymetric interpolator (static over time)
     verbose && println("Fetching GeoData bathymetry for dynamic HSI series...")
-    bathy_ds = GeoData.fetch_erddap_bathymetry(
+    bathy_ds = GeoDataSources.fetch_erddap_bathymetry(
         lon_range = lon_range,
         lat_range = lat_range,
         verbose = verbose
@@ -898,7 +898,7 @@ function build_dynamic_geodata_hsi_series(
     temp_src = Symbol(temperature_source)
     for (t_idx, m) in enumerate(months)
         verbose && println("Evaluating GeoData bottom temperature for month $(m)...")
-        hydro_m = GeoData.fetch_boundary_hydrography_geodata(
+        hydro_m = GeoDataSources.fetch_boundary_hydrography_geodata(
             temp_src;
             lon_range = lon_range,
             lat_range = lat_range,

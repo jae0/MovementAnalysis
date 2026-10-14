@@ -34,6 +34,7 @@ using FFTW
 using JLD2
 using Turing
 using GeoData
+using GeoDataSources
 
 # Source modules in logical dependency order
 include("config.jl")
@@ -41,6 +42,7 @@ include("spatial_sources.jl")
 include("spatial_utils.jl")
 include("turing_models.jl")
 include("persistence.jl")
+include("assimilation.jl")
 include("movement.jl")
 include("circuit.jl")
 include("dashboards.jl")
@@ -173,28 +175,17 @@ export
 
     # Interactive HTML / Leaflet & Plots Visualization
     LeafletMap,
+    # NOTE: 18 `leaflet_*` names were exported from this list and defined nowhere.
+    # Importing any of them by name failed with UndefVarError, so the module's own
+    # export list did not describe what the package provides. They are removed
+    # rather than left as decoration -- see FIGURE_CONVENTIONS.md rule 6, degrade
+    # loudly. Building them is a template-engine change: the dashboards that exist
+    # are HTML built by Julia string concatenation, which cannot be made correct
+    # without first being made readable.
     InteractiveMap,
     save_html,
     utm_to_lonlat,
     lonlat_to_utm,
-    leaflet_choropleth,
-    leaflet_spatial_graph,
-    leaflet_tessellation_map,
-    leaflet_hsi_map,
-    leaflet_diffusion_map,
-    leaflet_residence_time_map,
-    leaflet_advection_arrows,
-    leaflet_tracks_map,
-    leaflet_spacetime_map,
-    leaflet_movement_dashboard,
-    leaflet_dispersal_kernel,
-    leaflet_step_diagnostics,
-    leaflet_regional_connectivity,
-    leaflet_ad_ratio_distribution,
-    leaflet_hydrodynamic_dashboard,
-    leaflet_posterior_path_ensemble,
-    leaflet_interactive_corridor_dashboard,
-    leaflet_current_density_map,
     plot_choropleth,
     plot_spatial_graph,
     plot_tessellation_map,
@@ -226,6 +217,12 @@ export
     effective_model_modes,
     skipped_modes,
     wants_diagnostic,
+
+    # Assimilation: the external inputs, converted into the GeoData store
+    movement_store_root,
+    movement_store_status,
+    assimilate_movement_inputs,
+    read_assimilated_movement_inputs,
 
     # Pipeline Orchestration
     movement_parameters_default,

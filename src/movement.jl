@@ -718,22 +718,23 @@ end
     plot_ad_ratio_distribution(advection_field, diffusion_field; mode=:plots)
 
 Generates a diagnostic histogram of the Advection-to-Diffusion ratio across spatial units.
-Supports `mode=:plots` (default Plots.Plot) or `mode=:leaflet` / `mode=:html` (interactive HTML).
+Only `mode = :plots` is implemented; `:leaflet` / `:html` raise, because the
+  figure they would produce is not written. See FIGURE_CONVENTIONS.md.
 """
 function plot_ad_ratio_distribution(advection_field::AbstractVector{<:Real},
   diffusion_field::AbstractVector{<:Real}; mode::Symbol=:plots)
-    if mode == :leaflet || mode == :html
-        return leaflet_ad_ratio_distribution(advection_field, diffusion_field)
-    end
-    ratios = advection_field ./ (mean(diffusion_field) .+ 1e-6)
-    plt = Plots.histogram(
-        ratios, bins=25, title="Advection-to-Diffusion Ratio (Péclet-like)",
-        xlabel="Ratio (Advection / Diffusion)", ylabel="Frequency",
-        label="Spatial Units", color=:plum, linecolor=:white
-    )
-    Plots.vline!(plt, [1.0], color=:red, linestyle=:dash, linewidth=2.0, label="Equilibrium
-      Threshold")
-    return plt
+    mode === :leaflet || mode === :html && error(
+        "The interactive Leaflet form of this figure is not implemented; the " *
+        "conventions it would need are in FIGURE_CONVENTIONS.md. Use mode = :plots.")
+    # One implementation, in the Plots extension. The base previously carried a
+    # line-for-line copy of it, which drifted; delegating means one place to fix.
+    # The extension loads when `Plots` is present, so a clear error beats a
+    # `UndefVarError` naming an internal the caller never wrote.
+    ext = Base.get_extension(MovementAnalysis, :MovementAnalysisPlottingExt)
+    ext === nothing && error(
+        "plot_ad_ratio_distribution needs `Plots`. Add Plots to this environment " *
+        "and the MovementAnalysisPlottingExt extension supplies the figure.")
+    return ext._ad_ratio_histogram_via_plots(advection_field, diffusion_field)
 end
 
 """
